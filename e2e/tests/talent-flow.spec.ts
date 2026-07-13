@@ -8,27 +8,41 @@ const resumeName = 'talenthub-e2e-resume.pdf'
 const minimalPdf = Buffer.from('%PDF-1.4\n% synthetic E2E resume - no personal data\n%%EOF\n')
 
 test.describe.serial('public submission to HR review', () => {
+  test('talent can join with selections and no resume file', async ({ page }) => {
+    await page.goto('http://127.0.0.1:4174')
+    await page.getByRole('button', { name: '加入人才庫' }).first().click()
+    await page.getByLabel('姓名 *').fill('無履歷測試人才')
+    await page.getByLabel('手機（與 Email 擇一）').fill('0912-000-123')
+    await page.getByLabel('希望工作地點').selectOption('遠端工作')
+    await page.getByLabel('職務類別').selectOption('產品／專案管理')
+    await page.getByLabel('工作年資').selectOption({ label: '3–5 年' })
+    await page.getByLabel('主要專長').selectOption('專案管理')
+    await page.getByRole('checkbox').check()
+    await page.getByRole('button', { name: '加入人才庫', exact: true }).last().click()
+    await expect(page.getByRole('heading', { name: '已成功加入人才庫' })).toBeVisible()
+    await expect(page.getByText(/參考編號：\d+/)).toBeVisible()
+  })
+
   test('public career page submits a resume without authentication', async ({ page }) => {
     await page.goto('http://127.0.0.1:4174')
     await expect(page.getByText('不需註冊或登入')).toBeVisible()
     await expect(page.getByText('登入 HR 工作台')).toHaveCount(0)
 
-    await page.getByRole('button', { name: '直接留下履歷' }).click()
+    await page.getByRole('button', { name: '加入人才庫' }).first().click()
     await page.getByLabel('姓名 *').fill(candidateName)
-    await page.getByLabel('Email *').fill('e2e-candidate@example.test')
-    await page.getByLabel('手機 *').fill('0912-345-678')
-    await page.getByLabel('居住地 *').fill('台北市')
-    await page.getByLabel('目前職稱').fill('測試工程師')
-    await page.getByLabel('技能').fill('Playwright, TypeScript')
+    await page.getByLabel('Email（與手機擇一）').fill('e2e-candidate@example.test')
+    await page.getByLabel('希望工作地點').selectOption('台北市')
+    await page.getByLabel('職務類別').selectOption('軟體／資訊')
+    await page.getByLabel('主要專長').selectOption('軟體開發')
     await page.locator('input[type="file"]').setInputFiles({
       name: resumeName,
       mimeType: 'application/pdf',
       buffer: minimalPdf,
     })
     await page.getByRole('checkbox').check()
-    await page.getByRole('button', { name: '送出履歷' }).click()
+    await page.getByRole('button', { name: '加入人才庫', exact: true }).last().click()
 
-    await expect(page.getByRole('heading', { name: '履歷已成功送出' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '已成功加入人才庫' })).toBeVisible()
     await expect(page.getByText(/參考編號：\d+/)).toBeVisible()
   })
 

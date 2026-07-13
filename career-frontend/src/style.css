@@ -3,7 +3,7 @@
 :root { --ink:#173229; --green:#146044; --green-dark:#0d4934; --soft:#eef4ef; --cream:#f7f5ed; --paper:#fff; --muted:#63716b; --line:#dce4df; --danger:#a2342b; font-family:'DM Sans','Noto Sans TC',sans-serif; color:var(--ink); background:#fff; font-synthesis:none; }
 * { box-sizing:border-box; }
 body { margin:0; min-width:320px; line-height:1.65; }
-button,input,textarea { font:inherit; }
+button,input,select,textarea { font:inherit; }
 button { cursor:pointer; }
 h1,h2,p { margin-top:0; }
 h1,h2 { letter-spacing:-.035em; line-height:1.2; }
@@ -40,8 +40,8 @@ em { color:var(--green); font-style:normal; }
 .jobs-toolbar { display:flex; align-items:end; justify-content:space-between; gap:24px; padding-bottom:30px; }
 label { display:block; color:#394b44; font-size:13px; font-weight:700; }
 .search { width:min(500px,100%); }
-input,textarea { display:block; width:100%; margin-top:7px; padding:13px 14px; border:1px solid #c8d2cc; border-radius:6px; outline:none; background:#fff; color:var(--ink); font-weight:400; }
-input:focus,textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px rgba(20,96,68,.1); }
+input,select,textarea { display:block; width:100%; margin-top:7px; padding:13px 14px; border:1px solid #c8d2cc; border-radius:6px; outline:none; background:#fff; color:var(--ink); font-weight:400; }
+input:focus,select:focus,textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px rgba(20,96,68,.1); }
 textarea { resize:vertical; }
 label small { display:block; margin-top:6px; color:var(--muted); font-weight:400; }
 .job-list { border-top:1px solid var(--line); }
@@ -80,6 +80,7 @@ label small { display:block; margin-top:6px; color:var(--muted); font-weight:400
 .form-section { margin-bottom:38px; padding-bottom:38px; border-bottom:1px solid var(--line); }
 .form-section h2 { margin-bottom:22px; font-size:22px; }
 .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:22px; }
+.form-wide { grid-column:1/-1; margin:0; }
 .form-section>label+label { margin-top:22px; }
 .upload { padding:30px; border:1.5px dashed #9bb0a5; border-radius:8px; background:#f8faf8; text-align:center; cursor:pointer; }
 .upload:hover,.upload.chosen { border-color:var(--green); background:#f0f6f2; }

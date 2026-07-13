@@ -1,4 +1,5 @@
 import re
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -8,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models import JobRequisition, ResumeFile
+from app.models import Candidate, JobRequisition, ResumeFile
 from app.repositories.recruitment import RecruitmentRepository
 from app.schemas.public import (
     PublicApplicationCreate,
@@ -16,7 +17,12 @@ from app.schemas.public import (
     PublicJob,
     PublicTalentPoolResult,
 )
-from app.services.applications import submit_application
+from app.services.applications import (
+    normalize_email,
+    normalize_phone,
+    submit_application,
+    sync_candidate_skills,
+)
 from app.services.resume_parser import PARSER_VERSION, parse_resume
 from app.services.storage import prepare_resume_upload
 
@@ -55,6 +61,60 @@ def _parse_into(resume: ResumeFile, path: Path, source_platform: str) -> None:
     resume.error_message = parsed.error_message
 
 
+def _save_talent_profile(
+    db: Session,
+    *,
+    name: str,
+    email: str | None,
+    phone: str | None,
+    city: str | None,
+    current_title: str | None,
+    total_years: float | None,
+    skills: list[str],
+) -> tuple[Candidate, bool]:
+    email_norm = normalize_email(email)
+    phone_norm = normalize_phone(phone)
+    candidate = RecruitmentRepository(db).find_candidate(email_norm, phone_norm)
+    created = candidate is None
+    now = datetime.now(UTC)
+    if candidate is None:
+        candidate = Candidate(
+            code=f"T{now.year}-{now.strftime('%m%d%H%M%S%f')[-10:]}",
+            name=name,
+            email=email.strip() if email else None,
+            email_norm=email_norm,
+            phone=phone,
+            phone_norm=phone_norm,
+            city=city,
+            current_title=current_title,
+            total_years=total_years,
+            source="career_site",
+            status="new",
+            consent_status="consented",
+            consent_at=now,
+            retention_until=date(now.year + 2, now.month, 1),
+        )
+        db.add(candidate)
+        db.flush()
+    else:
+        candidate.name = name or candidate.name
+        candidate.email = candidate.email or (email.strip() if email else None)
+        candidate.email_norm = candidate.email_norm or email_norm
+        candidate.phone = candidate.phone or phone
+        candidate.phone_norm = candidate.phone_norm or phone_norm
+        candidate.city = city or candidate.city
+        candidate.current_title = current_title or candidate.current_title
+        candidate.total_years = (
+            total_years if total_years is not None else candidate.total_years
+        )
+        candidate.consent_status = "consented"
+        candidate.consent_at = now
+    sync_candidate_skills(db, candidate, skills)
+    db.commit()
+    db.refresh(candidate)
+    return candidate, created
+
+
 @router.get("/jobs", response_model=list[PublicJob])
 def list_jobs(db: Session = Depends(get_db)) -> list[PublicJob]:
     return [to_public_job(job) for job in RecruitmentRepository(db).public_jobs()]
@@ -87,7 +147,7 @@ async def create_application(
     cover_letter: str | None = Form(None),
     source_platform: SourcePlatform = Form("direct"),
     consent: bool = Form(...),
-    resume: UploadFile = File(...),
+    resume: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ) -> PublicApplicationResult | PublicTalentPoolResult:
     if job_id is None:
@@ -115,6 +175,11 @@ async def create_application(
             city=city,
             current_title=current_title,
             total_years=total_years,
+            skills=[
+                item.strip()
+                for item in re.split(r"[,，、;|]", skills or "")
+                if item.strip()
+            ],
             linkedin_url=linkedin_url,
             portfolio_url=portfolio_url,
             cover_letter=cover_letter,
@@ -122,6 +187,9 @@ async def create_application(
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    if resume is None:
+        return submit_application(db, payload)
 
     prepared = await prepare_resume_upload(resume)
     upload_data = prepared.upload_data
@@ -163,13 +231,33 @@ async def join_talent_pool(
     cover_letter: str | None = Form(None),
     source_platform: SourcePlatform = Form("direct"),
     consent: bool = Form(...),
-    resume: UploadFile = File(...),
+    resume: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ) -> PublicTalentPoolResult:
     if not consent:
         raise HTTPException(status_code=422, detail="Consent is required")
     if not email and not phone:
         raise HTTPException(status_code=422, detail="Email or phone is required")
+    submitted_skills = [
+        item.strip() for item in re.split(r"[,，、;|]", skills or "") if item.strip()
+    ]
+    if resume is None:
+        candidate, created = _save_talent_profile(
+            db,
+            name=name,
+            email=email,
+            phone=phone,
+            city=city,
+            current_title=current_title,
+            total_years=total_years,
+            skills=submitted_skills,
+        )
+        return PublicTalentPoolResult(
+            candidate_id=candidate.id,
+            status="created" if created else "updated",
+            duplicate=not created,
+        )
+
     prepared = await prepare_resume_upload(resume)
     upload_data = prepared.upload_data
     try:
@@ -179,7 +267,10 @@ async def join_talent_pool(
         if existing:
             prepared.discard()
             return PublicTalentPoolResult(
-                resume_id=existing.id, status=existing.parse_status, duplicate=True
+                resume_id=existing.id,
+                candidate_id=existing.candidate_id,
+                status=existing.parse_status,
+                duplicate=True,
             )
         path = prepared.promote()
         record = ResumeFile(
@@ -201,9 +292,7 @@ async def join_talent_pool(
             "city": city,
             "current_title": current_title,
             "total_years": total_years,
-            "skills": [
-                item.strip() for item in re.split(r"[,，、;|]", skills or "") if item.strip()
-            ],
+            "skills": submitted_skills,
             "self_intro": self_intro or cover_letter,
         }
         for key, value in submitted.items():

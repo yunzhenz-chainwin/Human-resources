@@ -15,10 +15,32 @@ const resume = ref<File | null>(null)
 const submitting = ref(false)
 const submitError = ref('')
 const fileError = ref('')
+const contactError = ref('')
 const resultId = ref<number | undefined>()
 const fileInput = ref<HTMLInputElement | null>(null)
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 const ALLOWED_EXTENSIONS = ['pdf', 'doc', 'docx']
+const cities = [
+  '台北市', '新北市', '桃園市', '台中市', '台南市', '高雄市', '基隆市', '新竹市',
+  '新竹縣', '苗栗縣', '彰化縣', '南投縣', '雲林縣', '嘉義市', '嘉義縣', '屏東縣',
+  '宜蘭縣', '花蓮縣', '台東縣', '澎湖縣', '金門縣', '連江縣', '遠端工作', '其他／海外',
+]
+const roleOptions = [
+  '軟體／資訊', '產品／專案管理', '設計／使用者體驗', '行銷／公關', '業務／客戶服務',
+  '人力資源／行政', '財務／會計', '營運／供應鏈', '工程／製造', '其他',
+]
+const experienceOptions = [
+  { value: 0, label: '尚無正式工作經驗' },
+  { value: 1, label: '1 年以下' },
+  { value: 2, label: '1–3 年' },
+  { value: 4, label: '3–5 年' },
+  { value: 7, label: '5–10 年' },
+  { value: 12, label: '10 年以上' },
+]
+const skillOptions = [
+  '軟體開發', '資料分析／AI', '專案管理', '產品規劃', 'UI／UX 設計', '數位行銷',
+  '業務開發', '客戶服務', '人力資源', '財務會計', '製造工程', '其他',
+]
 
 const emptyForm = (jobId: string | number | null = null): ApplicationForm => ({
   job_id: jobId,
@@ -71,6 +93,7 @@ function startApplication(job: Job | null = null) {
   resume.value = null
   submitError.value = ''
   fileError.value = ''
+  contactError.value = ''
   if (fileInput.value) fileInput.value.value = ''
   go('apply')
 }
@@ -110,8 +133,9 @@ function selectResume(event: Event) {
 
 async function submit() {
   if (submitting.value) return
-  if (!resume.value) {
-    fileError.value = '請選擇履歷檔案。'
+  contactError.value = ''
+  if (!form.value.email && !form.value.phone) {
+    contactError.value = 'Email 或手機請至少填寫一項，方便 HR 與你聯絡。'
     return
   }
   submitError.value = ''
@@ -144,7 +168,7 @@ onMounted(async () => {
     </button>
     <nav aria-label="主要導覽">
       <button @click="go('jobs')">查看職缺</button>
-      <button class="nav-cta" @click="startApplication(null)">留下履歷</button>
+      <button class="nav-cta" @click="startApplication(null)">加入人才庫</button>
     </nav>
   </header>
 
@@ -157,12 +181,12 @@ onMounted(async () => {
           <p class="lead">瀏覽目前職缺，或用幾分鐘留下履歷。沒有適合的職缺也沒關係，我們會將你加入人才庫。</p>
           <div class="actions">
             <button class="primary" @click="go('jobs')">查看職缺</button>
-            <button class="secondary" @click="startApplication(null)">直接留下履歷</button>
+            <button class="secondary" @click="startApplication(null)">加入人才庫</button>
           </div>
         </div>
         <div class="hero-card">
           <span>簡單三步驟</span>
-          <ol><li>填寫基本資料</li><li>上傳現有履歷</li><li>確認並送出</li></ol>
+          <ol><li>填寫基本資料</li><li>選擇工作偏好</li><li>履歷可選填</li></ol>
           <small>不需註冊或登入</small>
         </div>
       </section>
@@ -197,41 +221,42 @@ onMounted(async () => {
       <section class="detail-hero"><button class="back" @click="go('jobs')">← 回到職缺列表</button><span class="tag">{{ selectedJob.department || '招募中' }}</span><h1>{{ selectedJob.title }}</h1><div class="meta"><span>{{ selectedJob.location || '地點面議' }}</span><span>{{ selectedJob.employment_type || '全職' }}</span><span>{{ salary(selectedJob) }}</span></div></section>
       <section class="detail-layout">
         <article class="job-content"><p v-if="detailLoading" class="inline-loading">正在載入完整內容…</p><h2>工作內容</h2><p class="preserve">{{ selectedJob.description || selectedJob.summary || '詳細內容請與招募窗口確認。' }}</p><template v-if="textList(selectedJob.requirements).length"><h2>條件與技能</h2><ul><li v-for="item in textList(selectedJob.requirements)" :key="item">{{ item }}</li></ul></template></article>
-        <aside><div class="apply-box"><h2>對這份工作有興趣？</h2><p>不需建立帳號，填寫資料並上傳履歷即可。</p><button class="primary" @click="startApplication(selectedJob)">立即應徵</button></div></aside>
+        <aside><div class="apply-box"><h2>對這份工作有興趣？</h2><p>不需建立帳號，填寫簡單資料即可；履歷可稍後再提供。</p><button class="primary" @click="startApplication(selectedJob)">立即應徵</button></div></aside>
       </section>
     </template>
 
     <template v-else-if="view === 'apply'">
       <section class="application-page">
         <button class="back" @click="selectedJob ? go('detail') : go('home')">← 返回</button>
-        <div class="application-heading"><p class="eyebrow">RESUME</p><h1>{{ applyTitle }}</h1><p>只填必要資料，約 3 分鐘完成。標示 * 為必填。</p><div v-if="selectedJob" class="selected-job"><span>應徵職缺</span><strong>{{ selectedJob.title }}</strong><button type="button" @click="startApplication(null)">改為加入人才庫</button></div></div>
+        <div class="application-heading"><p class="eyebrow">TALENT PROFILE</p><h1>{{ applyTitle }}</h1><p>只需姓名、至少一種聯絡方式與同意，其他資料及履歷都可選填。</p><div v-if="selectedJob" class="selected-job"><span>應徵職缺</span><strong>{{ selectedJob.title }}</strong><button type="button" @click="startApplication(null)">改為加入人才庫</button></div></div>
         <form @submit.prevent="submit">
           <section class="form-section"><h2>基本資料</h2><div class="form-grid">
             <label>姓名 *<input v-model.trim="form.name" required maxlength="100" autocomplete="name" placeholder="你的姓名"></label>
-            <label>Email *<input v-model.trim="form.email" required type="email" maxlength="255" autocomplete="email" placeholder="name@example.com"></label>
-            <label>手機 *<input v-model.trim="form.phone" required type="tel" minlength="8" maxlength="50" autocomplete="tel" placeholder="09xx-xxx-xxx"></label>
-            <label>居住地 *<input v-model.trim="form.city" required maxlength="50" autocomplete="address-level2" placeholder="例如：台北市"></label>
-            <label>目前職稱<input v-model.trim="form.current_title" maxlength="100" placeholder="例如：前端工程師"></label>
-            <label>總年資（年）<input v-model.number="form.total_years" type="number" min="0" max="80" step="0.5" placeholder="例如：3"></label>
+            <label>Email（與手機擇一）<input v-model.trim="form.email" type="email" maxlength="255" autocomplete="email" placeholder="name@example.com"></label>
+            <label>手機（與 Email 擇一）<input v-model.trim="form.phone" type="tel" minlength="8" maxlength="50" autocomplete="tel" placeholder="09xx-xxx-xxx"></label>
+            <label>希望工作地點<select v-model="form.city"><option value="">暫不提供</option><option v-for="city in cities" :key="city" :value="city">{{ city }}</option></select></label>
+            <label>職務類別<select v-model="form.current_title"><option value="">暫不提供</option><option v-for="role in roleOptions" :key="role" :value="role">{{ role }}</option></select></label>
+            <label>工作年資<select v-model.number="form.total_years"><option :value="null">暫不提供</option><option v-for="item in experienceOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
+            <label>主要專長<select v-model="form.skills"><option value="">暫不提供</option><option v-for="skill in skillOptions" :key="skill" :value="skill">{{ skill }}</option></select></label>
+            <p v-if="contactError" class="field-error form-wide" role="alert">{{ contactError }}</p>
           </div></section>
-          <section class="form-section"><h2>經歷摘要</h2>
-            <label>技能<input v-model.trim="form.skills" maxlength="1000" placeholder="例如：Vue、Python、專案管理（用逗號分隔）"><small>輸入你最熟悉的技能即可。</small></label>
-            <label>簡短自我介紹<textarea v-model.trim="form.cover_letter" maxlength="10000" rows="5" placeholder="簡單說明你的經驗、專長或期待的工作。"></textarea></label>
+          <section v-if="selectedJob" class="form-section"><h2>想補充的內容（選填）</h2>
+            <label>簡短自我介紹<textarea v-model.trim="form.cover_letter" maxlength="10000" rows="4" placeholder="可簡單說明相關經驗或應徵動機，也可以留白。"></textarea></label>
           </section>
-          <section class="form-section"><h2>履歷檔案 *</h2>
-            <label class="upload" :class="{ chosen: resume }"><input ref="fileInput" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required @change="selectResume"><span class="upload-icon">↑</span><b>{{ resume ? resume.name : '選擇履歷檔案' }}</b><small>PDF、DOC、DOCX，最大 10 MB</small></label>
+          <section class="form-section"><h2>履歷檔案（選填）</h2>
+            <label class="upload" :class="{ chosen: resume }"><input ref="fileInput" aria-label="履歷檔案" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" @change="selectResume"><span class="upload-icon">↑</span><b>{{ resume ? resume.name : '有履歷再上傳即可' }}</b><small>可不提供；若上傳，支援 PDF、DOC、DOCX，最大 10 MB</small></label>
             <p v-if="fileError" class="field-error" role="alert">{{ fileError }}</p>
           </section>
           <label class="consent"><input v-model="form.consent" type="checkbox" required><span>我同意 TalentBridge 蒐集與使用上述資料及履歷，作為招募聯繫與人才媒合用途。 *</span></label>
           <div v-if="submitError" class="submit-error" role="alert"><strong>尚未送出</strong><span>{{ submitError }}</span></div>
-          <button class="primary submit" :disabled="submitting" type="submit"><span v-if="submitting" class="button-spinner"></span>{{ submitting ? '正在送出…' : '送出履歷' }}</button>
+          <button class="primary submit" :disabled="submitting" type="submit"><span v-if="submitting" class="button-spinner"></span>{{ submitting ? '正在送出…' : (selectedJob ? '送出應徵' : '加入人才庫') }}</button>
           <p class="privacy-note">送出前請確認聯絡資料正確。成功後畫面會顯示完成通知。</p>
         </form>
       </section>
     </template>
 
     <template v-else-if="view === 'success'">
-      <section class="success-page"><div class="success-check">✓</div><p class="eyebrow">RECEIVED</p><h1>履歷已成功送出</h1><p>{{ selectedJob ? `我們已收到你對「${selectedJob.title}」的應徵。` : '你已加入人才庫，有合適機會時 HR 會與你聯繫。' }}</p><p v-if="resultId" class="reference">參考編號：{{ resultId }}</p><button class="primary" @click="go('jobs')">查看其他職缺</button><button class="text-button" @click="go('home')">回到首頁</button></section>
+      <section class="success-page"><div class="success-check">✓</div><p class="eyebrow">RECEIVED</p><h1>{{ selectedJob ? '應徵資料已成功送出' : '已成功加入人才庫' }}</h1><p>{{ selectedJob ? `我們已收到你對「${selectedJob.title}」的應徵。` : '資料已交給 HR，有合適機會時我們會與你聯繫。' }}</p><p v-if="resultId" class="reference">參考編號：{{ resultId }}</p><button class="primary" @click="go('jobs')">查看其他職缺</button><button class="text-button" @click="go('home')">回到首頁</button></section>
     </template>
   </main>
 

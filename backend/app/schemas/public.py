@@ -30,6 +30,7 @@ class PublicApplicationCreate(BaseModel):
     city: str | None = Field(default=None, max_length=50)
     current_title: str | None = Field(default=None, max_length=100)
     total_years: float | None = Field(default=None, ge=0, le=80)
+    skills: list[str] = Field(default_factory=list, max_length=50)
     cover_letter: str | None = Field(default=None, max_length=10000)
     linkedin_url: HttpUrl | None = None
     portfolio_url: HttpUrl | None = None
@@ -60,6 +61,7 @@ class PublicApplicationResult(BaseModel):
 
 
 class PublicTalentPoolResult(BaseModel):
-    resume_id: int
+    resume_id: int | None = None
+    candidate_id: int | None = None
     status: str
     duplicate: bool

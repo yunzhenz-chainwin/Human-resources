@@ -111,6 +111,48 @@ def test_multipart_application_persists_and_deduplicates(client: TestClient) -> 
     assert resumes[0]["parse_status"] == "pending"
 
 
+def test_talent_profile_can_be_created_without_resume(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/public/applications",
+        data={
+            "name": "Lightweight Talent",
+            "email": "light@example.com",
+            "city": "台北市",
+            "current_title": "軟體／資訊",
+            "total_years": "2",
+            "skills": "軟體開發",
+            "consent": "true",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["resume_id"] is None
+    assert response.json()["candidate_id"] is not None
+    assert response.json()["status"] == "created"
+
+    candidates = client.get("/api/v1/candidates").json()
+    assert len(candidates) == 1
+    assert candidates[0]["name"] == "Lightweight Talent"
+    assert candidates[0]["city"] == "台北市"
+    assert client.get("/api/v1/resumes").json() == []
+
+
+def test_job_application_can_be_submitted_without_resume(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/public/applications",
+        data={
+            "job_id": "1",
+            "name": "No Resume Applicant",
+            "phone": "0912345678",
+            "skills": "資料分析／AI",
+            "consent": "true",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["application_id"] is not None
+    assert response.json()["duplicate"] is False
+    assert client.get("/api/v1/resumes").json() == []
+
+
 def test_application_rejects_draft_job_and_missing_consent(client: TestClient) -> None:
     base = {"name": "Test", "email": "test@example.com", "consent": True}
     assert (

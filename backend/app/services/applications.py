@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Candidate, JobApplication, ResumeFile
+from app.models import Candidate, CandidateSkill, JobApplication, ResumeFile
 from app.repositories.recruitment import RecruitmentRepository
 from app.schemas.public import PublicApplicationCreate, PublicApplicationResult
 
@@ -31,6 +31,29 @@ def normalize_phone(phone: str | None) -> str | None:
     if digits.startswith("886"):
         digits = "0" + digits[3:]
     return digits
+
+
+def sync_candidate_skills(db: Session, candidate: Candidate, skills: list[str]) -> None:
+    existing = {
+        value
+        for value in db.scalars(
+            select(CandidateSkill.skill_norm).where(
+                CandidateSkill.candidate_id == candidate.id
+            )
+        )
+    }
+    for skill in skills:
+        label = skill.strip()
+        normalized = label.casefold()
+        if label and normalized not in existing:
+            db.add(
+                CandidateSkill(
+                    candidate_id=candidate.id,
+                    skill=label,
+                    skill_norm=normalized,
+                )
+            )
+            existing.add(normalized)
 
 
 def submit_application(
@@ -78,6 +101,7 @@ def submit_application(
         db.add(candidate)
         db.flush()
 
+    sync_candidate_skills(db, candidate, payload.skills)
     resume = None
     if upload:
         resume = db.scalar(select(ResumeFile).where(ResumeFile.file_hash == upload.file_hash))

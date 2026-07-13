@@ -50,19 +50,22 @@ export async function getJob(id: string | number): Promise<Job> {
   return normalizeJob(await request<Job>(`/public/jobs/${encodeURIComponent(id)}`))
 }
 
-export async function createApplication(form: ApplicationForm, resume: File): Promise<ApplicationResult> {
+export async function createApplication(
+  form: ApplicationForm,
+  resume: File | null,
+): Promise<ApplicationResult> {
   const body = new FormData()
   if (form.job_id !== null && form.job_id !== '') body.append('job_id', String(form.job_id))
   body.append('name', form.name)
-  body.append('email', form.email)
-  body.append('phone', form.phone)
-  body.append('city', form.city)
-  body.append('current_title', form.current_title)
+  if (form.email) body.append('email', form.email)
+  if (form.phone) body.append('phone', form.phone)
+  if (form.city) body.append('city', form.city)
+  if (form.current_title) body.append('current_title', form.current_title)
   if (form.total_years !== null) body.append('total_years', String(form.total_years))
-  body.append('skills', form.skills)
-  body.append('cover_letter', form.cover_letter)
+  if (form.skills) body.append('skills', form.skills)
+  if (form.cover_letter) body.append('cover_letter', form.cover_letter)
   body.append('consent', String(form.consent))
   body.append('source_platform', form.source_platform)
-  body.append('resume', resume)
+  if (resume) body.append('resume', resume)
   return request<ApplicationResult>('/public/applications', { method: 'POST', body })
 }
