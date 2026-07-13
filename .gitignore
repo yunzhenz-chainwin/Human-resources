@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+pytest-cache-files-*/
+*.log
+*.py[cod]
+backend/.coverage
+frontend/node_modules/
+frontend/dist/
+.idea/
+.vscode/

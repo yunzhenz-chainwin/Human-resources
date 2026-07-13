@@ -1,0 +1,326 @@
+[
+  {
+    "seq": 1,
+    "name": "林建宏",
+    "gender": "M",
+    "birth_year": 1990,
+    "city": "台北",
+    "email": "test01@example.com",
+    "phone": "0912-000-001",
+    "highest_education": "master",
+    "total_years": 10,
+    "current_title": "後端工程師(Python)",
+    "current_company": "頂尖雲端科技股份有限公司",
+    "expected_title": "資深後端工程師",
+    "expected_cities": ["台北", "新北"],
+    "expected_salary_min": 78000,
+    "expected_salary_max": 98000,
+    "availability": "面議",
+    "educations": [
+      { "school": "國立台北科技大學", "major": "資訊工程", "degree": "碩士", "start_ym": "2013-09", "end_ym": "2015-06" },
+      { "school": "淡江大學", "major": "資訊工程", "degree": "學士", "start_ym": "2009-09", "end_ym": "2013-06" }
+    ],
+    "experiences": [
+      { "company": "頂尖雲端科技股份有限公司", "title": "後端工程師(Python)", "industry": "資訊軟體業", "start_ym": "2020-03", "end_ym": null, "description": "負責電商平台後端 API 設計與維運，使用 FastAPI 與 PostgreSQL，導入 Docker 容器化部署與 Redis 快取，將尖峰時段回應時間降低約四成，並帶領三人小組進行程式碼審查。" },
+      { "company": "云智數位股份有限公司", "title": "軟體工程師", "industry": "資訊軟體業", "start_ym": "2016-07", "end_ym": "2020-02", "description": "開發企業內部管理系統與資料串接服務，負責訂單模組與第三方金流整合，撰寫單元測試並維護 CI/CD 流程。" }
+    ],
+    "skills": ["Python", "FastAPI", "Django", "PostgreSQL", "Redis", "Docker", "Git", "REST API"],
+    "languages": [
+      { "language": "英語", "level": "中等" },
+      { "language": "台語", "level": "精通" }
+    ],
+    "certifications": ["AWS Certified Developer"],
+    "summary": "我是擁有十年經驗的後端工程師，專精 Python 生態系與雲端服務。過去主導電商平台的後端重構，透過容器化與快取機制大幅提升系統效能，也習慣以測試與程式碼審查維持團隊品質。個性沉穩、重視溝通，樂於將複雜需求拆解為可維護的架構。期望加入重視技術深度的團隊，持續在高流量系統領域精進。"
+  },
+  {
+    "seq": 2,
+    "name": "陳怡君",
+    "gender": "F",
+    "birth_year": 1995,
+    "city": "新北",
+    "email": "test02@example.com",
+    "phone": "0912-000-002",
+    "highest_education": "bachelor",
+    "total_years": 9,
+    "current_title": "前端工程師(Vue)",
+    "current_company": "亮點互動設計股份有限公司",
+    "expected_title": "資深前端工程師",
+    "expected_cities": ["新北", "台北"],
+    "expected_salary_min": 60000,
+    "expected_salary_max": 78000,
+    "availability": "面議",
+    "educations": [
+      { "school": "輔仁大學", "major": "資訊管理", "degree": "學士", "start_ym": "2013-09", "end_ym": "2017-06" }
+    ],
+    "experiences": [
+      { "company": "亮點互動設計股份有限公司", "title": "前端工程師(Vue)", "industry": "資訊軟體業", "start_ym": "2021-05", "end_ym": null, "description": "以 Vue.js 與 Nuxt 開發企業官網與後台管理介面，建立共用元件庫並導入 TypeScript，改善跨專案開發效率，同時負責與設計師協作落實 RWD 響應式版面。" },
+      { "company": "網際數位有限公司", "title": "網頁前端工程師", "industry": "資訊軟體業", "start_ym": "2017-08", "end_ym": "2021-04", "description": "負責活動網頁與電商前台切版，使用 Vue.js 與 JavaScript 串接後端 API，並優化網頁載入速度與 SEO。" }
+    ],
+    "skills": ["Vue.js", "JavaScript", "TypeScript", "HTML5", "CSS3", "Nuxt.js", "Git", "RWD"],
+    "languages": [
+      { "language": "英語", "level": "中等" },
+      { "language": "台語", "level": "中等" }
+    ],
+    "certifications": [],
+    "summary": "我是專注於前端開發九年的工程師，熟悉 Vue 生態系與元件化開發，喜歡把設計稿轉化為流暢細膩的使用者介面。過去建立過跨專案共用元件庫，也導入 TypeScript 提升團隊協作品質。注重細節與使用體驗，能與設計及後端順暢溝通。期望在產品導向的團隊中，持續打磨前端工程與互動設計能力。"
+  },
+  {
+    "seq": 3,
+    "name": "張家豪",
+    "gender": "M",
+    "birth_year": 1992,
+    "city": "台北",
+    "email": "test03@example.com",
+    "phone": "0912-000-003",
+    "highest_education": "bachelor",
+    "total_years": 11,
+    "current_title": "全端工程師",
+    "current_company": "全方位軟體股份有限公司",
+    "expected_title": "資深全端工程師",
+    "expected_cities": ["台北", "新北"],
+    "expected_salary_min": 70000,
+    "expected_salary_max": 90000,
+    "availability": "面議",
+    "educations": [
+      { "school": "國立中央大學", "major": "資訊工程", "degree": "學士", "start_ym": "2011-09", "end_ym": "2015-06" }
+    ],
+    "experiences": [
+      { "company": "全方位軟體股份有限公司", "title": "全端工程師", "industry": "資訊軟體業", "start_ym": "2019-02", "end_ym": null, "description": "獨立負責 SaaS 產品從前端到後端的開發，前端使用 React、後端以 Node.js 與 MongoDB 建構，並規劃 AWS 部署架構與監控，支援多家企業客戶穩定上線。" },
+      { "company": "銳思科技有限公司", "title": "軟體工程師", "industry": "資訊軟體業", "start_ym": "2015-06", "end_ym": "2019-01", "description": "參與內容管理系統開發，負責前後端功能實作與資料庫設計，並協助新進同仁熟悉專案架構。" }
+    ],
+    "skills": ["React", "Node.js", "JavaScript", "MongoDB", "MySQL", "Express", "AWS", "Git", "Docker"],
+    "languages": [
+      { "language": "英語", "level": "中等" },
+      { "language": "台語", "level": "精通" }
+    ],
+    "certifications": [],
+    "summary": "我是具備十一年經驗的全端工程師，能獨立完成產品從介面到伺服器的整體開發。長期投入 SaaS 產品，熟悉 React 與 Node.js，並具備雲端部署與系統監控經驗。喜歡從使用者需求出發思考架構，重視程式可維護性。期望加入具成長性的產品團隊，承擔更完整的技術規劃與跨端整合工作。"
+  },
+  {
+    "seq": 4,
+    "name": "黃詩涵",
+    "gender": "F",
+    "birth_year": 1993,
+    "city": "新竹",
+    "email": "test04@example.com",
+    "phone": "0912-000-004",
+    "highest_education": "master",
+    "total_years": 8,
+    "current_title": "資料分析師",
+    "current_company": "智數據科技股份有限公司",
+    "expected_title": "資深資料分析師",
+    "expected_cities": ["新竹", "台北"],
+    "expected_salary_min": 65000,
+    "expected_salary_max": 85000,
+    "availability": "面議",
+    "educations": [
+      { "school": "國立清華大學", "major": "統計學", "degree": "碩士", "start_ym": "2016-09", "end_ym": "2018-06" },
+      { "school": "國立中興大學", "major": "應用數學", "degree": "學士", "start_ym": "2012-09", "end_ym": "2016-06" }
+    ],
+    "experiences": [
+      { "company": "智數據科技股份有限公司", "title": "資料分析師", "industry": "資訊軟體業", "start_ym": "2021-09", "end_ym": null, "description": "負責電商與零售客戶的營運數據分析，建立 SQL 資料管線與 Power BI 儀表板，運用 Python 進行客群分群與銷售預測，協助行銷團隊優化投放策略。" },
+      { "company": "宏觀顧問有限公司", "title": "商業分析師", "industry": "顧問業", "start_ym": "2018-07", "end_ym": "2021-08", "description": "協助客戶進行市場調查與資料視覺化報告，整理問卷與交易資料並提出營運建議。" }
+    ],
+    "skills": ["Python", "SQL", "Power BI", "Tableau", "Excel", "Pandas", "統計分析", "資料視覺化"],
+    "languages": [
+      { "language": "英語", "level": "精通" },
+      { "language": "台語", "level": "中等" }
+    ],
+    "certifications": ["Google Data Analytics"],
+    "summary": "我是資料分析領域八年經驗的分析師，統計學碩士背景，擅長從龐雜資料中萃取商業洞察。熟悉 SQL、Python 與 BI 工具，曾為電商客戶建立預測模型與自動化報表，協助團隊做出數據驅動的決策。邏輯清晰、善於將分析結果轉譯為易懂的建議。期望在重視數據文化的企業持續深化分析與模型能力。"
+  },
+  {
+    "seq": 5,
+    "name": "王志明",
+    "gender": "M",
+    "birth_year": 1985,
+    "city": "台北",
+    "email": "test05@example.com",
+    "phone": "0912-000-005",
+    "highest_education": "master",
+    "total_years": 16,
+    "current_title": "軟體專案經理",
+    "current_company": "創新軟體整合股份有限公司",
+    "expected_title": "專案經理／PM主管",
+    "expected_cities": ["台北"],
+    "expected_salary_min": 90000,
+    "expected_salary_max": 120000,
+    "availability": "一個月後",
+    "educations": [
+      { "school": "國立政治大學", "major": "資訊管理", "degree": "碩士", "start_ym": "2008-09", "end_ym": "2010-06" },
+      { "school": "逢甲大學", "major": "資訊工程", "degree": "學士", "start_ym": "2004-09", "end_ym": "2008-06" }
+    ],
+    "experiences": [
+      { "company": "創新軟體整合股份有限公司", "title": "軟體專案經理", "industry": "資訊軟體業", "start_ym": "2017-04", "end_ym": null, "description": "帶領跨部門團隊執行金融與零售產業的系統導入專案，管理時程、預算與利害關係人溝通，同時導入敏捷開發流程，成功交付多個逾千萬規模的專案。" },
+      { "company": "泰鼎資訊股份有限公司", "title": "專案副理", "industry": "資訊軟體業", "start_ym": "2013-01", "end_ym": "2017-03", "description": "負責 ERP 客製化專案的需求訪談與進度控管，協調開發與客戶端，確保專案準時上線。" },
+      { "company": "華鋒科技有限公司", "title": "系統工程師", "industry": "資訊軟體業", "start_ym": "2010-08", "end_ym": "2012-12", "description": "負責系統建置與客戶技術支援，累積需求分析與問題排解經驗。" }
+    ],
+    "skills": ["專案管理", "Scrum", "JIRA", "需求分析", "風險管理", "團隊領導", "Microsoft Project", "溝通協調"],
+    "languages": [
+      { "language": "英語", "level": "精通" },
+      { "language": "台語", "level": "精通" }
+    ],
+    "certifications": ["PMP", "Scrum Master (CSM)"],
+    "summary": "我是十六年資歷的軟體專案經理，從工程師一路成長至專案管理，熟悉軟體開發全生命週期。擅長跨部門協調與利害關係人溝通，曾主導多個大型系統導入專案並準時交付。持有 PMP 認證，善於在時程、預算與品質間取得平衡。期望帶領更具規模的專案團隊，將產業經驗轉化為穩定的交付成果。"
+  },
+  {
+    "seq": 6,
+    "name": "李佳蓉",
+    "gender": "F",
+    "birth_year": 1996,
+    "city": "桃園",
+    "email": "test06@example.com",
+    "phone": "0912-000-006",
+    "highest_education": "bachelor",
+    "total_years": 8.5,
+    "current_title": "人資專員",
+    "current_company": "群策人力資源股份有限公司",
+    "expected_title": "人資專員／資深HR",
+    "expected_cities": ["桃園", "新北"],
+    "expected_salary_min": 42000,
+    "expected_salary_max": 52000,
+    "availability": "可立即上班",
+    "educations": [
+      { "school": "中原大學", "major": "人力資源管理", "degree": "學士", "start_ym": "2013-09", "end_ym": "2017-06" }
+    ],
+    "experiences": [
+      { "company": "群策人力資源股份有限公司", "title": "人資專員", "industry": "人力資源業", "start_ym": "2020-03", "end_ym": "2025-12", "description": "負責招募甄選與到離職作業，經營多元招募管道並優化面試流程，同時處理員工關係與教育訓練規劃，年度招募達成率維持九成以上。" },
+      { "company": "佳緣企業有限公司", "title": "人資助理", "industry": "製造業", "start_ym": "2017-06", "end_ym": "2020-02", "description": "協助出勤與薪資計算、勞健保申報及新人報到作業，維護人事資料系統。" }
+    ],
+    "skills": ["招募甄選", "員工關係", "勞動法規", "教育訓練", "薪資計算", "面試技巧", "Excel", "人事系統"],
+    "languages": [
+      { "language": "英語", "level": "中等" },
+      { "language": "台語", "level": "中等" }
+    ],
+    "certifications": ["勞工行政與勞動法規結業"],
+    "summary": "我是八年多經驗的人資專員，橫跨製造業與人力資源業，熟悉招募到離職的完整流程。擅長經營招募管道並提升面試效率，也負責過教育訓練與員工關係處理。個性親切、細心可靠，重視同仁感受與制度落實。目前可立即上班，期望在重視人才發展的企業，承擔更完整的人資職能與專案。"
+  },
+  {
+    "seq": 7,
+    "name": "吳俊傑",
+    "gender": "M",
+    "birth_year": 1991,
+    "city": "台中",
+    "email": "test07@example.com",
+    "phone": "0912-000-007",
+    "highest_education": "bachelor",
+    "total_years": 12,
+    "current_title": "B2B業務專員",
+    "current_company": "鴻遠貿易股份有限公司",
+    "expected_title": "資深業務專員",
+    "expected_cities": ["台中", "台北"],
+    "expected_salary_min": 42000,
+    "expected_salary_max": 58000,
+    "availability": "面議",
+    "educations": [
+      { "school": "東海大學", "major": "國際企業", "degree": "學士", "start_ym": "2010-09", "end_ym": "2014-06" }
+    ],
+    "experiences": [
+      { "company": "鴻遠貿易股份有限公司", "title": "B2B業務專員", "industry": "批發貿易業", "start_ym": "2018-09", "end_ym": null, "description": "負責工業零組件的企業客戶開發與維護，涵蓋報價、合約洽談與交期協調，開發新客戶超過三十家，連續三年達成業績目標並拓展中部市場。" },
+      { "company": "建達實業有限公司", "title": "業務代表", "industry": "製造業", "start_ym": "2014-07", "end_ym": "2018-08", "description": "負責既有客戶維護與訂單管理，協助處理客訴與售後服務，建立穩定的客戶關係。" }
+    ],
+    "skills": ["業務開發", "客戶關係管理", "商務談判", "報價管理", "市場分析", "CRM", "簡報提案", "跨部門協調"],
+    "languages": [
+      { "language": "英語", "level": "中等" },
+      { "language": "台語", "level": "精通" }
+    ],
+    "certifications": [],
+    "summary": "我是十二年經驗的 B2B 業務，專精工業產品與企業客戶開發，熟悉從陌生開發、報價談判到售後服務的完整流程。過去在中部市場開發逾三十家新客戶並穩定達標，善於建立長期信任關係。個性積極、抗壓性高，樂於出差拜訪。期望加入具產品競爭力的企業，挑戰更大的業績目標與客戶版圖。"
+  },
+  {
+    "seq": 8,
+    "name": "許雅婷",
+    "gender": "F",
+    "birth_year": 1997,
+    "city": "台北",
+    "email": "test08@example.com",
+    "phone": "0912-000-008",
+    "highest_education": "bachelor",
+    "total_years": 6,
+    "current_title": "行銷企劃",
+    "current_company": "潮流行銷顧問股份有限公司",
+    "expected_title": "資深行銷企劃",
+    "expected_cities": ["台北", "新北"],
+    "expected_salary_min": 40000,
+    "expected_salary_max": 52000,
+    "availability": "兩週後",
+    "educations": [
+      { "school": "世新大學", "major": "廣告學", "degree": "學士", "start_ym": "2015-09", "end_ym": "2019-06" }
+    ],
+    "experiences": [
+      { "company": "潮流行銷顧問股份有限公司", "title": "行銷企劃", "industry": "廣告行銷業", "start_ym": "2021-02", "end_ym": "2026-03", "description": "負責品牌社群經營與整合行銷活動規劃，操作 Facebook 與 Instagram 廣告投放，並以 Google Analytics 追蹤成效，帶動客戶官網流量成長逾五成。" },
+      { "company": "悅讀文創有限公司", "title": "行銷助理", "industry": "文創業", "start_ym": "2020-01", "end_ym": "2021-01", "description": "協助活動宣傳素材製作、社群貼文撰寫與媒體聯繫，支援線上線下活動執行。" }
+    ],
+    "skills": ["社群經營", "數位廣告", "內容行銷", "Google Analytics", "Facebook Ads", "文案撰寫", "活動企劃", "Canva"],
+    "languages": [
+      { "language": "英語", "level": "中等" },
+      { "language": "台語", "level": "中等" }
+    ],
+    "certifications": ["Google Analytics 個人認證"],
+    "summary": "我是六年經驗的行銷企劃，專長社群經營與整合行銷，熟悉數位廣告投放與成效分析。曾操盤多檔品牌活動，透過內容與投放策略帶動流量與轉換成長。對趨勢敏銳、文案手感佳，能兼顧創意與數據。可於兩週後到職，期望在重視品牌成長的團隊，負責更完整的行銷策略規劃與執行。"
+  },
+  {
+    "seq": 9,
+    "name": "鄭美玲",
+    "gender": "F",
+    "birth_year": 1988,
+    "city": "高雄",
+    "email": "test09@example.com",
+    "phone": "0912-000-009",
+    "highest_education": "associate",
+    "total_years": 15,
+    "current_title": "會計專員",
+    "current_company": "誠信會計事務所",
+    "expected_title": "資深會計／會計主任",
+    "expected_cities": ["高雄", "台南"],
+    "expected_salary_min": 40000,
+    "expected_salary_max": 50000,
+    "availability": "可立即上班",
+    "educations": [
+      { "school": "文藻外語專科學校", "major": "會計", "degree": "專科", "start_ym": "2006-09", "end_ym": "2008-06" }
+    ],
+    "experiences": [
+      { "company": "誠信會計事務所", "title": "會計專員", "industry": "會計服務業", "start_ym": "2016-05", "end_ym": "2026-02", "description": "負責多家中小企業帳務處理與結帳、營業稅與營所稅申報，並協助財務報表編製與稅務諮詢，熟悉稅法變動並確保客戶申報準時無誤。" },
+      { "company": "南方紡織有限公司", "title": "會計助理", "industry": "製造業", "start_ym": "2010-09", "end_ym": "2016-04", "description": "處理傳票登錄、應收應付帳款與零用金管理，協助月結與盤點作業。" }
+    ],
+    "skills": ["財務報表", "稅務申報", "總帳處理", "應收應付", "成本會計", "Excel", "會計系統", "傳票處理"],
+    "languages": [
+      { "language": "台語", "level": "精通" },
+      { "language": "英語", "level": "略懂" }
+    ],
+    "certifications": ["會計事務-丙級技術士", "會計事務-乙級技術士"],
+    "summary": "我是十五年資歷的會計人員，橫跨製造業與會計事務所，熟悉帳務處理、結帳與各項稅務申報。持有會計事務乙級證照，對稅法與法規變動保持敏感，能獨立完成財報編製並提供稅務建議。個性嚴謹細心、責任感強。目前可立即上班，期望在穩定的企業擔任資深會計，承擔更完整的財稅職責。"
+  },
+  {
+    "seq": 10,
+    "name": "劉建良",
+    "gender": "M",
+    "birth_year": 1990,
+    "city": "台南",
+    "email": "test10@example.com",
+    "phone": "0912-000-010",
+    "highest_education": "bachelor",
+    "total_years": 12,
+    "current_title": "品保工程師",
+    "current_company": "精工品質檢測股份有限公司",
+    "expected_title": "資深品保工程師",
+    "expected_cities": ["台南", "高雄"],
+    "expected_salary_min": 50000,
+    "expected_salary_max": 62000,
+    "availability": "面議",
+    "educations": [
+      { "school": "國立雲林科技大學", "major": "工業工程與管理", "degree": "學士", "start_ym": "2010-09", "end_ym": "2014-06" }
+    ],
+    "experiences": [
+      { "company": "精工品質檢測股份有限公司", "title": "品保工程師", "industry": "製造業", "start_ym": "2018-03", "end_ym": null, "description": "負責產線品質管理與客訴分析，導入 SPC 統計製程管制與 8D 改善流程，主導 ISO 9001 內部稽核，將客訴退貨率降低約三成。" },
+      { "company": "立信電子有限公司", "title": "品管員", "industry": "電子業", "start_ym": "2014-07", "end_ym": "2018-02", "description": "執行進料與出貨檢驗，撰寫檢驗報告並追蹤不良品處理，協助供應商品質改善。" }
+    ],
+    "skills": ["品質管理", "SPC", "ISO 9001", "8D改善", "FMEA", "檢驗規劃", "量測儀器", "Minitab"],
+    "languages": [
+      { "language": "英語", "level": "中等" },
+      { "language": "台語", "level": "精通" }
+    ],
+    "certifications": ["ISO 9001 內部稽核員"],
+    "summary": "我是十二年經驗的品保工程師，熟悉製造與電子產業的品質管理體系。專長 SPC 製程管制、8D 問題分析與 ISO 稽核，曾主導改善專案將客訴退貨率顯著降低。做事有條理、重視數據與根因分析，能與產線及供應商有效協作。期望在重視品質文化的企業，承擔更完整的品質系統規劃與改善工作。"
+  }
+]
