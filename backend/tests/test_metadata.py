@@ -9,6 +9,10 @@ def test_core_tables_are_registered() -> None:
         "candidates",
         "candidate_educations",
         "candidate_experiences",
+        "candidate_activities",
+        "job_requisitions",
+        "resume_files",
+        "job_applications",
     }
 
     assert expected <= set(Base.metadata.tables)

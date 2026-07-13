@@ -1,0 +1,162 @@
+export type ApiResult<T> = { data: T }
+
+export type CandidateStatus = 'new' | 'contacted' | 'priority' | 'interviewing' | 'archived'
+export type CandidateDto = {
+  id: number
+  code: string
+  name: string
+  email: string | null
+  phone: string | null
+  city: string | null
+  current_title: string | null
+  total_years: number | null
+  source: string | null
+  status: CandidateStatus | string
+  created_at: string
+}
+export type CandidateWrite = {
+  name?: string
+  email?: string | null
+  phone?: string | null
+  city?: string | null
+  current_title?: string | null
+  total_years?: number | null
+  source?: string
+  status?: CandidateStatus | string
+}
+export type ActivityDto = {
+  id: number
+  candidate_id: number
+  type: string
+  content: string
+  happened_at: string
+  created_at: string
+}
+export type ActivityWrite = { type: string; content: string; happened_at?: string; next_status?: string }
+
+export type RequisitionDto = {
+  id: number
+  req_no: string
+  title: string
+  department_id: number | null
+  employment_type: string
+  work_city: string
+  jd: string
+  summary: string | null
+  skills: string[] | null
+  salary_min: number | null
+  salary_max: number | null
+  salary_type: string | null
+  headcount: number
+  status: string
+  published_at: string | null
+  created_at: string
+}
+export type RequisitionWrite = Omit<RequisitionDto, 'id' | 'published_at' | 'created_at'>
+
+export type ResumeSource = 'p104' | 'p1111' | 'generic' | 'direct'
+export type ParsedResume = {
+  name?: string
+  email?: string
+  phone?: string
+  city?: string
+  current_title?: string
+  total_years?: number
+  skills?: string[]
+  education?: string
+  experience?: string
+  [key: string]: unknown
+}
+export type ResumeDto = {
+  id: number
+  candidate_id: number | null
+  original_filename: string | null
+  source_platform: string
+  parse_status: 'pending' | 'processing' | 'parsed' | 'needs_review' | 'confirmed' | 'failed' | string
+  parsed_payload: ParsedResume | null
+  field_confidence: Record<string, number> | null
+  overall_confidence: number | null
+  parser_version: string | null
+  error_message: string | null
+  resume_text: string | null
+  file_hash: string | null
+  file_size: number | null
+  mime: string | null
+  resume_url: string | null
+  uploaded_at: string
+  updated_at: string
+  confirmed_at: string | null
+}
+export type ResumeUploadResult = Pick<ResumeDto, 'id' | 'original_filename' | 'source_platform' | 'parse_status'> & { duplicate: boolean }
+export type ResumeConfirmResult = { resume_id: number; candidate_id: number; candidate_code: string; created: boolean }
+
+import { API_BASE, authSession } from './auth'
+
+export { API_BASE }
+
+export async function apiRequest<T>(path: string, init: RequestInit = {}, retry = true): Promise<ApiResult<T>> {
+  const headers = new Headers(init.headers)
+  if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
+  const accessToken = authSession.state.accessToken
+  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}${path}`, { ...init, headers })
+  } catch {
+    throw new Error('無法連線至後端 API，請確認服務是否啟動')
+  }
+  if (response.status === 401 && retry && authSession.state.refreshToken) {
+    await authSession.refreshAccess(accessToken)
+    return apiRequest<T>(path, init, false)
+  }
+  if (!response.ok) {
+    let detail = response.statusText || '請求失敗'
+    try {
+      const body = await response.json() as { detail?: string | { msg?: string }[] }
+      if (typeof body.detail === 'string') detail = body.detail
+      else if (Array.isArray(body.detail)) detail = body.detail.map(item => item.msg).filter(Boolean).join('、') || detail
+    } catch { /* response is not JSON */ }
+    throw new Error(`${response.status}：${detail}`)
+  }
+  if (response.status === 204) return { data: undefined as T }
+  return { data: await response.json() as T }
+}
+
+export const hrApi = {
+  health: () => apiRequest<{ status: string }>('/health'),
+  candidates: (params: { page?: number; page_size?: number } = {}) => {
+    const query = new URLSearchParams({ page: String(params.page || 1), page_size: String(params.page_size || 100) })
+    return apiRequest<CandidateDto[]>(`/candidates?${query}`)
+  },
+  candidate: (id: number) => apiRequest<CandidateDto>(`/candidates/${id}`),
+  saveCandidate: (payload: CandidateWrite, id?: number) => apiRequest<CandidateDto>(`/candidates${id ? `/${id}` : ''}`, {
+    method: id ? 'PATCH' : 'POST', body: JSON.stringify(payload),
+  }),
+  deleteCandidate: (id: number) => apiRequest<void>(`/candidates/${id}`, { method: 'DELETE' }),
+  activities: (candidateId: number) => apiRequest<ActivityDto[]>(`/candidates/${candidateId}/activities`),
+  addActivity: (candidateId: number, payload: ActivityWrite) => apiRequest<ActivityDto>(`/candidates/${candidateId}/activities`, {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+
+  requisitions: (status?: string) => apiRequest<RequisitionDto[]>(`/requisitions${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  saveRequisition: (payload: RequisitionWrite | Partial<RequisitionWrite>, id?: number) => apiRequest<RequisitionDto>(`/requisitions${id ? `/${id}` : ''}`, {
+    method: id ? 'PATCH' : 'POST', body: JSON.stringify(payload),
+  }),
+  approveRequisition: (id: number) => apiRequest<RequisitionDto>(`/requisitions/${id}/approve`, { method: 'POST' }),
+
+  resumes: (status?: string) => apiRequest<ResumeDto[]>(`/resumes${status ? `?parse_status=${encodeURIComponent(status)}&page_size=100` : '?page_size=100'}`),
+  resume: (id: number) => apiRequest<ResumeDto>(`/resumes/${id}`),
+  uploadResumes: (files: File[], source: ResumeSource) => {
+    const body = new FormData()
+    files.forEach(file => body.append('files', file))
+    body.append('source_platform', source)
+    return apiRequest<ResumeUploadResult[]>('/resumes/upload', { method: 'POST', body })
+  },
+  updateResumeParsed: (id: number, parsed_payload: ParsedResume) => apiRequest<ResumeDto>(`/resumes/${id}/parsed`, {
+    method: 'PUT', body: JSON.stringify({ parsed_payload }),
+  }),
+  confirmResume: (id: number, candidateId?: number) => apiRequest<ResumeConfirmResult>(`/resumes/${id}/confirm`, {
+    method: 'POST', body: candidateId ? JSON.stringify({ candidate_id: candidateId }) : undefined,
+  }),
+  reparseResume: (id: number) => apiRequest<ResumeDto>(`/resumes/${id}/reparse`, { method: 'POST' }),
+}

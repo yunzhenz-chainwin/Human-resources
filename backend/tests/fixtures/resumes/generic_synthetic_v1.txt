@@ -1,0 +1,8 @@
+【去識別合成測試資料，非真實履歷】
+姓名：測試丙
+Email：synthetic.generic@example.test
+手機：0977-000-003
+所在地：高雄市
+Title：資料分析師
+工作經驗：3年
+Skills：Python, SQL, Power BI

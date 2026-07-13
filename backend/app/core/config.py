@@ -8,6 +8,33 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_v1_prefix: str = "/api/v1"
     database_url: str = "postgresql+psycopg://talenthub:talenthub_dev_only@localhost:5432/talenthub"
+    cors_origins: str = "http://localhost:5173,http://localhost:5174"
+    resume_storage_path: str = "./storage/resumes"
+    resume_storage_provider: str = "local"
+    resume_quarantine_path: str = "./storage/quarantine"
+    resume_max_bytes: int = 10 * 1024 * 1024
+    resume_scanner: str = "none"
+    resume_scan_policy: str = "allow_unavailable"
+    clamav_host: str = "localhost"
+    clamav_port: int = 3310
+    clamav_timeout: float = 10.0
+    s3_bucket: str = ""
+    s3_endpoint_url: str | None = None
+    s3_region: str | None = None
+    s3_access_key: str | None = None
+    s3_secret_key: str | None = None
+    s3_secure: bool = True
+    auth_secret_key: str = ""
+    auth_access_minutes: int = 15
+    auth_refresh_days: int = 7
+    bootstrap_admin_username: str | None = None
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: str | None = None
+    bootstrap_admin_display_name: str = "System Administrator"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     model_config = SettingsConfigDict(
         env_file=("../.env", ".env"),

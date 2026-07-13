@@ -3,7 +3,7 @@
 > 協助 HR 建立公司自有人才資料庫：自動解析 104 / 1111 下載的履歷並結構化入庫、
 > 讓各部門主管線上提出職缺需求、由系統自動配對推薦人選——縮短找才時間、提高媒合精準度。
 
-**文件版本**：v1.0（2026-07-13）｜**狀態**：規劃階段
+**文件版本**：v1.2（2026-07-13）｜**狀態**：可供 HR 驗收測試
 
 ---
 
@@ -33,12 +33,15 @@
 | [docs/06-前端頁面與後台規劃.md](docs/06-前端頁面與後台規劃.md) | 頁面清單、權限矩陣、關鍵畫面 wireframe |
 | [docs/07-開發時程與里程碑.md](docs/07-開發時程與里程碑.md) | 階段甘特圖、里程碑驗收條件、資源與成本概估 |
 | [docs/08-個資保護與資訊安全.md](docs/08-個資保護與資訊安全.md) | 個資法遵循、同意與保存期限、RBAC 遮罩、資安措施 |
+| [docs/09-postgresql部署與驗證.md](docs/09-postgresql部署與驗證.md) | PostgreSQL、migration、容器啟動與 CI 驗證 |
+| [docs/10-系統元件與資料庫使用手冊.md](docs/10-系統元件與資料庫使用手冊.md) | 依現行程式整理的 DB、資料表、公開前端、Backend API 與 HR 後台入門手冊 |
+| [docs/storage-security.md](docs/storage-security.md) | Local／S3-MinIO 儲存、隔離區與 ClamAV 掃描政策 |
 
 ## 技術棧（建議，理由見 docs/02）
 
-- **前端**：Vue 3 + TypeScript + Vite + Element Plus
-- **後端**：Python 3.12 + FastAPI + SQLAlchemy 2 + Celery（背景解析任務）
-- **資料庫**：PostgreSQL 16（pg_trgm 中文模糊搜尋、JSONB）+ Redis（佇列/快取）
+- **前端**：Vue 3 + TypeScript + Vite
+- **後端**：Python 3.12 + FastAPI + SQLAlchemy 2 + Alembic
+- **資料庫**：PostgreSQL 16；本機與 E2E 可使用 SQLite
 - **檔案儲存**：MinIO（S3 相容）或公司 NAS
 - **部署**：Docker Compose（公司內網主機）
 
@@ -56,7 +59,8 @@ TalentHub/
 │   │   └── workers/         # Celery 任務（解析、排程、通知）
 │   ├── tests/               # 含解析器樣本回歸測試
 │   └── alembic/             # DB migration
-├── frontend/                # Vue 3 SPA
+├── frontend/                # HR／主管／Admin 管理後台（Vue 3 SPA）
+├── career-frontend/         # 公開職涯網站與履歷投遞（Vue 3 SPA）
 ├── deploy/                  # docker-compose.yml、nginx、.env 範本
 └── docs/                    # 本規劃文件
 ```
@@ -77,12 +81,12 @@ TalentHub/
 採用的流程是：HR 以**企業會員身分合法下載**應徵者履歷檔 → 系統對「已下載的檔案」全自動解析入庫，
 並提供「監控資料夾」讓下載後零手動操作。詳見 docs/04 與 docs/08。
 
-## 下一步行動
+## 目前驗收重點
 
-1. 與 HR 確認欄位清單：以 docs/03 的 `candidates` 表為底稿逐欄確認
-2. 蒐集樣本：104、1111 下載履歷各 10 份（用於解析器開發與回歸測試）
-3. 確認部署環境：內網主機規格 / 是否可用 Docker（見 docs/02 §6）
-4. 核定時程與人力（見 docs/07），啟動 Phase 1
+1. 由 HR 逐頁測試人才庫、履歷校對、職缺、智慧配對、報表與權限管理。
+2. 提供去識別化的真實 104／1111 履歷樣本，持續校準版本化 parser。
+3. 在預備環境啟用 PostgreSQL、MinIO 與 ClamAV，依文件執行 migration 與 smoke test。
+4. 依實際測試回饋調整欄位、篩選條件、配對權重與操作流程。
 
 ## 開發環境快速啟動
 
@@ -92,13 +96,18 @@ TalentHub/
 Copy-Item .env.example .env
 ```
 
+首次啟動前，請在 `.env` 設定長度至少 32 bytes 的 `AUTH_SECRET_KEY`，並暫時設定
+`BOOTSTRAP_ADMIN_USERNAME`、`BOOTSTRAP_ADMIN_EMAIL`、`BOOTSTRAP_ADMIN_PASSWORD`（至少 12 字元）。
+首次管理員建立後，請移除三個 bootstrap 帳密設定；系統沒有公開註冊端點。
+
 有 Docker 的環境可從專案根目錄啟動完整服務：
 
 ```powershell
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
-- 前端：<http://localhost:8080>
+- HR 管理後台：<http://localhost:8080>
+- 公開職涯網站：<http://localhost:8081>
 - API 文件：<http://localhost:8000/docs>
 - 健康檢查：<http://localhost:8000/api/v1/health>
 
@@ -106,21 +115,39 @@ docker compose -f deploy/docker-compose.yml up --build
 
 ```powershell
 python -m pip install -e "backend[dev]"
-python -m uvicorn app.main:app --app-dir backend --reload
+Set-Location backend
+$env:DATABASE_URL = "sqlite:///./talenthub-dev.db"
+python -m alembic upgrade head
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
 ```powershell
 Set-Location frontend
-npm install
+npm ci
 npm run dev
 ```
+
+另開一個終端機啟動公開職涯網站：
+
+```powershell
+Set-Location career-frontend
+npm ci
+npm run dev
+```
+
+預設開發 port：HR 後台 `5173`、公開網站 `5174`、API `8000`。若 API port
+已被其他程式使用，可設定 `VITE_API_PROXY_TARGET` 後再啟動公開網站。
 
 驗證指令：
 
 ```powershell
 Set-Location backend
 python -m pytest -q
-python -m ruff check app tests
+python -m ruff check .
 Set-Location ../frontend
 npm run build
+Set-Location ../career-frontend
+npm run build
+Set-Location ../e2e
+npm test
 ```

@@ -1,0 +1,57 @@
+name: Backend PostgreSQL
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-postgres.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-postgres.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: talenthub_test
+          POSTGRES_USER: talenthub
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U talenthub -d talenthub_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://talenthub:ci-only-password@localhost:5432/talenthub_test
+      AUTH_SECRET_KEY: ci-only-secret-key-with-at-least-32-characters
+      RESUME_STORAGE_PATH: ${{ github.workspace }}/backend/storage/test-resumes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend
+        run: python -m pip install -e ".[dev]"
+      - name: Check single migration head
+        run: test "$(python -m alembic heads | wc -l)" -eq 1
+      - name: Migrate empty PostgreSQL database
+        run: python -m alembic upgrade head
+      - name: Verify migrated schema
+        run: python scripts/postgres_schema_smoke.py
+      - name: Run backend tests against PostgreSQL
+        run: python -m pytest -q
+      - name: Lint backend
+        run: python -m ruff check app tests scripts
