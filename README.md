@@ -33,9 +33,7 @@
 | [docs/06-前端頁面與後台規劃.md](docs/06-前端頁面與後台規劃.md) | 頁面清單、權限矩陣、關鍵畫面 wireframe |
 | [docs/07-開發時程與里程碑.md](docs/07-開發時程與里程碑.md) | 階段甘特圖、里程碑驗收條件、資源與成本概估 |
 | [docs/08-個資保護與資訊安全.md](docs/08-個資保護與資訊安全.md) | 個資法遵循、同意與保存期限、RBAC 遮罩、資安措施 |
-| [docs/09-postgresql部署與驗證.md](docs/09-postgresql部署與驗證.md) | PostgreSQL、migration、容器啟動與 CI 驗證 |
-| [docs/10-系統元件與資料庫使用手冊.md](docs/10-系統元件與資料庫使用手冊.md) | 依現行程式整理的 DB、資料表、公開前端、Backend API 與 HR 後台入門手冊 |
-| [docs/storage-security.md](docs/storage-security.md) | Local／S3-MinIO 儲存、隔離區與 ClamAV 掃描政策 |
+| [docs/10-系統元件與資料庫使用手冊.md](docs/10-系統元件與資料庫使用手冊.md) | DB、資料表、前後端、PostgreSQL 部署、Local／S3-MinIO 儲存及 ClamAV 掃描手冊 |
 
 ## 技術棧（建議，理由見 docs/02）
 
