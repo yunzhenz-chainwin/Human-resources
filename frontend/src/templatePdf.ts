@@ -25,6 +25,31 @@ window.downloadEditedResumePdf = async () => {
       windowHeight: page.scrollHeight,
     })
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+    const field = (name: string) =>
+      document.querySelector<HTMLElement>(`[data-field="${name}"]`)?.textContent?.trim() || ''
+    const years = Number(field('total_years').match(/\d+(?:\.\d+)?/)?.[0] || 0)
+    const splitList = (value: string) => value.split(/[,，、;；/\n]+/).map(item => item.trim()).filter(Boolean)
+    const structuredResume = {
+      schema: 'talenthub.resume.v1',
+      name: field('name'),
+      email: field('email'),
+      phone: field('phone'),
+      city: field('city'),
+      current_title: field('current_title'),
+      total_years: years,
+      highest_education: field('highest_education'),
+      expected_title: field('expected_title'),
+      expected_cities: splitList(field('expected_cities')),
+      skills: splitList(field('skills')),
+    }
+    const encoded = new TextEncoder().encode(JSON.stringify(structuredResume))
+    let binary = ''
+    encoded.forEach(byte => { binary += String.fromCharCode(byte) })
+    pdf.setProperties({
+      title: `TalentHub 履歷 - ${structuredResume.name}`,
+      subject: `THR1:${btoa(binary)}`,
+      creator: 'TalentHub Resume Template',
+    })
     const pageWidth = 210
     const pageHeight = 297
     const imageHeight = (canvas.height * pageWidth) / canvas.width

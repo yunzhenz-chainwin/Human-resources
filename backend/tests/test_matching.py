@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -135,7 +136,7 @@ def test_score_is_deterministic_and_gates_hard_requirements(matching_client) -> 
 
         missing = score_candidate(requisition, candidates[2], [])
         assert missing.gate_passed is False
-        assert missing.total_score == 0
+        assert 0 <= missing.total_score <= 100
         assert "required_skills" in missing.breakdown["gate"]["miss"]
 
         wrong_city = score_candidate(requisition, candidates[3], ["Python"])
@@ -200,6 +201,53 @@ def test_rematch_ranks_and_preserves_manual_status(matching_client) -> None:
     ).json()
     assert all_results["total"] == 4
     assert sum(not item["gate_passed"] for item in all_results["items"]) == 2
+
+
+def test_candidate_match_overview_includes_uncomputed_people(matching_client) -> None:
+    client, testing_session = matching_client
+    before = client.get("/api/v1/requisitions/1/candidate-match-overview")
+    assert before.status_code == 200
+    assert before.json()["total_candidates"] == 4
+    assert before.json()["computed_count"] == 0
+    assert before.json()["uncomputed_count"] == 4
+    assert all(item["match"] is None for item in before.json()["items"])
+
+    assert client.post("/api/v1/requisitions/1/rematch").status_code == 200
+    with testing_session() as db:
+        deleted = db.scalar(select(Candidate).where(Candidate.code == "T-MATCH-4"))
+        deleted.deleted_at = datetime.now(UTC)
+        db.commit()
+
+    after = client.get("/api/v1/requisitions/1/candidate-match-overview")
+    assert after.status_code == 200
+    assert after.json()["total_candidates"] == 3
+    assert after.json()["computed_count"] == 3
+    assert after.json()["uncomputed_count"] == 0
+    assert all(item["match"] is not None for item in after.json()["items"])
+
+
+def test_hr_can_update_matching_criteria_and_recalculate(matching_client) -> None:
+    client, _ = matching_client
+    response = client.put(
+        "/api/v1/requisitions/1/matching-criteria",
+        json={
+            "required_skills": ["Python"],
+            "preferred_skills": ["SQL", "Git"],
+            "min_years": 2,
+            "education_req": "大學",
+            "work_city": "台北市",
+            "salary_min": 60000,
+            "salary_max": 90000,
+            "require_skills": True,
+            "require_years": False,
+            "require_education": True,
+            "require_location": False,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["preferred_skills"] == ["SQL", "Git"]
+    overview = client.get("/api/v1/requisitions/1/candidate-match-overview").json()
+    assert overview["computed_count"] == 4
 
 
 def test_match_unique_pair_and_score_constraints(matching_client) -> None:

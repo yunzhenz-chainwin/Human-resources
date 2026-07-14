@@ -33,6 +33,8 @@ class CandidateRead(BaseModel):
     total_years: float | None
     source: str | None
     status: str
+    has_photo: bool
+    photo_updated_at: datetime | None
     created_at: datetime
 
 

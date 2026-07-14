@@ -1,10 +1,14 @@
+import base64
+import json
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+from pypdf import PdfWriter
 
 from app.parsers import select_adapter
 from app.parsers.registry import detect_source
-from app.services.resume_parser import parse_text
+from app.services.resume_parser import parse_resume, parse_text
 
 FIXTURES = Path(__file__).parent / "fixtures" / "resumes"
 
@@ -131,3 +135,55 @@ def test_ocr_name_without_colon_is_recovered() -> None:
         "E-mail: candidate@example.com\n聯絡電話: 0912-345-678"
     )
     assert result.payload["name"] == "王小明"
+
+
+def test_talenthub_pdf_metadata_restores_exact_fields() -> None:
+    expected = {
+        "schema": "talenthub.resume.v1",
+        "name": "王小明",
+        "email": "candidate@example.com",
+        "phone": "0912-345-678",
+        "city": "臺北市中正區",
+        "current_title": "產品企劃",
+        "total_years": 3,
+        "highest_education": "大學",
+        "expected_title": "產品企劃／專案管理",
+        "expected_cities": ["臺北市", "新北市"],
+        "skills": ["Excel", "Power BI", "SQL", "專案管理", "跨部門溝通"],
+    }
+    encoded = base64.b64encode(
+        json.dumps(expected, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    path = Path("storage") / f"metadata-test-{uuid4().hex}.pdf"
+    path.parent.mkdir(exist_ok=True)
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.add_metadata({"/Subject": f"THR1:{encoded}"})
+    with path.open("wb") as stream:
+        writer.write(stream)
+
+    try:
+        result = parse_resume(path, "generic")
+    finally:
+        path.unlink(missing_ok=True)
+
+    assert result.source_platform == "direct"
+    assert result.status == "parsed"
+    assert result.source_review_required is False
+    assert result.payload == {key: value for key, value in expected.items() if key != "schema"}
+    assert result.source_evidence == [
+        {
+            "type": "structured_pdf_metadata",
+            "marker": "talenthub.resume.v1",
+            "weight": 1.0,
+        }
+    ]
+
+
+def test_generic_template_labels_map_title_and_skills() -> None:
+    result = parse_text(
+        "姓名：王小明\nEmail：candidate@example.com\n"
+        "職務類別：產品企劃\n技能與專長：Excel、Power BI、SQL、專案管理"
+    )
+    assert result.payload["current_title"] == "產品企劃"
+    assert result.payload["skills"] == ["excel", "power bi", "sql", "專案管理"]

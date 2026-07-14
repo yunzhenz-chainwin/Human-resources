@@ -129,8 +129,7 @@ def _location_score(candidate: Candidate, work_city: str) -> float:
     if work in cities:
         return 1.0
     adjacent = {
-        normalize_text(city)
-        for city in ADJACENT_CITIES.get(normalize_text(work_city), set())
+        normalize_text(city) for city in ADJACENT_CITIES.get(normalize_text(work_city), set())
     }
     return 0.6 if cities & adjacent else 0.2
 
@@ -173,6 +172,7 @@ def score_candidate(
     work_city = normalize_text(requisition.work_city)
 
     gate_misses: list[str] = []
+    config = requisition.match_weights or {}
     if candidate.deleted_at is not None:
         gate_misses.append("candidate_deleted")
     if candidate.is_blacklisted:
@@ -181,13 +181,25 @@ def score_candidate(
         gate_misses.append("consent_withdrawn")
     if candidate.status in EXCLUDED_CANDIDATE_STATUSES:
         gate_misses.append(f"status:{candidate.status}")
-    if required_misses:
+    if config.get("require_skills", True) and required_misses:
         gate_misses.append("required_skills")
-    if min_years is not None and (years is None or years < min_years):
+    if (
+        config.get("require_years", True)
+        and min_years is not None
+        and (years is None or years < min_years)
+    ):
         gate_misses.append("minimum_years")
-    if required_education and candidate_education < required_education:
+    if (
+        config.get("require_education", True)
+        and required_education
+        and candidate_education < required_education
+    ):
         gate_misses.append("education")
-    if expected_cities and work_city not in expected_cities:
+    if (
+        config.get("require_location", True)
+        and expected_cities
+        and work_city not in expected_cities
+    ):
         gate_misses.append("location")
 
     skill_denominator = len(required) * 2 + len(preferred)
@@ -260,7 +272,10 @@ def score_candidate(
         if key == "skill":
             breakdown[key]["evidence"] = skill_evidence
     passed = not gate_misses
-    total = round(min(100.0, max(0.0, weighted_total * 100)), 2) if passed else 0.0
+    # Keep the fit score visible even when a hard requirement fails.  The gate and
+    # its concrete reasons remain separate, so HR sees useful evidence instead of
+    # a misleading 0.0% for every ineligible person.
+    total = round(min(100.0, max(0.0, weighted_total * 100)), 2)
     breakdown["recommendation"] = (
         "ineligible"
         if not passed
@@ -276,9 +291,9 @@ def score_candidate(
 def rematch_requisition(db: Session, requisition: JobRequisition) -> list[MatchResult]:
     candidates = list(
         db.scalars(
-            select(Candidate).options(
-                selectinload(Candidate.skills), selectinload(Candidate.educations)
-            )
+            select(Candidate)
+            .options(selectinload(Candidate.skills), selectinload(Candidate.educations))
+            .where(Candidate.deleted_at.is_(None))
         ).all()
     )
     existing = {

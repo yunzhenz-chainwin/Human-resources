@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import MetaData, Table, func, inspect, or_, select
+from sqlalchemy import MetaData, String, Table, cast, func, inspect, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -12,6 +12,7 @@ from app.schemas.admin import (
     CatalogRead,
     DatabaseColumnRead,
     DatabaseOverviewRead,
+    DatabaseTablePreviewRead,
     DatabaseTableRead,
     DepartmentCreate,
     DepartmentRead,
@@ -30,6 +31,43 @@ from app.services.security import hash_password, write_audit
 router = APIRouter(prefix="/admin")
 admin_user = require_system_admin
 user_admin = require_user_admin
+
+_REDACTED_COLUMN_MARKERS = (
+    "password", "hash", "token", "secret", "api_key", "private_key",
+    "encryption_key", "raw_text", "parsed_text",
+)
+
+# Keep database identifiers stable for migrations/integrations while presenting
+# operational names that are understandable to IT and HR stakeholders.
+_TABLE_PRESENTATION: dict[str, tuple[str, str]] = {
+    "alembic_version": ("資料庫版本", "目前資料庫結構版本與遷移紀錄"),
+    "audit_logs": ("操作稽核紀錄", "後台重要操作與異動軌跡"),
+    "candidate_activities": ("人才活動紀錄", "人才聯繫、面談與狀態異動歷程"),
+    "candidate_educations": ("人才學歷", "履歷解析或人工維護的學歷資料"),
+    "candidate_experiences": ("人才工作經歷", "履歷解析或人工維護的工作經歷"),
+    "candidate_skills": ("人才技能", "人才具備的技能與熟練度"),
+    "candidates": ("人才主檔", "人才基本資料與聯絡資訊"),
+    "departments": ("部門資料", "公司部門與組織歸屬"),
+    "job_applications": ("職缺應徵紀錄", "人才、職缺與使用履歷的關聯"),
+    "job_requisitions": ("職缺資料", "招募職缺、需求條件與媒合權重"),
+    "match_results": ("人才媒合結果", "人才與職缺的媒合分數及評分明細"),
+    "refresh_tokens": ("登入更新權杖", "登入工作階段的安全更新權杖"),
+    "resume_files": ("履歷檔案與解析紀錄", "每份履歷的檔案索引、來源、解析內容及人才關聯"),
+    "skill_catalog": ("技能目錄", "系統可用的標準技能清單"),
+    "system_issues": ("系統維護問題", "IT 問題追蹤、預計時程與處理進度"),
+    "system_settings": ("系統設定", "平台功能與安全性設定"),
+    "tags": ("人才標籤", "人才分類與搜尋標籤"),
+    "users": ("後台登入人員", "IT、HR 與主管帳號及權限"),
+}
+
+
+def _table_presentation(table_name: str) -> tuple[str, str]:
+    return _TABLE_PRESENTATION.get(table_name, (table_name, "系統資料表"))
+
+
+def _is_redacted_column(column_name: str) -> bool:
+    normalized = column_name.lower()
+    return any(marker in normalized for marker in _REDACTED_COLUMN_MARKERS)
 
 
 def _enforce_hr_user_scope(actor: User, target_role: str, target: User | None = None) -> None:
@@ -378,6 +416,7 @@ def database_overview(
     metadata = MetaData()
     tables: list[DatabaseTableRead] = []
     for table_name in sorted(inspector.get_table_names()):
+        display_name, description = _table_presentation(table_name)
         columns = inspector.get_columns(table_name)
         primary_keys = set(
             (inspector.get_pk_constraint(table_name) or {}).get("constrained_columns") or []
@@ -391,6 +430,8 @@ def database_overview(
         tables.append(
             DatabaseTableRead(
                 name=table_name,
+                display_name=display_name,
+                description=description,
                 row_count=row_count,
                 columns=[
                     DatabaseColumnRead(
@@ -398,6 +439,7 @@ def database_overview(
                         type=str(column["type"]),
                         nullable=bool(column.get("nullable", True)),
                         primary_key=column["name"] in primary_keys,
+                        redacted=_is_redacted_column(column["name"]),
                     )
                     for column in columns
                 ],
@@ -409,4 +451,49 @@ def database_overview(
         server_version=version,
         transport_security="local process" if dialect == "sqlite" else "deployment managed",
         tables=tables,
+    )
+
+
+@router.get("/database/tables/{table_name}/rows", response_model=DatabaseTablePreviewRead)
+def database_table_preview(
+    table_name: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=100),
+    _: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> DatabaseTablePreviewRead:
+    """Preview rows for IT diagnostics without exposing secrets."""
+    connection = db.connection()
+    inspector = inspect(connection)
+    # Reflect only inspector-discovered names; never interpolate route input into SQL.
+    if table_name not in inspector.get_table_names():
+        raise HTTPException(status_code=404, detail="Database table not found")
+    table = Table(table_name, MetaData(), autoload_with=connection)
+    display_name, description = _table_presentation(table_name)
+    redacted_columns = [c.name for c in table.columns if _is_redacted_column(c.name)]
+    visible = [c for c in table.columns if c.name not in redacted_columns]
+    searchable = [c for c in visible if isinstance(c.type, String)]
+    normalized_search = (search or "").strip()
+    count_statement = select(func.count()).select_from(table)
+    rows_statement = select(*visible).select_from(table)
+    if normalized_search and searchable:
+        condition = or_(*(cast(c, String).ilike(f"%{normalized_search}%") for c in searchable))
+        count_statement = count_statement.where(condition)
+        rows_statement = rows_statement.where(condition)
+    primary_keys = list(table.primary_key.columns)
+    if primary_keys:
+        rows_statement = rows_statement.order_by(*(c.desc() for c in primary_keys))
+    rows_statement = rows_statement.offset((page - 1) * page_size).limit(page_size)
+    return DatabaseTablePreviewRead(
+        table_name=table_name,
+        display_name=display_name,
+        description=description,
+        page=page,
+        page_size=page_size,
+        total=int(db.scalar(count_statement) or 0),
+        searchable_columns=[c.name for c in searchable],
+        visible_columns=[c.name for c in visible],
+        redacted_columns=redacted_columns,
+        rows=[dict(row._mapping) for row in db.execute(rows_statement)],
     )

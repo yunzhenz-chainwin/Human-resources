@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -119,6 +119,8 @@ class SystemIssueCreate(BaseModel):
     page: str = Field(min_length=1, max_length=255)
     severity: IssueSeverity = "medium"
     status: IssueStatus = "open"
+    progress_percent: int = Field(default=0, ge=0, le=100)
+    expected_completion_date: date | None = None
     reproduction_steps: str | None = Field(default=None, max_length=20000)
     resolution_notes: str | None = Field(default=None, max_length=20000)
 
@@ -129,6 +131,8 @@ class SystemIssueUpdate(BaseModel):
     page: str | None = Field(default=None, min_length=1, max_length=255)
     severity: IssueSeverity | None = None
     status: IssueStatus | None = None
+    progress_percent: int | None = Field(default=None, ge=0, le=100)
+    expected_completion_date: date | None = None
     reproduction_steps: str | None = Field(default=None, max_length=20000)
     resolution_notes: str | None = Field(default=None, max_length=20000)
 
@@ -141,6 +145,8 @@ class SystemIssueRead(BaseModel):
     page: str
     severity: str
     status: str
+    progress_percent: int
+    expected_completion_date: date | None
     reproduction_steps: str | None
     resolution_notes: str | None
     created_by_user_id: int | None
@@ -154,10 +160,13 @@ class DatabaseColumnRead(BaseModel):
     type: str
     nullable: bool
     primary_key: bool
+    redacted: bool = False
 
 
 class DatabaseTableRead(BaseModel):
     name: str
+    display_name: str
+    description: str
     row_count: int | None
     columns: list[DatabaseColumnRead]
 
@@ -168,3 +177,16 @@ class DatabaseOverviewRead(BaseModel):
     server_version: str | None
     transport_security: str
     tables: list[DatabaseTableRead]
+
+
+class DatabaseTablePreviewRead(BaseModel):
+    table_name: str
+    display_name: str
+    description: str
+    page: int
+    page_size: int
+    total: int
+    searchable_columns: list[str]
+    visible_columns: list[str]
+    redacted_columns: list[str]
+    rows: list[dict[str, Any]]

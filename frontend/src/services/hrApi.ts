@@ -12,6 +12,8 @@ export type CandidateDto = {
   total_years: number | null
   source: string | null
   status: CandidateStatus | string
+  has_photo: boolean
+  photo_updated_at: string | null
   created_at: string
 }
 export type CandidateWrite = {
@@ -128,6 +130,19 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}, retry 
   return { data: await response.json() as T }
 }
 
+async function apiBlob(path: string, retry = true): Promise<Blob> {
+  const headers = new Headers()
+  const accessToken = authSession.state.accessToken
+  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
+  const response = await fetch(`${API_BASE}${path}`, { headers })
+  if (response.status === 401 && retry && authSession.state.refreshToken) {
+    await authSession.refreshAccess(accessToken)
+    return apiBlob(path, false)
+  }
+  if (!response.ok) throw new Error(`無法讀取人才照片（${response.status}）`)
+  return response.blob()
+}
+
 export const hrApi = {
   health: () => apiRequest<{ status: string }>('/health'),
   candidates: (params: { page?: number; page_size?: number } = {}) => {
@@ -139,6 +154,13 @@ export const hrApi = {
     method: id ? 'PATCH' : 'POST', body: JSON.stringify(payload),
   }),
   deleteCandidate: (id: number) => apiRequest<void>(`/candidates/${id}`, { method: 'DELETE' }),
+  candidatePhoto: (id: number) => apiBlob(`/candidates/${id}/photo`),
+  uploadCandidatePhoto: (id: number, photo: File) => {
+    const body = new FormData()
+    body.append('photo', photo)
+    return apiRequest<CandidateDto>(`/candidates/${id}/photo`, { method: 'PUT', body })
+  },
+  deleteCandidatePhoto: (id: number) => apiRequest<void>(`/candidates/${id}/photo`, { method: 'DELETE' }),
   activities: (candidateId: number) => apiRequest<ActivityDto[]>(`/candidates/${candidateId}/activities`),
   addActivity: (candidateId: number, payload: ActivityWrite) => apiRequest<ActivityDto>(`/candidates/${candidateId}/activities`, {
     method: 'POST', body: JSON.stringify(payload),

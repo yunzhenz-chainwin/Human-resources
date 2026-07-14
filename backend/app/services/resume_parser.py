@@ -1,13 +1,18 @@
+import base64
+import binascii
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from docx import Document
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 from app.parsers import select_adapter
 from app.services.ocr import extract_pdf_with_ocr
 
-PARSER_VERSION = "adapters-2.1"
+PARSER_VERSION = "adapters-2.2"
 
 # OCR (Tesseract) 對中文常見的雜訊:字與字之間插入空白、標點變成小型/直排異體字。
 # 只針對 OCR 產出的文字做正規化,數位 PDF 的文字層不受影響。
@@ -49,6 +54,73 @@ class ParserResult:
     source_evidence: list[dict] | None = None
     source_review_required: bool = True
     error_message: str | None = None
+
+
+def _structured_pdf_payload(path: Path) -> dict | None:
+    """Read trusted-shape TalentHub fields embedded by the local PDF template."""
+    try:
+        metadata = PdfReader(str(path)).metadata
+        subject = str(metadata.get("/Subject", "")) if metadata else ""
+        if not subject.startswith("THR1:") or len(subject) > 20_000:
+            return None
+        decoded = base64.b64decode(subject[5:], validate=True)
+        source = json.loads(decoded.decode("utf-8"))
+        if not isinstance(source, dict) or source.get("schema") != "talenthub.resume.v1":
+            return None
+
+        limits = {
+            "name": 100,
+            "email": 255,
+            "phone": 50,
+            "city": 50,
+            "current_title": 100,
+            "current_company": 100,
+            "highest_education": 20,
+            "expected_title": 100,
+        }
+        payload: dict = {}
+        for field, limit in limits.items():
+            value = source.get(field)
+            if isinstance(value, str) and value.strip():
+                payload[field] = value.strip()[:limit]
+        years = source.get("total_years")
+        if isinstance(years, (int, float)) and 0 <= float(years) <= 80:
+            payload["total_years"] = float(years)
+        for field, max_items in (("skills", 100), ("expected_cities", 30)):
+            values = source.get(field)
+            if isinstance(values, list):
+                payload[field] = [
+                    value.strip()[:100]
+                    for value in values[:max_items]
+                    if isinstance(value, str) and value.strip()
+                ]
+        return payload if payload.get("name") else None
+    except (ValueError, TypeError, json.JSONDecodeError, binascii.Error, PdfReadError):
+        return None
+
+
+def _structured_text(payload: dict) -> str:
+    labels = (
+        ("name", "姓名"),
+        ("email", "Email"),
+        ("phone", "電話"),
+        ("city", "通訊地址"),
+        ("current_title", "職務類別"),
+        ("total_years", "工作年資"),
+        ("highest_education", "學歷"),
+        ("expected_title", "希望職務"),
+    )
+    lines = ["【TalentHub 結構化履歷】"]
+    for field, label_name in labels:
+        value = payload.get(field)
+        if value is not None:
+            suffix = " 年" if field == "total_years" else ""
+            lines.append(f"{label_name}：{value}{suffix}")
+    for field, label_name in (("skills", "技能與專長"), ("expected_cities", "希望工作地點")):
+        values = payload.get(field) or []
+        if values:
+            lines.append(f"{label_name}：{'、'.join(values)}")
+    return "\n".join(lines)
 
 
 def extract_text(path: Path) -> str:
@@ -116,6 +188,31 @@ def parse_text(text: str, requested_platform: str = "generic") -> ParserResult:
 
 def parse_resume(path: Path, requested_platform: str) -> ParserResult:
     if path.suffix.lower() == ".pdf":
+        structured = _structured_pdf_payload(path)
+        if structured:
+            confidence = {field: 1.0 for field, value in structured.items() if value is not None}
+            has_identity = bool(
+                structured.get("name")
+                and (structured.get("email") or structured.get("phone"))
+            )
+            return ParserResult(
+                "direct",
+                "parsed" if has_identity else "needs_review",
+                _structured_text(structured),
+                structured,
+                confidence,
+                1.0,
+                1.0,
+                [
+                    {
+                        "type": "structured_pdf_metadata",
+                        "marker": "talenthub.resume.v1",
+                        "weight": 1.0,
+                    }
+                ],
+                False,
+                None,
+            )
         ocr_result = extract_pdf_with_ocr(path)
         if ocr_result.needs_review:
             return ParserResult(
@@ -131,9 +228,26 @@ def parse_resume(path: Path, requested_platform: str) -> ParserResult:
                 ocr_result.error_message or "PDF requires manual review",
             )
         text = ocr_result.text
-        if ocr_result.status == "ocr_extracted":
+        is_ocr = ocr_result.status == "ocr_extracted"
+        if is_ocr:
             text = normalize_ocr_text(text)
-        return parse_text(text, requested_platform)
+        result = parse_text(text, requested_platform)
+        if is_ocr:
+            # Regex certainty is not OCR certainty. Scanned fields always need
+            # human review even when their recognized shape looks valid.
+            result.confidence = {
+                field: round(score * 0.78, 2)
+                for field, score in result.confidence.items()
+            }
+            populated = [score for score in result.confidence.values() if score > 0]
+            result.overall_confidence = (
+                round(sum(populated) / len(result.confidence), 2) if populated else 0.0
+            )
+            result.status = "needs_review"
+            result.source_evidence = list(result.source_evidence or []) + [
+                {"type": "ocr_extracted", "marker": ocr_result.provider, "weight": 0.0}
+            ]
+        return result
     try:
         return parse_text(extract_text(path), requested_platform)
     except Exception as exc:

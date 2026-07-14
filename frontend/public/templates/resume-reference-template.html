@@ -71,12 +71,12 @@
 
     <div class="profile">
       <div class="profile-grid">
-        <span class="label">姓名：</span><strong contenteditable="true">王小明</strong>
+        <span class="label">姓名：</span><strong contenteditable="true" data-field="name">王小明</strong>
         <span class="label">出生日期：</span><span contenteditable="true">1995 / 01 / 01</span>
-        <span class="label">E-mail：</span><span contenteditable="true">candidate@example.com</span>
-        <span class="label">聯絡電話：</span><span contenteditable="true">0912-345-678</span>
+        <span class="label">E-mail：</span><span contenteditable="true" data-field="email">candidate@example.com</span>
+        <span class="label">聯絡電話：</span><span contenteditable="true" data-field="phone">0912-345-678</span>
         <span class="label">聯絡方式：</span><span contenteditable="true">手機、E-mail</span>
-        <span class="label">通訊地址：</span><span contenteditable="true">臺北市中正區</span>
+        <span class="label">通訊地址：</span><span contenteditable="true" data-field="city">臺北市中正區</span>
       </div>
       <div class="avatar" aria-label="照片預留位置">☺</div>
     </div>
@@ -85,14 +85,14 @@
       <h2>學歷</h2>
       <div class="row"><strong contenteditable="true">○○大學（臺灣）</strong><span></span><span></span><span></span></div>
       <div class="row"><span class="key">科系名稱：</span><span contenteditable="true">資訊管理學系</span><span class="key">科系類別：</span><span contenteditable="true">資訊管理</span></div>
-      <div class="row"><span class="key">學歷：</span><span contenteditable="true">大學</span><span class="key">就學期間：</span><span contenteditable="true">2017/09～2021/06（畢業）</span></div>
+      <div class="row"><span class="key">學歷：</span><span contenteditable="true" data-field="highest_education">大學</span><span class="key">就學期間：</span><span contenteditable="true">2017/09～2021/06（畢業）</span></div>
     </section>
 
     <section>
       <h2>經歷</h2>
       <article class="experience">
         <h3 contenteditable="true">產品企劃部／○○科技股份有限公司（2021/07～仍在職）</h3>
-        <div class="row"><span class="key">職務類別：</span><span contenteditable="true">產品企劃</span><span class="key">產業類別：</span><span contenteditable="true">軟體及網路相關業</span></div>
+        <div class="row"><span class="key">職務類別：</span><span contenteditable="true" data-field="current_title">產品企劃</span><span class="key">產業類別：</span><span contenteditable="true">軟體及網路相關業</span></div>
         <div class="row"><span class="key">管理責任：</span><span contenteditable="true">無</span><span class="key">公司規模：</span><span contenteditable="true">30～100人</span></div>
         <p><span class="key">工作地點：</span><span contenteditable="true">臺北市中正區</span></p>
         <p class="key">工作內容：</p>
@@ -102,24 +102,24 @@
           <li>建立報表追蹤關鍵指標，協助團隊進行決策。</li>
         </ul>
       </article>
-      <p><span class="key">工作年資：</span><span contenteditable="true">總工作年資 3 年</span></p>
+      <p><span class="key">工作年資：</span><span contenteditable="true" data-field="total_years">總工作年資 3 年</span></p>
     </section>
 
     <section>
       <h2>技能與專長</h2>
-      <div class="full-edit" contenteditable="true">Excel、Power BI、SQL、專案管理、跨部門溝通</div>
+      <div class="full-edit" contenteditable="true" data-field="skills">Excel、Power BI、SQL、專案管理、跨部門溝通</div>
     </section>
 
     <section>
       <h2>求職條件</h2>
       <p><span class="key">最快可上班日：</span><span contenteditable="true">錄取後兩週</span></p>
       <p><span class="key">希望工作性質：</span><span contenteditable="true">全職</span></p>
-      <p><span class="key">希望職務：</span><span contenteditable="true">產品企劃／專案管理</span></p>
-      <p><span class="key">希望工作地點：</span><span contenteditable="true">臺北市、新北市</span></p>
+      <p><span class="key">希望職務：</span><span contenteditable="true" data-field="expected_title">產品企劃／專案管理</span></p>
+      <p><span class="key">希望工作地點：</span><span contenteditable="true" data-field="expected_cities">臺北市、新北市</span></p>
       <p><span class="key">希望待遇：</span><span contenteditable="true">面議</span></p>
     </section>
     <p class="hint">淡黃色欄位可直接編輯｜列印時可選擇「另存為 PDF」</p>
   </main>
-  <script src="./template-pdf.js"></script>
+  <script src="./template-pdf.js?v=3"></script>
 </body>
 </html>

@@ -62,6 +62,9 @@ class Candidate(TimestampMixin, Base):
     job_type: Mapped[str | None] = mapped_column(String(20))
     source: Mapped[str | None] = mapped_column(String(20))
     source_note: Mapped[str | None] = mapped_column(String(200))
+    photo_path: Mapped[str | None] = mapped_column(String(500))
+    photo_content_type: Mapped[str | None] = mapped_column(String(50))
+    photo_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), default="new", server_default="new", index=True)
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     summary: Mapped[str | None] = mapped_column(Text)
@@ -76,6 +79,10 @@ class Candidate(TimestampMixin, Base):
     educations: Mapped[list["CandidateEducation"]] = relationship(cascade="all, delete-orphan")
     experiences: Mapped[list["CandidateExperience"]] = relationship(cascade="all, delete-orphan")
     skills: Mapped[list["CandidateSkill"]] = relationship(cascade="all, delete-orphan")
+
+    @property
+    def has_photo(self) -> bool:
+        return bool(self.photo_path)
 
 
 class CandidateEducation(Base):

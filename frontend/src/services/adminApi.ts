@@ -44,16 +44,22 @@ export type IssueStatus = 'open' | 'investigating' | 'resolved' | 'closed'
 export type SystemIssue = {
   id: number; title: string; description: string; page: string
   severity: IssueSeverity; status: IssueStatus
+  progress_percent: number; expected_completion_date: string | null
   reproduction_steps: string | null; resolution_notes: string | null
   created_by_user_id: number | null; updated_by_user_id: number | null
   created_at: string; updated_at: string
 }
 export type SystemIssueWrite = Omit<SystemIssue, 'id' | 'created_by_user_id' | 'updated_by_user_id' | 'created_at' | 'updated_at'>
-export type DatabaseColumn = { name: string; type: string; nullable: boolean; primary_key: boolean }
-export type DatabaseTable = { name: string; row_count: number | null; columns: DatabaseColumn[] }
+export type DatabaseColumn = { name: string; type: string; nullable: boolean; primary_key: boolean; redacted: boolean }
+export type DatabaseTable = { name: string; display_name: string; description: string; row_count: number | null; columns: DatabaseColumn[] }
 export type DatabaseOverview = {
   healthy: boolean; dialect: string; server_version: string | null
   transport_security: string; tables: DatabaseTable[]
+}
+export type DatabaseTablePreview = {
+  table_name: string; display_name: string; description: string; page: number; page_size: number; total: number
+  searchable_columns: string[]; visible_columns: string[]; redacted_columns: string[]
+  rows: Record<string, unknown>[]
 }
 
 export type UserWrite = {
@@ -93,4 +99,9 @@ export const adminApi = {
     method: 'PATCH', body: JSON.stringify(payload),
   }),
   databaseOverview: () => apiRequest<DatabaseOverview>('/admin/database/overview'),
+  databaseTableRows: (table: string, page = 1, search = '') => {
+    const query = new URLSearchParams({ page: String(page), page_size: '20' })
+    if (search.trim()) query.set('search', search.trim())
+    return apiRequest<DatabaseTablePreview>(`/admin/database/tables/${encodeURIComponent(table)}/rows?${query}`)
+  },
 }

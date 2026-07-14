@@ -90,6 +90,15 @@ def test_104_career_fields_are_extracted_and_confirmed(resume_client) -> None:
     )
     assert upload.status_code == 201
     resume_id = upload.json()[0]["id"]
+    # The uploaded file is represented by a durable resume_files database row;
+    # IT can inspect the record even though the binary itself stays in private storage.
+    it_preview = resume_client[0].get(
+        "/api/v1/admin/database/tables/resume_files/rows?search=career.docx"
+    )
+    assert it_preview.status_code == 200
+    assert it_preview.json()["display_name"] == "履歷檔案與解析紀錄"
+    assert it_preview.json()["total"] == 1
+    assert it_preview.json()["rows"][0]["id"] == resume_id
     detail = client.get(f"/api/v1/resumes/{resume_id}").json()
     assert detail["parsed_payload"]["current_company"] == "範例科技"
     assert detail["parsed_payload"]["highest_education"] == "學士"

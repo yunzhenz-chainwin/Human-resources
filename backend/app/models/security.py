@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -79,6 +79,10 @@ class SystemIssue(TimestampMixin, Base):
     page: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     severity: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    progress_percent: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    expected_completion_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     reproduction_steps: Mapped[str | None] = mapped_column(Text)
     resolution_notes: Mapped[str | None] = mapped_column(Text)
     created_by_user_id: Mapped[int | None] = mapped_column(

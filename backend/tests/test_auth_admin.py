@@ -257,17 +257,26 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
             "page": "/candidates",
             "severity": "high",
             "status": "open",
+            "progress_percent": 35,
+            "expected_completion_date": "2026-07-31",
             "reproduction_steps": "Open the page and apply a filter.",
         },
     )
     assert created.status_code == 201
     issue = created.json()
     assert issue["created_by_user_id"] == issue["updated_by_user_id"]
+    assert issue["progress_percent"] == 35
+    assert issue["expected_completion_date"] == "2026-07-31"
     assert client.patch(
         f"/admin/system-issues/{issue['id']}",
         headers=headers,
-        json={"status": "resolved", "resolution_notes": "Index rebuilt."},
-    ).json()["status"] == "resolved"
+        json={"status": "resolved", "progress_percent": 100, "resolution_notes": "Index rebuilt."},
+    ).json()["progress_percent"] == 100
+    assert client.patch(
+        f"/admin/system-issues/{issue['id']}",
+        headers=headers,
+        json={"progress_percent": 101},
+    ).status_code == 422
     assert len(client.get("/admin/system-issues", headers=headers).json()) == 1
     with testing_session() as db:
         assert db.get(SystemIssue, issue["id"]).resolution_notes == "Index rebuilt."
@@ -278,10 +287,30 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
     assert overview["healthy"] is True
     assert overview["dialect"] == "sqlite"
     users_table = next(item for item in overview["tables"] if item["name"] == "users")
+    assert users_table["display_name"] == "後台登入人員"
+    resumes_table = next(item for item in overview["tables"] if item["name"] == "resume_files")
+    assert resumes_table["display_name"] == "履歷檔案與解析紀錄"
+    assert "解析內容" in resumes_table["description"]
     assert isinstance(users_table["row_count"], int)
     assert {column["name"] for column in users_table["columns"]} >= {"id", "username"}
     assert "database_url" not in overview
     assert "rows" not in users_table
+
+    preview_response = client.get(
+        "/admin/database/tables/users/rows?page=1&page_size=10&search=rootadmin",
+        headers=headers,
+    )
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["total"] == 1
+    assert "password_hash" in preview["redacted_columns"]
+    assert "password_hash" not in preview["visible_columns"]
+    assert "password_hash" not in preview["rows"][0]
+    assert preview["rows"][0]["username"] == "rootadmin"
+    assert preview["display_name"] == "後台登入人員"
+    assert client.get(
+        "/admin/database/tables/not_a_table/rows", headers=headers
+    ).status_code == 404
 
     hr = login(client, "hruser", "HR-Test-Password-123")
     manager = login(client, "manager", "Manager-Test-Password-123")
@@ -289,3 +318,6 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
         denied_headers = bearer(tokens["access_token"])
         assert client.get("/admin/system-issues", headers=denied_headers).status_code == 403
         assert client.get("/admin/database/overview", headers=denied_headers).status_code == 403
+        assert client.get(
+            "/admin/database/tables/users/rows", headers=denied_headers
+        ).status_code == 403

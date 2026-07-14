@@ -51,6 +51,29 @@ export type MatchDto = {
 }
 
 export type MatchList = { items: MatchDto[]; total: number }
+export type CandidateMatchOverviewItem = {
+  candidate: MatchDto['candidate']
+  match: MatchDto | null
+}
+export type CandidateMatchOverview = {
+  items: CandidateMatchOverviewItem[]
+  total_candidates: number
+  computed_count: number
+  uncomputed_count: number
+}
+export type MatchingCriteria = {
+  required_skills: string[]
+  preferred_skills: string[]
+  min_years: number | null
+  education_req: string | null
+  work_city: string
+  salary_min: number | null
+  salary_max: number | null
+  require_skills: boolean
+  require_years: boolean
+  require_education: boolean
+  require_location: boolean
+}
 export type MatchReadiness = {
   strategy: string
   pilot_status: 'needs_candidates' | 'ready_for_shadow_pilot' | 'ready_for_weight_tuning'
@@ -104,6 +127,14 @@ function query(filters: ReportFilters) {
 }
 
 export const matchingReportsApi = {
+  candidateOverview: (requisitionId: number) =>
+    request<CandidateMatchOverview>(`/requisitions/${requisitionId}/candidate-match-overview`),
+  matchingCriteria: (requisitionId: number) =>
+    request<MatchingCriteria>(`/requisitions/${requisitionId}/matching-criteria`),
+  updateMatchingCriteria: (requisitionId: number, criteria: MatchingCriteria) =>
+    request<MatchingCriteria>(`/requisitions/${requisitionId}/matching-criteria`, {
+      method: 'PUT', body: JSON.stringify(criteria),
+    }),
   matches: (requisitionId: number, includeIneligible = true) =>
     request<MatchList>(`/requisitions/${requisitionId}/matches?include_ineligible=${includeIneligible}`),
   rematch: (requisitionId: number) =>

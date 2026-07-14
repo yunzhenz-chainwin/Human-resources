@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     resume_storage_provider: str = "local"
     resume_quarantine_path: str = "./storage/quarantine"
     resume_max_bytes: int = 10 * 1024 * 1024
+    candidate_photo_storage_path: str = "./storage/candidate-photos"
+    candidate_photo_max_bytes: int = 5 * 1024 * 1024
     resume_scanner: str = "none"
     resume_scan_policy: str = "allow_unavailable"
     clamav_host: str = "localhost"

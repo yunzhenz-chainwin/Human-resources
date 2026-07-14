@@ -1,9 +1,14 @@
 from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import fitz
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.dependencies.auth import (
     audit_pii_read,
@@ -23,6 +28,53 @@ from app.schemas.hr import (
 from app.services.applications import normalize_email, normalize_phone
 
 router = APIRouter(prefix="/candidates")
+settings = get_settings()
+
+PHOTO_TYPES = {
+    "image/jpeg": ("jpg", lambda data: data.startswith(b"\xff\xd8\xff")),
+    "image/png": ("png", lambda data: data.startswith(b"\x89PNG\r\n\x1a\n")),
+    "image/webp": (
+        "webp",
+        lambda data: len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP",
+    ),
+}
+
+
+def _photo_candidate(db: Session, user: User, candidate_id: int) -> Candidate:
+    candidate = db.get(Candidate, candidate_id)
+    if not candidate or candidate.deleted_at:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    enforce_candidate_scope(db, user, candidate_id)
+    return candidate
+
+
+def _validated_photo(data: bytes, content_type: str | None) -> tuple[str, str]:
+    normalized_type = (content_type or "").lower().split(";", 1)[0].strip()
+    definition = PHOTO_TYPES.get(normalized_type)
+    if not definition or not definition[1](data):
+        raise HTTPException(
+            status_code=415, detail="Only valid JPEG, PNG, or WebP photos are allowed"
+        )
+    try:
+        document = fitz.open(stream=data, filetype=definition[0])
+        if document.page_count != 1:
+            raise ValueError("not a single image")
+        pixmap = document[0].get_pixmap()
+        width, height = pixmap.width, pixmap.height
+        invalid_dimensions = (
+            width < 32
+            or height < 32
+            or width > 8000
+            or height > 8000
+            or width * height > 25_000_000
+        )
+        if invalid_dimensions:
+            raise ValueError("invalid dimensions")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422, detail="Photo is damaged or has unsupported dimensions"
+        ) from exc
+    return normalized_type, definition[0]
 
 
 @router.get("", response_model=list[CandidateRead])
@@ -102,6 +154,80 @@ def update_candidate(
     return candidate
 
 
+@router.put("/{candidate_id}/photo", response_model=CandidateRead)
+async def upload_candidate_photo(
+    candidate_id: int,
+    photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_manager),
+) -> Candidate:
+    candidate = _photo_candidate(db, user, candidate_id)
+    data = await photo.read(settings.candidate_photo_max_bytes + 1)
+    await photo.close()
+    if not data:
+        raise HTTPException(status_code=422, detail="Photo file is empty")
+    if len(data) > settings.candidate_photo_max_bytes:
+        raise HTTPException(status_code=413, detail="Photo exceeds the 5 MB limit")
+    content_type, extension = _validated_photo(data, photo.content_type)
+
+    storage = Path(settings.candidate_photo_storage_path).resolve()
+    storage.mkdir(parents=True, exist_ok=True)
+    new_path = (storage / f"{candidate_id}-{uuid4().hex}.{extension}").resolve()
+    if storage not in new_path.parents:
+        raise HTTPException(status_code=500, detail="Invalid photo storage path")
+    new_path.write_bytes(data)
+    previous_path = Path(candidate.photo_path).resolve() if candidate.photo_path else None
+    try:
+        candidate.photo_path = str(new_path)
+        candidate.photo_content_type = content_type
+        candidate.photo_updated_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(candidate)
+    except Exception:
+        new_path.unlink(missing_ok=True)
+        raise
+    if previous_path and previous_path != new_path and storage in previous_path.parents:
+        previous_path.unlink(missing_ok=True)
+    return candidate
+
+
+@router.get("/{candidate_id}/photo", response_class=FileResponse)
+def get_candidate_photo(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> FileResponse:
+    candidate = _photo_candidate(db, user, candidate_id)
+    if not candidate.photo_path:
+        raise HTTPException(status_code=404, detail="Candidate photo not found")
+    storage = Path(settings.candidate_photo_storage_path).resolve()
+    photo_path = Path(candidate.photo_path).resolve()
+    if storage not in photo_path.parents or not photo_path.is_file():
+        raise HTTPException(status_code=404, detail="Candidate photo not found")
+    return FileResponse(
+        photo_path,
+        media_type=candidate.photo_content_type or "application/octet-stream",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@router.delete("/{candidate_id}/photo", status_code=status.HTTP_204_NO_CONTENT)
+def delete_candidate_photo(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_manager),
+) -> None:
+    candidate = _photo_candidate(db, user, candidate_id)
+    storage = Path(settings.candidate_photo_storage_path).resolve()
+    previous_path = Path(candidate.photo_path).resolve() if candidate.photo_path else None
+    candidate.photo_path = None
+    candidate.photo_content_type = None
+    candidate.photo_updated_at = None
+    db.commit()
+    if previous_path and storage in previous_path.parents:
+        previous_path.unlink(missing_ok=True)
+
+
 @router.post(
     "/{candidate_id}/activities",
     response_model=CandidateActivityRead,
@@ -175,5 +301,12 @@ def delete_candidate(
     candidate = db.get(Candidate, candidate_id)
     if not candidate or candidate.deleted_at:
         raise HTTPException(status_code=404, detail="人才不存在")
+    storage = Path(settings.candidate_photo_storage_path).resolve()
+    previous_path = Path(candidate.photo_path).resolve() if candidate.photo_path else None
+    candidate.photo_path = None
+    candidate.photo_content_type = None
+    candidate.photo_updated_at = None
     candidate.deleted_at = datetime.now(UTC)
     db.commit()
+    if previous_path and storage in previous_path.parents:
+        previous_path.unlink(missing_ok=True)
