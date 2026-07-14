@@ -17,6 +17,7 @@ from app.models import (
     Candidate,
     CandidateEducation,
     CandidateSkill,
+    JobApplication,
     JobRequisition,
     MatchResult,
 )
@@ -142,6 +143,15 @@ def test_score_is_deterministic_and_gates_hard_requirements(matching_client) -> 
         wrong_city = score_candidate(requisition, candidates[3], ["Python"])
         assert wrong_city.gate_passed is False
         assert "location" in wrong_city.breakdown["gate"]["miss"]
+
+        # A current city is still location evidence when expected_cities is absent;
+        # the hard gate and component score must use the same source of truth.
+        candidates[1].city = "高雄市"
+        candidates[1].expected_cities = None
+        current_city_mismatch = score_candidate(requisition, candidates[1], ["Python"])
+        assert current_city_mismatch.gate_passed is False
+        assert "location" in current_city_mismatch.breakdown["gate"]["miss"]
+        assert current_city_mismatch.breakdown["location"]["score"] == 0.2
         assert sum(resolve_weights({"skill": 9}).values()) == pytest.approx(1.0)
 
 
@@ -224,6 +234,58 @@ def test_candidate_match_overview_includes_uncomputed_people(matching_client) ->
     assert after.json()["computed_count"] == 3
     assert after.json()["uncomputed_count"] == 0
     assert all(item["match"] is not None for item in after.json()["items"])
+
+
+def test_manager_match_overview_only_exposes_actual_applicants(
+    matching_client,
+) -> None:
+    client, testing_session = matching_client
+    with testing_session() as db:
+        db.add(
+            JobApplication(
+                requisition_id=1,
+                candidate_id=1,
+                status="submitted",
+                source="career_site",
+            )
+        )
+        db.add_all(
+            [
+                MatchResult(
+                    requisition_id=1,
+                    candidate_id=2,
+                    gate_passed=True,
+                    total_score=75,
+                    score_breakdown={"gate": {"passed": True, "miss": []}},
+                    status="recommended",
+                ),
+                MatchResult(
+                    requisition_id=1,
+                    candidate_id=3,
+                    gate_passed=False,
+                    total_score=50,
+                    score_breakdown={"gate": {"passed": False, "miss": ["required_skills"]}},
+                    status="ineligible",
+                ),
+            ]
+        )
+        db.commit()
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=10, role="manager", department_id=None, is_active=True
+    )
+    manager_response = client.get("/api/v1/requisitions/1/candidate-match-overview")
+    assert manager_response.status_code == 200
+    assert {
+        item["candidate"]["id"] for item in manager_response.json()["items"]
+    } == {1}
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=1, role="hr", department_id=None, is_active=True
+    )
+    hr_response = client.get("/api/v1/requisitions/1/candidate-match-overview")
+    assert hr_response.status_code == 200
+    assert hr_response.json()["total_candidates"] == 4
 
 
 def test_hr_can_update_matching_criteria_and_recalculate(matching_client) -> None:

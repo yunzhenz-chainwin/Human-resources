@@ -6,7 +6,6 @@ from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.matching import MatchResult
 from app.models.organization import User
 from app.models.recruitment import JobApplication, JobRequisition
 from app.services.security import decode_token, write_audit
@@ -70,6 +69,12 @@ def require_recruiting_manager(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def require_department_manager(user: User = Depends(get_current_user)) -> User:
+    if user.role != "manager" or user.department_id is None:
+        raise HTTPException(status_code=403, detail="Department manager access required")
+    return user
+
+
 def enforce_department_scope(user: User, department_id: int | None) -> None:
     if user.role in GLOBAL_RECRUITING_ROLES:
         return
@@ -78,7 +83,7 @@ def enforce_department_scope(user: User, department_id: int | None) -> None:
 
 
 def candidate_scope_clause(user: User):
-    """SQL predicate limiting a manager to talent linked to their requisitions."""
+    """Limit a manager to people who actually applied to their department's jobs."""
     if user.role in GLOBAL_RECRUITING_ROLES:
         return True
     if user.role != "manager" or user.department_id is None:
@@ -91,15 +96,7 @@ def candidate_scope_clause(user: User):
             JobRequisition.department_id == user.department_id,
         )
     )
-    matched = exists(
-        select(MatchResult.id)
-        .join(JobRequisition, JobRequisition.id == MatchResult.requisition_id)
-        .where(
-            MatchResult.candidate_id == candidate_id_column(),
-            JobRequisition.department_id == user.department_id,
-        )
-    )
-    return applied | matched
+    return applied
 
 
 def candidate_id_column():

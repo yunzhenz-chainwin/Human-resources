@@ -27,6 +27,7 @@ const savingCriteria = ref(false)
 const minDisplayScore = ref(0)
 const onlyPassed = ref(false)
 const talentSearch = ref('')
+let overviewRequestSequence = 0
 
 const allPeople = computed(() => [...(overview.value?.items || [])].sort((a, b) => {
   if (!a.match && b.match) return 1
@@ -37,15 +38,22 @@ const allPeople = computed(() => [...(overview.value?.items || [])].sort((a, b) 
 const people = computed(() => allPeople.value.filter(item => {
   const score = item.match?.total_score ?? -1
   const keyword = talentSearch.value.trim().toLocaleLowerCase('zh-Hant')
-  return (!item.match || score >= minDisplayScore.value)
+  return (minDisplayScore.value === 0 || (!!item.match && score >= minDisplayScore.value))
     && (!onlyPassed.value || !!item.match?.gate_passed)
     && (!keyword || `${item.candidate.name} ${item.candidate.current_title || ''} ${item.candidate.code}`.toLocaleLowerCase('zh-Hant').includes(keyword))
 }))
 const selectedJob = computed(() => props.jobs.find(job => job.id === selectedJobId.value))
-const eligibleCount = computed(() => people.value.filter(item => item.match?.gate_passed).length)
 const componentLabels: Record<string, string> = {
   skill: '技能', relevance: '職務相關', years: '年資', salary: '薪資', education: '學歷', location: '地點',
 }
+const eligibleTotalCount = computed(() => allPeople.value.filter(item => item.match?.gate_passed).length)
+const formulaParts = computed(() => {
+  const sample = allPeople.value.find(item => item.match)?.match
+  return Object.entries(componentLabels).map(([key, label]) => {
+    const weight = Number(sample?.score_breakdown[key]?.weight)
+    return { key, label, percent: Number.isFinite(weight) ? Math.round(weight * 100) : null }
+  })
+})
 const statusLabels: Record<string, string> = {
   ineligible: '未通過必要條件', recommended: '建議人選', shortlisted: '入選名單', contacted: '已聯絡',
   interview: '面試中', offered: '已發 Offer', hired: '已錄取', rejected_by_manager: '主管婉拒', withdrawn: '已退出',
@@ -53,38 +61,52 @@ const statusLabels: Record<string, string> = {
 const editableStatuses: MatchStatus[] = ['recommended', 'shortlisted', 'contacted', 'interview', 'offered', 'hired', 'withdrawn']
 
 watch(() => props.jobs, jobs => {
-  if (!selectedJobId.value && jobs.length) selectedJobId.value = jobs[0].id
+  if (jobs.length && !jobs.some(job => job.id === selectedJobId.value)) selectedJobId.value = jobs[0].id
 }, { immediate: true })
-watch(selectedJobId, () => loadOverview())
+watch(selectedJobId, () => loadOverview(), { immediate: true })
 
 function message(cause: unknown) {
   return cause instanceof Error ? cause.message : '發生未預期錯誤'
 }
 
 async function loadOverview() {
-  if (!selectedJobId.value) {
+  const requestId = ++overviewRequestSequence
+  const jobId = selectedJobId.value
+  if (!jobId) {
     overview.value = null
     readiness.value = null
+    criteria.value = null
+    loading.value = false
     return
   }
   loading.value = true
   error.value = ''
+  overview.value = null
+  readiness.value = null
+  criteria.value = null
   try {
     const [overviewResult, readinessResult, criteriaResult] = await Promise.all([
-      matchingReportsApi.candidateOverview(selectedJobId.value),
-      matchingReportsApi.readiness(selectedJobId.value),
-      matchingReportsApi.matchingCriteria(selectedJobId.value),
+      matchingReportsApi.candidateOverview(jobId),
+      matchingReportsApi.readiness(jobId),
+      matchingReportsApi.matchingCriteria(jobId),
     ])
+    if (requestId !== overviewRequestSequence || selectedJobId.value !== jobId) return
     overview.value = overviewResult
     readiness.value = readinessResult
     criteria.value = criteriaResult
     requiredSkillsText.value = criteriaResult.required_skills.join('、')
     preferredSkillsText.value = criteriaResult.preferred_skills.join('、')
   } catch (cause) {
-    error.value = message(cause)
+    if (requestId === overviewRequestSequence) error.value = message(cause)
   } finally {
-    loading.value = false
+    if (requestId === overviewRequestSequence) loading.value = false
   }
+}
+
+function clearResultFilters() {
+  talentSearch.value = ''
+  minDisplayScore.value = 0
+  onlyPassed.value = false
 }
 
 function skills(value: string) {
@@ -195,10 +217,8 @@ function gateReasons(match: MatchDto) {
       <strong>逐人透明呈現<small>每一分都有依據</small></strong>
     </header>
 
-    <div class="match-formula">
-      <article><b>40%</b><span>技能命中</span></article><article><b>20%</b><span>職務相關</span></article>
-      <article><b>15%</b><span>年資</span></article><article><b>10%</b><span>薪資</span></article>
-      <article><b>10%</b><span>學歷</span></article><article><b>5%</b><span>工作地點</span></article>
+    <div class="match-formula" aria-label="目前職缺的媒合權重">
+      <article v-for="item in formulaParts" :key="item.key"><b>{{ item.percent === null ? '—' : `${item.percent}%` }}</b><span>{{ item.label }}</span></article>
     </div>
 
     <div class="gate-explainer panel">
@@ -243,7 +263,7 @@ function gateReasons(match: MatchDto) {
       <div><span>人才庫總數</span><strong>{{ overview.total_candidates }}</strong></div>
       <div><span>已計算</span><strong>{{ overview.computed_count }}</strong></div>
       <div><span>尚未計算</span><strong>{{ overview.uncomputed_count }}</strong></div>
-      <div><span>通過必要條件</span><strong>{{ eligibleCount }}</strong></div>
+      <div><span>通過必要條件（全數）</span><strong>{{ eligibleTotalCount }}</strong></div>
     </div>
 
     <div v-if="readiness && overview?.computed_count" class="readiness panel">
@@ -255,8 +275,9 @@ function gateReasons(match: MatchDto) {
 
     <div v-if="loading" class="match-empty panel"><span class="spinner"></span><strong>讀取每位人才的媒合狀態…</strong></div>
     <div v-else-if="!jobs.length" class="match-empty panel"><strong>尚無職缺</strong><p>請先建立職缺並設定技能與條件。</p></div>
-    <div v-else-if="!people.length" class="match-empty panel"><strong>人才庫目前沒有資料</strong><p>新增人才後，即可在這裡逐人計算媒合程度。</p></div>
-    <div v-else class="match-list">
+    <div v-else-if="overview && overview.total_candidates === 0" class="match-empty panel"><strong>人才庫目前沒有資料</strong><p>新增人才後，即可在這裡逐人計算媒合程度。</p></div>
+    <div v-else-if="overview && !people.length" class="match-empty panel"><strong>沒有符合目前篩選條件的人才</strong><p>請降低最低分數、取消必要條件篩選，或更換搜尋字詞。</p><button class="button secondary" type="button" @click="clearResultFilters">清除篩選</button></div>
+    <div v-else-if="overview" class="match-list">
       <article v-for="item in people" :key="item.candidate.id" class="panel match-card" :class="{ pending: !item.match }">
         <header>
           <div class="candidate"><span>{{ item.candidate.name.slice(0, 1) }}</span><div><h2>{{ item.candidate.name }}</h2><p>{{ item.candidate.code }} · {{ item.candidate.current_title || '尚未填寫職稱' }} · {{ item.candidate.total_years ?? '—' }} 年</p></div></div>
@@ -273,7 +294,7 @@ function gateReasons(match: MatchDto) {
           </div>
         </div>
         <div v-if="item.match && !item.match.gate_passed" class="gate-warning"><strong>參考分數 {{ item.match.total_score.toFixed(1) }}%，但未通過必要條件</strong><span>{{ gateReasons(item.match) }}</span></div>
-        <div v-else class="pending-message"><b>等待第一次計算</b><span>按上方「計算全部人才」後，這裡會顯示百分比與技能、年資、薪資、學歷、地點等評分依據。</span></div>
+        <div v-else-if="!item.match" class="pending-message"><b>等待第一次計算</b><span>按上方「計算全部人才」後，這裡會顯示百分比與技能、年資、薪資、學歷、地點等評分依據。</span></div>
 
         <div v-if="item.match?.feedback_reason" class="feedback"><strong>主管婉拒理由</strong>{{ item.match.feedback_reason }}</div>
         <footer>

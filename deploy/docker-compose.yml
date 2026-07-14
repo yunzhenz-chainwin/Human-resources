@@ -36,6 +36,9 @@ services:
         condition: service_started
     volumes:
       - resume_data:/app/storage/resumes
+      # Keep profile photos outside the container writable layer.  This is a
+      # separate volume so existing resume_data layouts remain compatible.
+      - candidate_photo_data:/app/storage/candidate-photos
 
   migrate:
     build: ../backend
@@ -66,3 +69,4 @@ volumes:
   postgres_data:
   redis_data:
   resume_data:
+  candidate_photo_data:

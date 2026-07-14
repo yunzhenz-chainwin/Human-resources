@@ -76,6 +76,7 @@ def _save_talent_profile(
     current_title: str | None,
     total_years: float | None,
     skills: list[str],
+    commit: bool = True,
 ) -> tuple[Candidate, bool]:
     email_norm = normalize_email(email)
     phone_norm = normalize_phone(phone)
@@ -115,8 +116,11 @@ def _save_talent_profile(
         candidate.consent_status = "consented"
         candidate.consent_at = now
     sync_candidate_skills(db, candidate, skills)
-    db.commit()
-    db.refresh(candidate)
+    if commit:
+        db.commit()
+        db.refresh(candidate)
+    else:
+        db.flush()
     return candidate, created
 
 
@@ -266,19 +270,38 @@ async def join_talent_pool(
     prepared = await prepare_resume_upload(resume)
     upload_data = prepared.upload_data
     try:
+        candidate, created = _save_talent_profile(
+            db,
+            name=name,
+            email=email,
+            phone=phone,
+            city=city,
+            current_title=current_title,
+            total_years=total_years,
+            skills=submitted_skills,
+            commit=False,
+        )
         existing = db.scalar(
             select(ResumeFile).where(ResumeFile.file_hash == upload_data.file_hash)
         )
         if existing:
+            if existing.candidate_id not in (None, candidate.id):
+                raise HTTPException(
+                    status_code=409,
+                    detail="履歷檔案已屬於其他人才，請聯絡 HR",
+                )
+            existing.candidate_id = candidate.id
+            db.commit()
             prepared.discard()
             return PublicTalentPoolResult(
                 resume_id=existing.id,
-                candidate_id=existing.candidate_id,
+                candidate_id=candidate.id,
                 status=existing.parse_status,
                 duplicate=True,
             )
         path = prepared.promote()
         record = ResumeFile(
+            candidate_id=candidate.id,
             storage_key=upload_data.storage_key,
             original_filename=upload_data.original_filename,
             file_hash=upload_data.file_hash,
@@ -315,7 +338,10 @@ async def join_talent_pool(
         db.commit()
         prepared.finish()
         return PublicTalentPoolResult(
-            resume_id=record.id, status=record.parse_status, duplicate=False
+            resume_id=record.id,
+            candidate_id=candidate.id,
+            status=record.parse_status,
+            duplicate=not created,
         )
     except Exception:
         db.rollback()

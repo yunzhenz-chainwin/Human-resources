@@ -53,22 +53,74 @@ test.describe.serial('public submission to HR review', () => {
     await page.getByLabel('密碼').fill('E2E-Admin-Password-123!')
     await page.getByRole('button', { name: '登入工作台' }).click()
 
-    await expect(page.getByRole('heading', { name: '招募工作總覽' })).toBeVisible()
-    for (const label of ['智慧配對', '數據報表', '帳號與權限']) {
+    await expect(page.getByRole('heading', { name: /今天想認識哪位人才/ })).toBeVisible()
+    for (const label of ['媒合程度', '招募分析', '帳號與權限']) {
       await expect(page.getByRole('button', { name: label })).toBeVisible()
     }
 
-    await page.getByRole('button', { name: /履歷匯入與校對/ }).click()
+    await page.getByRole('button', { name: /履歷辨識中心/ }).click()
     await page.getByRole('button', { name: new RegExp(resumeName) }).click()
     await expect(page.getByLabel('姓名 *')).toHaveValue(candidateName)
+    // A synthetic PDF has no verifiable platform signature, so HR must explicitly
+    // confirm the detected source before the record can enter the talent pool.
+    await page.getByRole('button', { name: '一般／自製履歷', exact: true }).click()
     await page.getByRole('button', { name: '確認並寫入人才庫' }).click()
     await expect(page.getByText(/已建立人才|已更新人才/)).toBeVisible()
 
-    await page.getByRole('button', { name: '人才資料庫' }).click()
+    await page.getByRole('button', { name: '人才庫' }).click()
     await expect(page.getByRole('button', { name: new RegExp(candidateName) })).toBeVisible()
 
     await page.getByRole('button', { name: '帳號與權限' }).click()
     await expect(page.getByRole('heading', { name: '帳號與權限' })).toBeVisible()
     await expect(page.getByText('e2e-admin@example.test')).toBeVisible()
+  })
+
+  test('IT can temporarily reveal and re-mask candidate PII with a reason', async ({ page }) => {
+    await page.goto('http://127.0.0.1:4173')
+    await page.getByLabel('帳號或 Email').fill('e2e-admin')
+    await page.getByLabel('密碼').fill('E2E-Admin-Password-123!')
+    await page.getByRole('button', { name: '登入工作台' }).click()
+    await page.getByRole('button', { name: '帳號與權限' }).click()
+    await page.getByRole('tab', { name: '資料表維護' }).click()
+    await page.getByRole('button', { name: /人才主檔/ }).click()
+
+    await page.getByRole('button', { name: '顯示個資' }).click()
+    await page.getByLabel('查閱原因 *').fill('E2E 驗證 HR 人才同步問題')
+    await page.getByRole('button', { name: '確認並顯示' }).click()
+    await expect(page.getByRole('button', { name: '重新遮罩' })).toBeVisible()
+    await expect(page.getByRole('columnheader', { name: 'name', exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: '重新遮罩' }).click()
+    await expect(page.getByRole('button', { name: '顯示個資' })).toBeVisible()
+    await expect(page.getByRole('columnheader', { name: 'name', exact: true })).toHaveCount(0)
+  })
+
+  test('department manager creates an own-department job that global recruiting can see', async ({ page }) => {
+    await page.goto('http://127.0.0.1:4173')
+    await page.getByLabel('帳號或 Email').fill('it_manager')
+    await page.getByLabel('密碼').fill('dept123')
+    await page.getByRole('button', { name: '登入工作台' }).click()
+
+    await expect(page.getByRole('heading', { name: '資訊技術部' })).toBeVisible()
+    await page.getByRole('button', { name: '＋ 建立本部門職缺' }).click()
+    await page.getByLabel('職缺名稱 *').fill('E2E 部門雲端工程師')
+    await page.getByLabel('工作地點 *').fill('台北市')
+    await page.getByLabel('技能條件').fill('Python, AWS, SQL')
+    await page.getByLabel('職務說明 *').fill('由部門主管建立並送交 HR 核准的端對端測試職缺。')
+    await page.getByRole('button', { name: '建立並送交 HR' }).click()
+    await expect(page.getByText(/已寫入資料庫並送交 HR 核准/)).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'E2E 部門雲端工程師' })).toBeVisible()
+
+    await page.getByRole('button', { name: /資深後端工程師/ }).click()
+    await expect(page.getByText('展示人才－林怡君')).toBeVisible()
+    await expect(page.getByRole('button', { name: '人才庫' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '帳號與權限' })).toHaveCount(0)
+
+    await page.getByRole('button', { name: '登出' }).click()
+    await page.getByLabel('帳號或 Email').fill('e2e-admin')
+    await page.getByLabel('密碼').fill('E2E-Admin-Password-123!')
+    await page.getByRole('button', { name: '登入工作台' }).click()
+    await page.getByRole('button', { name: '職缺管理' }).click()
+    await expect(page.getByRole('heading', { name: 'E2E 部門雲端工程師' })).toBeVisible()
   })
 })

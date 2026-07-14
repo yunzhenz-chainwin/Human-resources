@@ -1,33 +1,121 @@
-﻿# TalentHub 本機開發一鍵啟動腳本
-# 用法:在專案根目錄按右鍵「用 PowerShell 執行」,或直接雙擊 start-dev.bat。
-# 會各開一個視窗跑:後端 API(8010)、HR 後台(5173)、求職網站(5174)。
+# TalentHub local development launcher.
+# Repeated runs skip healthy services instead of producing port conflicts.
 
+$ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
-Write-Host "正在啟動 TalentHub 開發環境三個伺服器..." -ForegroundColor Cyan
 
-# 後端 API(FastAPI / uvicorn),會自動讀 backend\.env(SQLite + admin 帳號)
-Start-Process powershell -ArgumentList @(
-  "-NoExit", "-Command",
-  "Set-Location '$root\backend'; Write-Host '後端 API :8010' -ForegroundColor Cyan; python run_backend.py"
-)
+function Test-HttpEndpoint {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [string]$ExpectedText = ""
+    )
 
-# HR 管理後台(Vite dev server,埠 5173)
-Start-Process powershell -ArgumentList @(
-  "-NoExit", "-Command",
-  "Set-Location '$root\frontend'; Write-Host 'HR 後台 :5173' -ForegroundColor Cyan; npm run dev"
-)
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2
+        if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 400) {
+            return $false
+        }
+        if ($ExpectedText -and $response.Content -notmatch [regex]::Escape($ExpectedText)) {
+            return $false
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
 
-# 公開求職網站(Vite dev server,埠 5174)
-Start-Process powershell -ArgumentList @(
-  "-NoExit", "-Command",
-  "Set-Location '$root\career-frontend'; Write-Host '求職網站 :5174' -ForegroundColor Cyan; npm run dev"
-)
+function Get-ListeningProcessId {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $line = netstat -ano -p tcp |
+        Select-String -Pattern "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$" |
+        Select-Object -First 1
+    if (-not $line) {
+        return $null
+    }
+    return [int]$line.Matches[0].Groups[1].Value
+}
+
+function Start-TalentHubService {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$HealthUrl,
+        [string]$ExpectedText = "",
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$Command
+    )
+
+    if (Test-HttpEndpoint -Url $HealthUrl -ExpectedText $ExpectedText) {
+        Write-Host "[OK] $Name is already healthy on port $Port. Skipping duplicate start." -ForegroundColor Green
+        return
+    }
+
+    $listenerPid = Get-ListeningProcessId -Port $Port
+    if ($listenerPid) {
+        Write-Host "[WARN] Port $Port for $Name is held by PID $listenerPid, but its health check failed." -ForegroundColor Yellow
+        Write-Host "       Run restart-dev.bat, or run stop-dev.bat before starting again." -ForegroundColor Yellow
+        return
+    }
+
+    $windowCommand = "`$host.UI.RawUI.WindowTitle = '$Name'; $Command"
+    Start-Process powershell.exe -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -ArgumentList @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-Command", $windowCommand
+    ) | Out-Null
+    Write-Host "[START] Starting $Name..." -ForegroundColor Cyan
+}
+
+Write-Host "TalentHub development environment check" -ForegroundColor Cyan
+
+Start-TalentHubService `
+    -Name "TalentHub Backend API" `
+    -Port 8010 `
+    -HealthUrl "http://127.0.0.1:8010/api/v1/health" `
+    -ExpectedText "talenthub-api" `
+    -WorkingDirectory (Join-Path $root "backend") `
+    -Command "python run_backend.py"
+
+Start-TalentHubService `
+    -Name "TalentHub HR Admin" `
+    -Port 5173 `
+    -HealthUrl "http://127.0.0.1:5173/src/main.ts" `
+    -WorkingDirectory (Join-Path $root "frontend") `
+    -Command "npm run dev"
+
+Start-TalentHubService `
+    -Name "TalentHub Career Site" `
+    -Port 5174 `
+    -HealthUrl "http://127.0.0.1:5174/src/main.ts" `
+    -WorkingDirectory (Join-Path $root "career-frontend") `
+    -Command "npm run dev"
+
+for ($attempt = 1; $attempt -le 15; $attempt++) {
+    $apiReady = Test-HttpEndpoint -Url "http://127.0.0.1:8010/api/v1/health" -ExpectedText "talenthub-api"
+    $hrReady = Test-HttpEndpoint -Url "http://127.0.0.1:5173/src/main.ts"
+    $careerReady = Test-HttpEndpoint -Url "http://127.0.0.1:5174/src/main.ts"
+    if ($apiReady -and $hrReady -and $careerReady) {
+        break
+    }
+    Start-Sleep -Seconds 1
+}
 
 Write-Host ""
-Write-Host "三個伺服器已在各自視窗啟動,請等約 10-15 秒讓它們就緒後再開瀏覽器:" -ForegroundColor Green
-Write-Host "  HR 後台    : http://localhost:5173   (登入帳密見 backend/.env)"
-Write-Host "  求職網站   : http://localhost:5174"
-Write-Host "  後端 API   : http://127.0.0.1:8010/docs"
+Write-Host "Service status:" -ForegroundColor Cyan
+$checks = @(
+    @{ Name = "HR Admin"; Url = "http://127.0.0.1:5173/"; Probe = "http://127.0.0.1:5173/src/main.ts"; Expected = "" },
+    @{ Name = "Career Site"; Url = "http://127.0.0.1:5174/"; Probe = "http://127.0.0.1:5174/src/main.ts"; Expected = "" },
+    @{ Name = "Backend API"; Url = "http://127.0.0.1:8010/api/v1/health"; Probe = "http://127.0.0.1:8010/api/v1/health"; Expected = "talenthub-api" }
+)
+foreach ($check in $checks) {
+    $ready = Test-HttpEndpoint -Url $check.Probe -ExpectedText $check.Expected
+    $label = if ($ready) { "READY" } else { "NOT READY" }
+    $color = if ($ready) { "Green" } else { "Red" }
+    Write-Host ("  {0,-12} {1,-10} {2}" -f $check.Name, $label, $check.Url) -ForegroundColor $color
+}
+
 Write-Host ""
-Write-Host "關閉服務:把那三個新開的視窗關掉即可。" -ForegroundColor Yellow
-Write-Host "(若某個視窗出現 port 已被占用的錯誤,代表該服務已經在跑,可忽略。)" -ForegroundColor DarkGray
+Write-Host "Use restart-dev.bat for a clean restart." -ForegroundColor Yellow
+Write-Host "Use stop-dev.bat to stop the three verified TalentHub services." -ForegroundColor DarkGray

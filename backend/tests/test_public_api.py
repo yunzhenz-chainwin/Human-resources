@@ -54,6 +54,16 @@ def client() -> TestClient:
                     jd="Draft",
                     status="draft",
                 ),
+                JobRequisition(
+                    req_no="DEMO-PUBLIC-001",
+                    title="Demo job must stay private",
+                    department_id=department.id,
+                    employment_type="full_time",
+                    work_city="Taipei",
+                    jd="Demo only",
+                    status="sourcing",
+                    published_at=datetime.now(UTC),
+                ),
             ]
         )
         db.commit()
@@ -151,6 +161,30 @@ def test_job_application_can_be_submitted_without_resume(client: TestClient) -> 
     assert response.json()["application_id"] is not None
     assert response.json()["duplicate"] is False
     assert client.get("/api/v1/resumes").json() == []
+
+
+def test_duplicate_application_still_persists_a_later_resume(client: TestClient) -> None:
+    data = {
+        "job_id": "1",
+        "name": "Later Resume Applicant",
+        "email": "later-resume@example.com",
+        "consent": "true",
+    }
+    first = client.post("/api/v1/public/applications", data=data)
+    assert first.status_code == 201
+    assert first.json()["duplicate"] is False
+
+    second = client.post(
+        "/api/v1/public/applications",
+        data=data,
+        files={"resume": ("later.pdf", b"%PDF-1.4 later", "application/pdf")},
+    )
+    assert second.status_code == 201
+    assert second.json()["application_id"] == first.json()["application_id"]
+    assert second.json()["duplicate"] is True
+    resumes = client.get("/api/v1/resumes").json()
+    assert len(resumes) == 1
+    assert resumes[0]["candidate_id"] is not None
 
 
 def test_application_rejects_draft_job_and_missing_consent(client: TestClient) -> None:

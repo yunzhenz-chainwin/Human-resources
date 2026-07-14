@@ -120,8 +120,12 @@ def _salary_score(candidate: Candidate, requisition: JobRequisition) -> float:
     return min(1.0, overlap / (c_max - c_min))
 
 
+def _candidate_cities(candidate: Candidate) -> list[str]:
+    return candidate.expected_cities or ([candidate.city] if candidate.city else [])
+
+
 def _location_score(candidate: Candidate, work_city: str) -> float:
-    candidate_cities = candidate.expected_cities or ([candidate.city] if candidate.city else [])
+    candidate_cities = _candidate_cities(candidate)
     if not candidate_cities:
         return 0.5
     work = normalize_text(work_city)
@@ -168,7 +172,7 @@ def score_candidate(
     required_education = _education_rank(requisition.education_req)
     years = float(candidate.total_years) if candidate.total_years is not None else None
     min_years = float(requisition.min_years) if requisition.min_years is not None else None
-    expected_cities = {normalize_text(city) for city in candidate.expected_cities or []}
+    expected_cities = {normalize_text(city) for city in _candidate_cities(candidate)}
     work_city = normalize_text(requisition.work_city)
 
     gate_misses: list[str] = []

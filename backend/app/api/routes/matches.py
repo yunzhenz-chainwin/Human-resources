@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
@@ -10,7 +10,7 @@ from app.dependencies.auth import (
     get_current_user,
     require_recruiting_manager,
 )
-from app.models import Candidate, JobRequisition, MatchResult, User
+from app.models import Candidate, JobApplication, JobRequisition, MatchResult, User
 from app.schemas.matching import (
     CandidateMatchOverview,
     CandidateMatchOverviewItem,
@@ -87,6 +87,15 @@ def list_matches(
     )
     if not include_ineligible:
         statement = statement.where(MatchResult.gate_passed.is_(True))
+    if user.role == "manager":
+        statement = statement.where(
+            exists(
+                select(JobApplication.id).where(
+                    JobApplication.requisition_id == requisition_id,
+                    JobApplication.candidate_id == MatchResult.candidate_id,
+                )
+            )
+        )
     if status:
         statement = statement.where(MatchResult.status == status)
     items = list(db.scalars(statement).all())
@@ -105,7 +114,7 @@ def candidate_match_overview(
     """Return every active candidate, including people not scored for this job yet."""
 
     _requisition(db, requisition_id, user)
-    rows = db.execute(
+    statement = (
         select(Candidate, MatchResult)
         .outerjoin(
             MatchResult,
@@ -119,7 +128,16 @@ def candidate_match_overview(
             Candidate.name.asc(),
             Candidate.id.asc(),
         )
-    ).all()
+    )
+    if user.role == "manager":
+        applied_to_this_job = exists(
+            select(JobApplication.id).where(
+                JobApplication.requisition_id == requisition_id,
+                JobApplication.candidate_id == Candidate.id,
+            )
+        )
+        statement = statement.where(applied_to_this_job)
+    rows = db.execute(statement).all()
     items = [
         CandidateMatchOverviewItem(
             candidate=MatchCandidateRead.model_validate(candidate),
@@ -204,9 +222,17 @@ def match_readiness(
     user: User = Depends(get_current_user),
 ) -> dict:
     _requisition(db, requisition_id, user)
-    results = list(
-        db.scalars(select(MatchResult).where(MatchResult.requisition_id == requisition_id)).all()
-    )
+    statement = select(MatchResult).where(MatchResult.requisition_id == requisition_id)
+    if user.role == "manager":
+        statement = statement.where(
+            exists(
+                select(JobApplication.id).where(
+                    JobApplication.requisition_id == requisition_id,
+                    JobApplication.candidate_id == MatchResult.candidate_id,
+                )
+            )
+        )
+    results = list(db.scalars(statement).all())
     return assess_matching_readiness(results)
 
 

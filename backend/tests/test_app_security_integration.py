@@ -265,6 +265,97 @@ def test_manager_is_department_scoped_and_read_only(secured_app_client) -> None:
     ).status_code == 403
 
 
+def test_department_workspace_contains_only_own_jobs_and_actual_applicants(
+    secured_app_client,
+) -> None:
+    client, testing_session, ids = secured_app_client
+    manager_headers = login_headers(client, "manager")
+    response = client.get("/api/v1/department/workspace", headers=manager_headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["department_id"] == ids["engineering"]
+    assert body["total_jobs"] == 1
+    assert body["total_applications"] == 1
+    assert [item["requisition"]["id"] for item in body["jobs"]] == [
+        ids["engineering_job"]
+    ]
+    assert [
+        item["candidate"]["id"] for item in body["jobs"][0]["applicants"]
+    ] == [ids["scoped_candidate"]]
+    assert client.get(
+        "/api/v1/department/workspace", headers=login_headers(client, "hr")
+    ).status_code == 403
+
+    payload = {
+        "title": "Department Platform Engineer",
+        "employment_type": "full_time",
+        "work_city": "Taipei",
+        "jd": "Build the department platform",
+        "summary": "Created directly by the department manager",
+        "skills": ["Python", "SQL", "Python"],
+        "salary_min": 70000,
+        "salary_max": 100000,
+        "salary_type": "monthly",
+        "headcount": 2,
+    }
+    injected_scope = client.post(
+        "/api/v1/department/requisitions",
+        headers=manager_headers,
+        json={**payload, "department_id": ids["sales"]},
+    )
+    assert injected_scope.status_code == 422
+
+    created_response = client.post(
+        "/api/v1/department/requisitions",
+        headers=manager_headers,
+        json=payload,
+    )
+    assert created_response.status_code == 201
+    created = created_response.json()
+    assert created["req_no"].startswith(f"D{ids['engineering']:02d}-")
+    assert created["department_id"] == ids["engineering"]
+    assert created["department_name"] == "Engineering"
+    assert created["requested_by"] is not None
+    assert created["status"] == "submitted"
+    assert created["skills"] == ["Python", "SQL"]
+
+    refreshed = client.get("/api/v1/department/workspace", headers=manager_headers)
+    assert refreshed.status_code == 200
+    assert refreshed.json()["total_jobs"] == 2
+    assert created["id"] in {
+        item["requisition"]["id"] for item in refreshed.json()["jobs"]
+    }
+
+    hr_jobs = client.get(
+        "/api/v1/requisitions", headers=login_headers(client, "hr")
+    )
+    assert hr_jobs.status_code == 200
+    assert created["id"] in {item["id"] for item in hr_jobs.json()}
+
+    it_preview = client.get(
+        f"/api/v1/admin/database/tables/job_requisitions/rows?search={created['req_no']}",
+        headers=login_headers(client, "it"),
+    )
+    assert it_preview.status_code == 200
+    assert it_preview.json()["total"] == 1
+    assert it_preview.json()["rows"][0]["title"] == payload["title"]
+
+    with testing_session() as db:
+        requisition = db.get(JobRequisition, created["id"])
+        manager = db.scalar(select(User).where(User.username == "manager"))
+        assert requisition is not None
+        assert manager is not None
+        assert requisition.requested_by == manager.id
+        audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "department.requisition.create",
+                AuditLog.resource_id == str(created["id"]),
+            )
+        )
+        assert audit is not None
+        assert audit.department_id == ids["engineering"]
+
+
 def test_candidate_detail_creates_real_audit_log(secured_app_client) -> None:
     client, testing_session, ids = secured_app_client
     headers = login_headers(client, "admin")

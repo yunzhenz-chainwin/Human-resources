@@ -26,6 +26,7 @@ from app.schemas.hr import (
     CandidateUpdate,
 )
 from app.services.applications import normalize_email, normalize_phone
+from app.services.security import write_audit
 
 router = APIRouter(prefix="/candidates")
 settings = get_settings()
@@ -98,7 +99,7 @@ def list_candidates(
 def create_candidate(
     payload: CandidateCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_manager),
 ) -> Candidate:
     now = datetime.now(UTC)
     candidate = Candidate(
@@ -115,6 +116,15 @@ def create_candidate(
         status="new",
     )
     db.add(candidate)
+    db.flush()
+    write_audit(
+        db,
+        user,
+        "candidate_create",
+        "candidate",
+        candidate.id,
+        details={"code": candidate.code, "source": candidate.source},
+    )
     db.commit()
     db.refresh(candidate)
     return candidate
@@ -137,7 +147,7 @@ def update_candidate(
     candidate_id: int,
     payload: CandidateUpdate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_manager),
 ) -> Candidate:
     candidate = db.get(Candidate, candidate_id)
     if not candidate or candidate.deleted_at:
@@ -149,6 +159,14 @@ def update_candidate(
         candidate.phone_norm = normalize_phone(updates["phone"])
     for field, value in updates.items():
         setattr(candidate, field, value)
+    write_audit(
+        db,
+        user,
+        "candidate_update",
+        "candidate",
+        candidate.id,
+        details={"code": candidate.code, "fields": sorted(updates)},
+    )
     db.commit()
     db.refresh(candidate)
     return candidate
@@ -296,7 +314,7 @@ def create_contact_alias(
 def delete_candidate(
     candidate_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_manager),
 ) -> None:
     candidate = db.get(Candidate, candidate_id)
     if not candidate or candidate.deleted_at:
@@ -307,6 +325,14 @@ def delete_candidate(
     candidate.photo_content_type = None
     candidate.photo_updated_at = None
     candidate.deleted_at = datetime.now(UTC)
+    write_audit(
+        db,
+        user,
+        "candidate_delete",
+        "candidate",
+        candidate.id,
+        details={"code": candidate.code},
+    )
     db.commit()
     if previous_path and storage in previous_path.parents:
         previous_path.unlink(missing_ok=True)

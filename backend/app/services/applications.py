@@ -66,12 +66,11 @@ def submit_application(
     email_norm = normalize_email(str(payload.email) if payload.email else None)
     phone_norm = normalize_phone(payload.phone)
     candidate = repo.find_candidate(email_norm, phone_norm)
+    existing_application = None
     if candidate:
-        existing = repo.existing_application(payload.requisition_id, candidate.id)
-        if existing:
-            return PublicApplicationResult(
-                application_id=existing.id, status=existing.status, duplicate=True
-            )
+        existing_application = repo.existing_application(
+            payload.requisition_id, candidate.id
+        )
         candidate.email = candidate.email or (str(payload.email).strip() if payload.email else None)
         candidate.email_norm = candidate.email_norm or email_norm
         candidate.phone = candidate.phone or payload.phone
@@ -105,7 +104,7 @@ def submit_application(
     resume = None
     if upload:
         resume = db.scalar(select(ResumeFile).where(ResumeFile.file_hash == upload.file_hash))
-        if resume and resume.candidate_id != candidate.id:
+        if resume and resume.candidate_id not in (None, candidate.id):
             raise HTTPException(status_code=409, detail="履歷檔案已屬於其他人才，請聯絡 HR")
         if not resume:
             resume = ResumeFile(
@@ -120,6 +119,8 @@ def submit_application(
             )
             db.add(resume)
             db.flush()
+        elif resume.candidate_id is None:
+            resume.candidate_id = candidate.id
     elif payload.resume_url or payload.resume_text:
         resume = ResumeFile(
             candidate_id=candidate.id,
@@ -130,6 +131,22 @@ def submit_application(
         )
         db.add(resume)
         db.flush()
+    if existing_application:
+        if resume is not None:
+            existing_application.resume_id = resume.id
+        if payload.cover_letter:
+            existing_application.cover_letter = payload.cover_letter
+        if payload.linkedin_url:
+            existing_application.linkedin_url = str(payload.linkedin_url)
+        if payload.portfolio_url:
+            existing_application.portfolio_url = str(payload.portfolio_url)
+        db.commit()
+        db.refresh(existing_application)
+        return PublicApplicationResult(
+            application_id=existing_application.id,
+            status=existing_application.status,
+            duplicate=True,
+        )
     application = JobApplication(
         requisition_id=payload.requisition_id,
         candidate_id=candidate.id,

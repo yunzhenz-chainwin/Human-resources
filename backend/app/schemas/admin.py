@@ -161,6 +161,8 @@ class DatabaseColumnRead(BaseModel):
     nullable: bool
     primary_key: bool
     redacted: bool = False
+    revealable: bool = False
+    editable: bool = False
 
 
 class DatabaseTableRead(BaseModel):
@@ -169,6 +171,11 @@ class DatabaseTableRead(BaseModel):
     description: str
     row_count: int | None
     columns: list[DatabaseColumnRead]
+    can_create: bool = False
+    can_update: bool = False
+    can_delete: bool = False
+    editable_columns: list[str] = Field(default_factory=list)
+    protection_reason: str | None = None
 
 
 class DatabaseOverviewRead(BaseModel):
@@ -189,4 +196,15 @@ class DatabaseTablePreviewRead(BaseModel):
     searchable_columns: list[str]
     visible_columns: list[str]
     redacted_columns: list[str]
+    pii_revealed: bool = False
     rows: list[dict[str, Any]]
+
+
+class DatabaseRowWrite(BaseModel):
+    values: dict[str, Any] = Field(min_length=1, max_length=100)
+
+
+class DatabaseRowMutationRead(BaseModel):
+    table_name: str
+    row_id: int | str
+    row: dict[str, Any] | None = None

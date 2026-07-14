@@ -64,6 +64,10 @@ class JobRequisition(TimestampMixin, Base):
     department = relationship("Department")
     applications: Mapped[list["JobApplication"]] = relationship(cascade="all, delete-orphan")
 
+    @property
+    def department_name(self) -> str | None:
+        return self.department.name if self.department else None
+
 
 class ResumeFile(Base):
     __tablename__ = "resume_files"

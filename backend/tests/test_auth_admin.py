@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from urllib.parse import quote
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -13,8 +14,15 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_db
 from app.dependencies.auth import audit_pii_read, enforce_department_scope, get_current_user
+from app.models.candidate import Candidate
 from app.models.organization import Department, User
-from app.models.security import AuditLog, RefreshToken, SystemIssue  # noqa: F401
+from app.models.recruitment import ResumeFile
+from app.models.security import (  # noqa: F401
+    AuditLog,
+    RefreshToken,
+    SystemIssue,
+    SystemSetting,
+)
 from app.services.security import bootstrap_admin, hash_password, verify_password
 
 
@@ -149,6 +157,19 @@ def test_hr_creates_persisted_login_without_privilege_escalation(auth_client) ->
     client, testing_session = auth_client
     hr = login(client, "hruser", "HR-Test-Password-123")
     headers = bearer(hr["access_token"])
+    missing_department = client.post(
+        "/admin/users",
+        json={
+            "username": "unscopedmanager",
+            "email": "unscopedmanager@example.test",
+            "password": "dept123",
+            "display_name": "Unscoped Manager",
+            "role": "manager",
+            "department_id": None,
+        },
+        headers=headers,
+    )
+    assert missing_department.status_code == 422
     created = client.post(
         "/admin/users",
         json={
@@ -281,7 +302,55 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
     with testing_session() as db:
         assert db.get(SystemIssue, issue["id"]).resolution_notes == "Index rebuilt."
 
-    overview_response = client.get("/admin/database/overview", headers=headers)
+        candidate = Candidate(
+            code="PRIVATE-001",
+            name="Private Candidate",
+            email="private@example.test",
+            phone="0912-345-678",
+            city="Taipei",
+            photo_path="C:/private/candidate-photo.jpg",
+            source="direct",
+        )
+        db.add(candidate)
+        db.flush()
+        db.add_all(
+            [
+                ResumeFile(
+                    candidate_id=candidate.id,
+                    storage_key="resumes/private.pdf",
+                    original_filename="private-name.pdf",
+                    source_platform="direct",
+                    parse_status="parsed",
+                    parsed_payload={"name": "Private Candidate"},
+                    source_evidence=[{"type": "private"}],
+                    resume_text="full private resume text",
+                ),
+                SystemSetting(
+                    key="integration.secret",
+                    value="must-never-appear-in-database-preview",
+                    is_secret=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    created_it = client.post(
+        "/admin/users",
+        headers=headers,
+        json={
+            "username": "itviewer",
+            "email": "itviewer@example.test",
+            "password": "IT-Viewer-Password-123",
+            "display_name": "IT Viewer",
+            "role": "it",
+        },
+    )
+    assert created_it.status_code == 201
+    it_headers = bearer(
+        login(client, "itviewer", "IT-Viewer-Password-123")["access_token"]
+    )
+
+    overview_response = client.get("/admin/database/overview", headers=it_headers)
     assert overview_response.status_code == 200
     overview = overview_response.json()
     assert overview["healthy"] is True
@@ -295,10 +364,24 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
     assert {column["name"] for column in users_table["columns"]} >= {"id", "username"}
     assert "database_url" not in overview
     assert "rows" not in users_table
+    assert users_table["can_create"] is False
+    assert users_table["protection_reason"]
+    tags_table = next(item for item in overview["tables"] if item["name"] == "tags")
+    assert tags_table["can_create"] is True
+    assert tags_table["can_update"] is True
+    assert tags_table["can_delete"] is True
+    assert {"name", "category", "is_active"} <= set(tags_table["editable_columns"])
+    candidates_table = next(
+        item for item in overview["tables"] if item["name"] == "candidates"
+    )
+    candidate_columns = {column["name"]: column for column in candidates_table["columns"]}
+    assert candidate_columns["name"]["redacted"] is True
+    assert candidate_columns["name"]["revealable"] is True
+    assert candidate_columns["email_norm"]["revealable"] is False
 
     preview_response = client.get(
         "/admin/database/tables/users/rows?page=1&page_size=10&search=rootadmin",
-        headers=headers,
+        headers=it_headers,
     )
     assert preview_response.status_code == 200
     preview = preview_response.json()
@@ -308,9 +391,122 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
     assert "password_hash" not in preview["rows"][0]
     assert preview["rows"][0]["username"] == "rootadmin"
     assert preview["display_name"] == "後台登入人員"
+
+    for table_name, protected_columns in {
+        "candidates": {"name", "email", "phone", "city", "photo_path"},
+        "resume_files": {
+            "storage_key",
+            "original_filename",
+            "parsed_payload",
+            "source_evidence",
+            "resume_text",
+        },
+        "system_settings": {"value", "is_secret"},
+    }.items():
+        protected_preview = client.get(
+            f"/admin/database/tables/{table_name}/rows", headers=it_headers
+        )
+        assert protected_preview.status_code == 200
+        body = protected_preview.json()
+        assert protected_columns <= set(body["redacted_columns"])
+        assert protected_columns.isdisjoint(body["visible_columns"])
+        assert all(protected_columns.isdisjoint(row) for row in body["rows"])
+
+    candidate_preview = client.get(
+        "/admin/database/tables/candidates/rows?search=PRIVATE-001",
+        headers=it_headers,
+    )
+    assert candidate_preview.status_code == 200
+    candidate_body = candidate_preview.json()
+    assert candidate_body["total"] == 1
+    assert "code" in candidate_body["visible_columns"]
+    assert candidate_body["rows"][0]["code"] == "PRIVATE-001"
+    assert "name" not in candidate_body["rows"][0]
+
+    missing_reason = client.get(
+        "/admin/database/tables/candidates/rows?search=PRIVATE-001&reveal_pii=true",
+        headers=it_headers,
+    )
+    assert missing_reason.status_code == 422
+    pii_reason = "協助 HR 排查人才資料同步問題"
+    revealed_preview = client.get(
+        "/admin/database/tables/candidates/rows?search=PRIVATE-001&reveal_pii=true",
+        headers={**it_headers, "X-PII-Access-Reason": quote(pii_reason)},
+    )
+    assert revealed_preview.status_code == 200
+    revealed_body = revealed_preview.json()
+    assert revealed_body["pii_revealed"] is True
+    assert revealed_body["rows"][0]["name"] == "Private Candidate"
+    assert revealed_body["rows"][0]["email"] == "private@example.test"
+    assert "email_norm" not in revealed_body["visible_columns"]
+    with testing_session() as db:
+        pii_audit = db.scalar(
+            select(AuditLog).where(AuditLog.action == "pii.database_preview")
+        )
+        assert pii_audit is not None
+        assert pii_audit.actor_user_id is not None
+        assert pii_audit.resource_id == "candidates"
+        assert pii_audit.details["reason"] == pii_reason
+
     assert client.get(
-        "/admin/database/tables/not_a_table/rows", headers=headers
+        "/admin/database/tables/not_a_table/rows", headers=it_headers
     ).status_code == 404
+
+    created_row = client.post(
+        "/admin/database/tables/tags/rows",
+        headers=it_headers,
+        json={
+            "values": {
+                "name": "資料表手動維護",
+                "category": "candidate",
+                "is_active": True,
+            }
+        },
+    )
+    assert created_row.status_code == 201
+    row_id = created_row.json()["row_id"]
+    assert created_row.json()["row"]["name"] == "資料表手動維護"
+
+    updated_row = client.patch(
+        f"/admin/database/tables/tags/rows/{row_id}",
+        headers=it_headers,
+        json={"values": {"name": "資料表維護已更新"}},
+    )
+    assert updated_row.status_code == 200
+    assert updated_row.json()["row"]["name"] == "資料表維護已更新"
+
+    protected_write = client.post(
+        "/admin/database/tables/users/rows",
+        headers=it_headers,
+        json={"values": {"username": "unsafe"}},
+    )
+    assert protected_write.status_code == 403
+
+    deleted_row = client.delete(
+        f"/admin/database/tables/tags/rows/{row_id}", headers=it_headers
+    )
+    assert deleted_row.status_code == 200
+    assert deleted_row.json()["row"] is None
+
+    with testing_session() as db:
+        database_actions = set(
+            db.scalars(
+                select(AuditLog.action).where(
+                    AuditLog.action.in_(
+                        {
+                            "database_row_create",
+                            "database_row_update",
+                            "database_row_delete",
+                        }
+                    )
+                )
+            )
+        )
+        assert database_actions == {
+            "database_row_create",
+            "database_row_update",
+            "database_row_delete",
+        }
 
     hr = login(client, "hruser", "HR-Test-Password-123")
     manager = login(client, "manager", "Manager-Test-Password-123")
@@ -320,4 +516,9 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
         assert client.get("/admin/database/overview", headers=denied_headers).status_code == 403
         assert client.get(
             "/admin/database/tables/users/rows", headers=denied_headers
+        ).status_code == 403
+        assert client.post(
+            "/admin/database/tables/tags/rows",
+            headers=denied_headers,
+            json={"values": {"name": "denied", "category": "candidate"}},
         ).status_code == 403

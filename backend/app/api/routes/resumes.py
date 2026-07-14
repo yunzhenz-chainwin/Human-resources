@@ -70,11 +70,19 @@ def _apply_parse(resume: ResumeFile, path: Path, requested: str) -> None:
 async def upload_resumes(
     files: list[UploadFile] = File(...),
     source_platform: SourcePlatform = Form("generic"),
+    candidate_id: int | None = Form(None),
     db: Session = Depends(get_db),
     _user: User = Depends(require_recruiting_manager),
 ) -> list[ResumeUploadResult]:
     if not files:
         raise HTTPException(status_code=422, detail="At least one resume is required")
+    candidate: Candidate | None = None
+    if candidate_id is not None:
+        candidate = db.get(Candidate, candidate_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        if candidate.deleted_at is not None:
+            raise HTTPException(status_code=409, detail="Deleted candidate cannot receive a resume")
     prepared_uploads: list[PreparedResumeUpload] = []
     results: list[ResumeUploadResult] = []
     try:
@@ -85,6 +93,14 @@ async def upload_resumes(
                 select(ResumeFile).where(ResumeFile.file_hash == upload_data.file_hash)
             )
             if existing:
+                if candidate is not None:
+                    if existing.candidate_id not in (None, candidate.id):
+                        prepared.discard()
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Resume file is already linked to another candidate",
+                        )
+                    existing.candidate_id = candidate.id
                 prepared.discard()
                 results.append(
                     ResumeUploadResult(
@@ -102,6 +118,7 @@ async def upload_resumes(
             prepared_uploads.append(prepared)
             path = prepared.promote()
             resume = ResumeFile(
+                candidate_id=candidate.id if candidate is not None else None,
                 storage_key=upload_data.storage_key,
                 original_filename=upload_data.original_filename,
                 file_hash=upload_data.file_hash,
@@ -273,15 +290,45 @@ def confirm_resume(
     resume = db.get(ResumeFile, resume_id)
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
+    requested_candidate_id = request.candidate_id if request else None
+    if resume.parse_status == "confirmed":
+        if resume.candidate_id is None:
+            raise HTTPException(status_code=409, detail="Confirmed resume has no candidate")
+        if (
+            requested_candidate_id is not None
+            and requested_candidate_id != resume.candidate_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Confirmed resume cannot be linked to another candidate",
+            )
+        confirmed_candidate = db.get(Candidate, resume.candidate_id)
+        if confirmed_candidate is None or confirmed_candidate.deleted_at is not None:
+            raise HTTPException(status_code=409, detail="Confirmed candidate is unavailable")
+        return ResumeConfirmResult(
+            resume_id=resume.id,
+            candidate_id=confirmed_candidate.id,
+            candidate_code=confirmed_candidate.code,
+            created=False,
+        )
+
     payload = resume.parsed_payload or {}
     name = str(payload.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="Name is required before confirmation")
 
-    candidate = (
-        db.get(Candidate, request.candidate_id) if request and request.candidate_id else None
-    )
-    if request and request.candidate_id and not candidate:
+    if (
+        resume.candidate_id is not None
+        and requested_candidate_id is not None
+        and requested_candidate_id != resume.candidate_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Linked resume cannot be reassigned during confirmation",
+        )
+    target_candidate_id = requested_candidate_id or resume.candidate_id
+    candidate = db.get(Candidate, target_candidate_id) if target_candidate_id else None
+    if target_candidate_id is not None and not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
     if candidate and candidate.deleted_at is not None:
         raise HTTPException(status_code=409, detail="Deleted candidate cannot receive a resume")

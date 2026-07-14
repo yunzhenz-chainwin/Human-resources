@@ -4,6 +4,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models import Candidate, CandidateSkill, Department, JobRequisition
 from app.services.matching import rematch_requisition
 
@@ -83,9 +84,16 @@ DEMO_REQUISITIONS = (
 )
 
 
+def _require_non_production_demo_environment() -> None:
+    environment = get_settings().app_env.strip().lower()
+    if environment in {"production", "staging"}:
+        raise RuntimeError(f"Demo data seeding is disabled in {environment}")
+
+
 def seed_demo_requisitions(db: Session) -> list[JobRequisition]:
     """Insert missing demo jobs by stable req_no; never modify existing rows."""
 
+    _require_non_production_demo_environment()
     existing_req_nos = set(db.scalars(select(JobRequisition.req_no)).all())
     department_id = db.scalar(
         select(Department.id).where(Department.is_active.is_(True)).order_by(Department.id)
@@ -143,6 +151,7 @@ MATCHING_SHOWCASE_CANDIDATES = (
 def seed_matching_showcase(db: Session) -> tuple[JobRequisition, list[Candidate]]:
     """Upsert isolated showcase data and calculate exact 100/75/50 results."""
 
+    _require_non_production_demo_environment()
     job = db.scalar(
         select(JobRequisition).where(
             JobRequisition.req_no == MATCHING_SHOWCASE_JOB["req_no"]

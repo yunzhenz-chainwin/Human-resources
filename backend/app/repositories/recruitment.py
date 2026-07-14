@@ -12,7 +12,10 @@ class RecruitmentRepository:
         query = (
             select(JobRequisition)
             .options(joinedload(JobRequisition.department))
-            .where(JobRequisition.status.in_(("approved", "sourcing", "interviewing")))
+            .where(
+                JobRequisition.status.in_(("approved", "sourcing", "interviewing")),
+                ~JobRequisition.req_no.startswith("DEMO-"),
+            )
             .order_by(JobRequisition.published_at.desc(), JobRequisition.id.desc())
         )
         return list(self.db.scalars(query).all())
@@ -24,6 +27,7 @@ class RecruitmentRepository:
             .where(
                 JobRequisition.id == job_id,
                 JobRequisition.status.in_(("approved", "sourcing", "interviewing")),
+                ~JobRequisition.req_no.startswith("DEMO-"),
             )
         )
         return self.db.scalar(query)

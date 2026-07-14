@@ -39,6 +39,12 @@ subprocess.run(
 )
 os.chdir(BACKEND)
 
+from app.db.session import SessionLocal  # noqa: E402
+from app.services.initial_data import seed_initial_data  # noqa: E402
+
+with SessionLocal() as database:
+    seed_initial_data(database)
+
 import uvicorn  # noqa: E402
 
 uvicorn.run("app.main:app", host="127.0.0.1", port=8018, log_level="warning")

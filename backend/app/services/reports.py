@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 
-from sqlalchemy import Integer, case, cast, exists, func, select
+from sqlalchemy import Integer, case, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import Candidate, CandidateSkill, JobApplication, JobRequisition
@@ -22,6 +22,17 @@ FUNNEL_STAGES = {
     "interview": {"interview", "interviewing", "offered", "hired"},
     "hired": {"hired"},
 }
+
+
+def _formal_candidate_filters():
+    return (
+        or_(Candidate.source.is_(None), func.lower(Candidate.source) != "demo"),
+        ~Candidate.code.startswith("T-DEMO-"),
+    )
+
+
+def _formal_requisition_filter():
+    return ~JobRequisition.req_no.startswith("DEMO-")
 
 
 def date_bounds(
@@ -47,7 +58,11 @@ def funnel_report(
         select(func.count(JobApplication.id).label("total"), *expressions)
         .join(Candidate, Candidate.id == JobApplication.candidate_id)
         .join(JobRequisition, JobRequisition.id == JobApplication.requisition_id)
-        .where(Candidate.deleted_at.is_(None))
+        .where(
+            Candidate.deleted_at.is_(None),
+            *_formal_candidate_filters(),
+            _formal_requisition_filter(),
+        )
     )
     query = _date_filter(query, JobApplication.created_at, start, end)
     if department_id is not None:
@@ -71,7 +86,9 @@ def time_to_fill_report(
     department_id: int | None = None,
 ) -> dict:
     start, end = date_bounds(from_date, to_date)
-    query = select(JobRequisition).where(JobRequisition.filled_at.is_not(None))
+    query = select(JobRequisition).where(
+        JobRequisition.filled_at.is_not(None), _formal_requisition_filter()
+    )
     query = _date_filter(query, JobRequisition.filled_at, start, end)
     if department_id is not None:
         query = query.where(JobRequisition.department_id == department_id)
@@ -109,7 +126,11 @@ def sources_report(
         )
         .join(Candidate, Candidate.id == JobApplication.candidate_id)
         .join(JobRequisition, JobRequisition.id == JobApplication.requisition_id)
-        .where(Candidate.deleted_at.is_(None))
+        .where(
+            Candidate.deleted_at.is_(None),
+            *_formal_candidate_filters(),
+            _formal_requisition_filter(),
+        )
     )
     query = _date_filter(query, JobApplication.created_at, start, end)
     if department_id is not None:
@@ -138,7 +159,7 @@ def talent_pool_report(
     skill_limit: int = 20,
 ) -> dict:
     start, end = date_bounds(from_date, to_date)
-    filters = [Candidate.deleted_at.is_(None)]
+    filters = [Candidate.deleted_at.is_(None), *_formal_candidate_filters()]
     if start is not None:
         filters.append(Candidate.created_at >= start)
     if end is not None:

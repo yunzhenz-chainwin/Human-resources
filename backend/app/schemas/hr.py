@@ -36,6 +36,7 @@ class CandidateRead(BaseModel):
     has_photo: bool
     photo_updated_at: datetime | None
     created_at: datetime
+    updated_at: datetime
 
 
 class CandidateUpdate(BaseModel):
@@ -91,6 +92,8 @@ class RequisitionRead(BaseModel):
     req_no: str
     title: str
     department_id: int | None
+    department_name: str | None
+    requested_by: int | None
     employment_type: str
     work_city: str
     jd: str
@@ -118,6 +121,47 @@ class RequisitionUpdate(BaseModel):
     salary_type: str | None = None
     headcount: int | None = Field(default=None, ge=1)
     status: str | None = None
+
+
+class DepartmentRequisitionCreate(BaseModel):
+    """Fields a department manager may submit for their own department."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=100)
+    employment_type: str = Field(default="full_time", min_length=1, max_length=20)
+    work_city: str = Field(min_length=1, max_length=50)
+    jd: str = Field(min_length=1)
+    summary: str | None = Field(default=None, max_length=500)
+    skills: list[str] = Field(default_factory=list)
+    salary_min: int | None = Field(default=None, ge=0)
+    salary_max: int | None = Field(default=None, ge=0)
+    salary_type: str | None = Field(default="monthly", max_length=10)
+    headcount: int = Field(default=1, ge=1)
+
+
+class DepartmentApplicantRead(BaseModel):
+    application_id: int
+    application_status: str
+    application_source: str
+    applied_at: datetime
+    match_score: float | None = None
+    match_status: str | None = None
+    candidate: CandidateRead
+
+
+class DepartmentJobWorkspaceRead(BaseModel):
+    requisition: RequisitionRead
+    applicants: list[DepartmentApplicantRead]
+
+
+class DepartmentWorkspaceRead(BaseModel):
+    department_id: int
+    department_name: str
+    total_jobs: int
+    total_applications: int
+    total_candidates: int
+    jobs: list[DepartmentJobWorkspaceRead]
 
 
 class ResumeRead(BaseModel):

@@ -1,5 +1,28 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import MetaData, String, Table, cast, func, inspect, or_, select
+import json
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import Any
+from urllib.parse import unquote
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    Integer,
+    MetaData,
+    Numeric,
+    String,
+    Table,
+    cast,
+    func,
+    inspect,
+    or_,
+    select,
+)
+from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -12,6 +35,8 @@ from app.schemas.admin import (
     CatalogRead,
     DatabaseColumnRead,
     DatabaseOverviewRead,
+    DatabaseRowMutationRead,
+    DatabaseRowWrite,
     DatabaseTablePreviewRead,
     DatabaseTableRead,
     DepartmentCreate,
@@ -37,6 +62,77 @@ _REDACTED_COLUMN_MARKERS = (
     "encryption_key", "raw_text", "parsed_text",
 )
 
+# These columns contain recruiting PII or secret values even though their names
+# do not contain one of the generic markers above.  The IT database browser is a
+# diagnostics surface, not an alternative path around recruiting RBAC.
+_TABLE_REDACTED_COLUMNS: dict[str, frozenset[str]] = {
+    "system_settings": frozenset({"value"}),
+    "resume_files": frozenset(
+        {
+            "storage_key",
+            "original_filename",
+            "parsed_payload",
+            "field_confidence",
+            "source_evidence",
+            "error_message",
+            "resume_url",
+            "resume_text",
+        }
+    ),
+    "candidates": frozenset(
+        {
+            "name",
+            "gender",
+            "birth_year",
+            "birth_date",
+            "email",
+            "email_norm",
+            "phone",
+            "phone_norm",
+            "city",
+            "address",
+            "current_title",
+            "current_company",
+            "expected_title",
+            "expected_cities",
+            "expected_salary_min",
+            "expected_salary_max",
+            "source_note",
+            "photo_path",
+            "photo_content_type",
+            "summary",
+            "blacklist_reason",
+        }
+    ),
+}
+
+# Only these recruiting fields may be revealed by an explicitly authorized IT
+# preview. Authentication secrets, normalized identifiers, storage paths and
+# resume contents remain redacted under every circumstance.
+_TABLE_REVEALABLE_COLUMNS: dict[str, frozenset[str]] = {
+    "candidates": frozenset(
+        {
+            "name",
+            "gender",
+            "birth_year",
+            "birth_date",
+            "email",
+            "phone",
+            "city",
+            "address",
+            "current_title",
+            "current_company",
+            "expected_title",
+            "expected_cities",
+            "expected_salary_min",
+            "expected_salary_max",
+            "source_note",
+            "summary",
+            "blacklist_reason",
+        }
+    ),
+}
+
 # Keep database identifiers stable for migrations/integrations while presenting
 # operational names that are understandable to IT and HR stakeholders.
 _TABLE_PRESENTATION: dict[str, tuple[str, str]] = {
@@ -61,13 +157,246 @@ _TABLE_PRESENTATION: dict[str, tuple[str, str]] = {
 }
 
 
+@dataclass(frozen=True)
+class _TableEditorPolicy:
+    editable_columns: frozenset[str]
+    can_create: bool = True
+    can_update: bool = True
+    can_delete: bool = True
+
+
+# Raw editing is deliberately limited to operational, non-secret tables. PII,
+# authentication, resume binaries and generated matching data keep using their
+# domain workflows so this tool cannot bypass validation or privacy controls.
+_TABLE_EDITOR_POLICIES: dict[str, _TableEditorPolicy] = {
+    "departments": _TableEditorPolicy(
+        frozenset({"name", "parent_id", "is_active"})
+    ),
+    "skill_catalog": _TableEditorPolicy(
+        frozenset({"name", "is_active"})
+    ),
+    "tags": _TableEditorPolicy(
+        frozenset({"name", "category", "is_active"})
+    ),
+    "job_requisitions": _TableEditorPolicy(
+        frozenset(
+            {
+                "req_no",
+                "title",
+                "department_id",
+                "headcount",
+                "employment_type",
+                "work_city",
+                "work_address",
+                "salary_min",
+                "salary_max",
+                "salary_type",
+                "min_years",
+                "education_req",
+                "language_req",
+                "jd",
+                "summary",
+                "skills",
+                "urgency",
+                "needed_by",
+                "status",
+                "match_weights",
+            }
+        )
+    ),
+    "candidate_educations": _TableEditorPolicy(
+        frozenset(
+            {
+                "candidate_id",
+                "school",
+                "major",
+                "degree",
+                "start_ym",
+                "end_ym",
+                "is_graduated",
+                "sort_order",
+            }
+        )
+    ),
+    "candidate_experiences": _TableEditorPolicy(
+        frozenset(
+            {
+                "candidate_id",
+                "company",
+                "title",
+                "industry",
+                "start_ym",
+                "end_ym",
+                "years",
+                "description",
+                "sort_order",
+            }
+        )
+    ),
+    "candidate_skills": _TableEditorPolicy(
+        frozenset({"candidate_id", "skill"})
+    ),
+    "candidate_activities": _TableEditorPolicy(
+        frozenset({"candidate_id", "user_id", "type", "content", "happened_at"})
+    ),
+    "job_applications": _TableEditorPolicy(
+        frozenset(
+            {
+                "requisition_id",
+                "candidate_id",
+                "resume_id",
+                "cover_letter",
+                "linkedin_url",
+                "portfolio_url",
+                "status",
+                "source",
+            }
+        )
+    ),
+    "match_results": _TableEditorPolicy(
+        frozenset({"status", "feedback_reason", "feedback_by", "feedback_at"}),
+        can_create=False,
+        can_delete=False,
+    ),
+}
+
+_TABLE_PROTECTION_REASONS: dict[str, str] = {
+    "alembic_version": "資料庫版本由 Migration 管理，禁止人工修改。",
+    "audit_logs": "稽核紀錄必須保持不可竄改。",
+    "candidates": "包含人才個資，請由人才庫頁面新增、編輯或刪除。",
+    "refresh_tokens": "登入權杖由認證系統管理。",
+    "resume_files": "履歷必須經由上傳與履歷辨識流程建立，避免檔案與資料列不同步。",
+    "system_issues": "請由本頁的問題紀錄功能維護，以保留日期與進度驗證。",
+    "system_settings": "系統設定可能包含秘密值，請由系統設定功能維護。",
+    "users": "帳號必須由帳號與權限功能維護，確保密碼正確雜湊。",
+}
+
+
 def _table_presentation(table_name: str) -> tuple[str, str]:
     return _TABLE_PRESENTATION.get(table_name, (table_name, "系統資料表"))
 
 
-def _is_redacted_column(column_name: str) -> bool:
+def _is_redacted_column(table_name: str, column_name: str) -> bool:
     normalized = column_name.lower()
-    return any(marker in normalized for marker in _REDACTED_COLUMN_MARKERS)
+    return normalized in _TABLE_REDACTED_COLUMNS.get(table_name, ()) or any(
+        marker in normalized for marker in _REDACTED_COLUMN_MARKERS
+    )
+
+
+def _is_revealable_column(table_name: str, column_name: str) -> bool:
+    return column_name.lower() in _TABLE_REVEALABLE_COLUMNS.get(table_name, ())
+
+
+def _table_editor_policy(table_name: str) -> _TableEditorPolicy | None:
+    return _TABLE_EDITOR_POLICIES.get(table_name)
+
+
+def _editable_table(
+    db: Session, table_name: str, action: str
+) -> tuple[Table, _TableEditorPolicy]:
+    connection = db.connection()
+    inspector = inspect(connection)
+    if table_name not in inspector.get_table_names():
+        raise HTTPException(status_code=404, detail="Database table not found")
+    policy = _table_editor_policy(table_name)
+    allowed = policy and bool(getattr(policy, f"can_{action}", False))
+    if not allowed:
+        reason = _TABLE_PROTECTION_REASONS.get(
+            table_name, "This table is read-only in the maintenance editor."
+        )
+        raise HTTPException(status_code=403, detail=reason)
+    return Table(table_name, MetaData(), autoload_with=connection), policy
+
+
+def _single_primary_key(table: Table):
+    primary_keys = list(table.primary_key.columns)
+    if len(primary_keys) != 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Only tables with one primary key can be edited here",
+        )
+    return primary_keys[0]
+
+
+def _convert_database_value(column, value: Any) -> Any:
+    if value is None or (value == "" and column.nullable):
+        return None
+    try:
+        if isinstance(column.type, JSON):
+            return json.loads(value) if isinstance(value, str) else value
+        if isinstance(column.type, Boolean):
+            if isinstance(value, bool):
+                return value
+            normalized = str(value).strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+            raise ValueError("must be true or false")
+        if isinstance(column.type, Integer):
+            return int(value)
+        if isinstance(column.type, Numeric):
+            return Decimal(str(value))
+        if isinstance(column.type, DateTime):
+            if isinstance(value, datetime):
+                return value
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if isinstance(column.type, Date):
+            if isinstance(value, date):
+                return value
+            return date.fromisoformat(str(value))
+        if isinstance(column.type, String):
+            return str(value)
+        return value
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid value for column {column.name}: {exc}",
+        ) from exc
+
+
+def _prepare_database_values(
+    table: Table, policy: _TableEditorPolicy, raw_values: dict[str, Any]
+) -> dict[str, Any]:
+    unknown = set(raw_values) - policy.editable_columns
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Columns are not editable: {', '.join(sorted(unknown))}",
+        )
+    values = {
+        key: _convert_database_value(table.c[key], value)
+        for key, value in raw_values.items()
+    }
+    if table.name == "skill_catalog" and "name" in values:
+        values["name"] = str(values["name"]).strip()
+        values["name_norm"] = values["name"].casefold()
+    if table.name == "candidate_skills" and "skill" in values:
+        values["skill"] = str(values["skill"]).strip()
+        values["skill_norm"] = values["skill"].casefold()
+    if (
+        table.name == "job_requisitions"
+        and values.get("status") in {"approved", "sourcing", "interviewing"}
+        and "published_at" in table.c
+    ):
+        values["published_at"] = datetime.now(UTC)
+    if "updated_at" in table.c:
+        values["updated_at"] = datetime.now(UTC)
+    return values
+
+
+def _database_row(table: Table, primary_key, row_id: Any, db: Session) -> dict[str, Any]:
+    visible = [
+        column
+        for column in table.columns
+        if not _is_redacted_column(table.name, column.name)
+    ]
+    row = db.execute(
+        select(*visible).select_from(table).where(primary_key == row_id)
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Database row not found")
+    return dict(row._mapping)
 
 
 def _enforce_hr_user_scope(actor: User, target_role: str, target: User | None = None) -> None:
@@ -86,6 +415,14 @@ def _department(db: Session, department_id: int | None) -> Department | None:
     if not department:
         raise HTTPException(status_code=422, detail="Department not found")
     return department
+
+
+def _require_manager_department(role: str, department_id: int | None) -> None:
+    if role == "manager" and department_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Department manager accounts must belong to a department",
+        )
 
 
 def _commit_audit(
@@ -118,6 +455,7 @@ def create_user(
 ) -> User:
     username = payload.username.strip().lower()
     _enforce_hr_user_scope(actor, payload.role)
+    _require_manager_department(payload.role, payload.department_id)
     if db.scalar(
         select(User).where(or_(User.username == username, User.email == payload.email))
     ):
@@ -151,6 +489,10 @@ def update_user(
         raise HTTPException(status_code=404, detail="User not found")
     values = payload.model_dump(exclude_unset=True)
     _enforce_hr_user_scope(actor, values.get("role", user.role), user)
+    _require_manager_department(
+        values.get("role", user.role),
+        values.get("department_id", user.department_id),
+    )
     if "department_id" in values:
         _department(db, values["department_id"])
     if password := values.pop("password", None):
@@ -417,6 +759,7 @@ def database_overview(
     tables: list[DatabaseTableRead] = []
     for table_name in sorted(inspector.get_table_names()):
         display_name, description = _table_presentation(table_name)
+        editor_policy = _table_editor_policy(table_name)
         columns = inspector.get_columns(table_name)
         primary_keys = set(
             (inspector.get_pk_constraint(table_name) or {}).get("constrained_columns") or []
@@ -439,10 +782,29 @@ def database_overview(
                         type=str(column["type"]),
                         nullable=bool(column.get("nullable", True)),
                         primary_key=column["name"] in primary_keys,
-                        redacted=_is_redacted_column(column["name"]),
+                        redacted=_is_redacted_column(table_name, column["name"]),
+                        revealable=_is_revealable_column(table_name, column["name"]),
+                        editable=bool(
+                            editor_policy
+                            and column["name"] in editor_policy.editable_columns
+                        ),
                     )
                     for column in columns
                 ],
+                can_create=bool(editor_policy and editor_policy.can_create),
+                can_update=bool(editor_policy and editor_policy.can_update),
+                can_delete=bool(editor_policy and editor_policy.can_delete),
+                editable_columns=(
+                    sorted(editor_policy.editable_columns) if editor_policy else []
+                ),
+                protection_reason=(
+                    None
+                    if editor_policy
+                    else _TABLE_PROTECTION_REASONS.get(
+                        table_name,
+                        "系統產生或關聯性高的資料表目前僅提供安全檢視。",
+                    )
+                ),
             )
         )
     return DatabaseOverviewRead(
@@ -457,13 +819,17 @@ def database_overview(
 @router.get("/database/tables/{table_name}/rows", response_model=DatabaseTablePreviewRead)
 def database_table_preview(
     table_name: str,
+    request: Request,
+    response: Response,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     search: str | None = Query(default=None, max_length=100),
-    _: User = Depends(admin_user),
+    reveal_pii: bool = Query(False),
+    pii_access_reason: str | None = Header(default=None, alias="X-PII-Access-Reason"),
+    actor: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> DatabaseTablePreviewRead:
-    """Preview rows for IT diagnostics without exposing secrets."""
+    """Preview rows for IT diagnostics with audited, narrowly scoped PII reveal."""
     connection = db.connection()
     inspector = inspect(connection)
     # Reflect only inspector-discovered names; never interpolate route input into SQL.
@@ -471,7 +837,21 @@ def database_table_preview(
         raise HTTPException(status_code=404, detail="Database table not found")
     table = Table(table_name, MetaData(), autoload_with=connection)
     display_name, description = _table_presentation(table_name)
-    redacted_columns = [c.name for c in table.columns if _is_redacted_column(c.name)]
+    reason = unquote(pii_access_reason or "").strip()
+    revealable_columns = _TABLE_REVEALABLE_COLUMNS.get(table_name, frozenset())
+    if reveal_pii and not revealable_columns:
+        raise HTTPException(status_code=403, detail="This table does not allow PII reveal")
+    if reveal_pii and not 5 <= len(reason) <= 200:
+        raise HTTPException(
+            status_code=422,
+            detail="PII access reason must contain between 5 and 200 characters",
+        )
+    redacted_columns = [
+        c.name
+        for c in table.columns
+        if _is_redacted_column(table_name, c.name)
+        and not (reveal_pii and c.name in revealable_columns)
+    ]
     visible = [c for c in table.columns if c.name not in redacted_columns]
     searchable = [c for c in visible if isinstance(c.type, String)]
     normalized_search = (search or "").strip()
@@ -485,6 +865,25 @@ def database_table_preview(
     if primary_keys:
         rows_statement = rows_statement.order_by(*(c.desc() for c in primary_keys))
     rows_statement = rows_statement.offset((page - 1) * page_size).limit(page_size)
+    rows = [dict(row._mapping) for row in db.execute(rows_statement)]
+    if reveal_pii:
+        write_audit(
+            db,
+            actor,
+            "pii.database_preview",
+            "database_table",
+            table_name,
+            details={
+                "reason": reason,
+                "page": page,
+                "row_count": len(rows),
+                "revealed_columns": sorted(revealable_columns),
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        db.commit()
+    response.headers["Cache-Control"] = "no-store"
     return DatabaseTablePreviewRead(
         table_name=table_name,
         display_name=display_name,
@@ -495,5 +894,122 @@ def database_table_preview(
         searchable_columns=[c.name for c in searchable],
         visible_columns=[c.name for c in visible],
         redacted_columns=redacted_columns,
-        rows=[dict(row._mapping) for row in db.execute(rows_statement)],
+        pii_revealed=reveal_pii,
+        rows=rows,
     )
+
+
+@router.post(
+    "/database/tables/{table_name}/rows",
+    response_model=DatabaseRowMutationRead,
+    status_code=201,
+)
+def create_database_row(
+    table_name: str,
+    payload: DatabaseRowWrite,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> DatabaseRowMutationRead:
+    table, policy = _editable_table(db, table_name, "create")
+    primary_key = _single_primary_key(table)
+    values = _prepare_database_values(table, policy, payload.values)
+    try:
+        result = db.execute(table.insert().values(**values))
+        row_id = result.inserted_primary_key[0]
+        write_audit(
+            db,
+            actor,
+            "database_row_create",
+            table_name,
+            row_id,
+            details={"fields": sorted(payload.values)},
+        )
+        db.commit()
+        row = _database_row(table, primary_key, row_id, db)
+        return DatabaseRowMutationRead(table_name=table_name, row_id=row_id, row=row)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The row violates a unique, required, or relationship constraint",
+        ) from exc
+    except StatementError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail="One or more values are invalid") from exc
+
+
+@router.patch(
+    "/database/tables/{table_name}/rows/{row_id}",
+    response_model=DatabaseRowMutationRead,
+)
+def update_database_row(
+    table_name: str,
+    row_id: str,
+    payload: DatabaseRowWrite,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> DatabaseRowMutationRead:
+    table, policy = _editable_table(db, table_name, "update")
+    primary_key = _single_primary_key(table)
+    normalized_id = _convert_database_value(primary_key, row_id)
+    _database_row(table, primary_key, normalized_id, db)
+    values = _prepare_database_values(table, policy, payload.values)
+    try:
+        db.execute(table.update().where(primary_key == normalized_id).values(**values))
+        write_audit(
+            db,
+            actor,
+            "database_row_update",
+            table_name,
+            normalized_id,
+            details={"fields": sorted(payload.values)},
+        )
+        db.commit()
+        row = _database_row(table, primary_key, normalized_id, db)
+        return DatabaseRowMutationRead(
+            table_name=table_name, row_id=normalized_id, row=row
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The change violates a unique, required, or relationship constraint",
+        ) from exc
+    except StatementError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail="One or more values are invalid") from exc
+
+
+@router.delete(
+    "/database/tables/{table_name}/rows/{row_id}",
+    response_model=DatabaseRowMutationRead,
+)
+def delete_database_row(
+    table_name: str,
+    row_id: str,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> DatabaseRowMutationRead:
+    table, _policy = _editable_table(db, table_name, "delete")
+    primary_key = _single_primary_key(table)
+    normalized_id = _convert_database_value(primary_key, row_id)
+    _database_row(table, primary_key, normalized_id, db)
+    try:
+        db.execute(table.delete().where(primary_key == normalized_id))
+        write_audit(
+            db,
+            actor,
+            "database_row_delete",
+            table_name,
+            normalized_id,
+        )
+        db.commit()
+        return DatabaseRowMutationRead(
+            table_name=table_name, row_id=normalized_id, row=None
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The row is still referenced by other records and cannot be deleted",
+        ) from exc

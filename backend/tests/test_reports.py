@@ -155,6 +155,57 @@ def test_empty_reports_return_zero(report_db: Session) -> None:
     assert talent_pool_report(report_db)["total"] == 0
 
 
+def test_formal_reports_exclude_demo_namespace(report_db: Session) -> None:
+    department = Department(name="Demo Department")
+    candidate = Candidate(
+        code="T-DEMO-REPORT",
+        name="Demo Candidate",
+        source="demo",
+        created_at=moment(1),
+        updated_at=moment(1),
+    )
+    report_db.add_all([department, candidate])
+    report_db.flush()
+    job = JobRequisition(
+        req_no="DEMO-REPORT-001",
+        title="Demo Job",
+        department_id=department.id,
+        employment_type="full_time",
+        work_city="Taipei",
+        jd="Demo only",
+        status="filled",
+        published_at=moment(1),
+        filled_at=moment(10),
+        created_at=moment(1),
+        updated_at=moment(10),
+    )
+    report_db.add(job)
+    report_db.flush()
+    report_db.add_all(
+        [
+            CandidateSkill(
+                candidate_id=candidate.id,
+                skill="Demo Skill",
+                skill_norm="demo skill",
+            ),
+            JobApplication(
+                requisition_id=job.id,
+                candidate_id=candidate.id,
+                status="hired",
+                source="demo",
+                created_at=moment(5),
+                updated_at=moment(5),
+            ),
+        ]
+    )
+    report_db.commit()
+
+    assert funnel_report(report_db)["total"] == 0
+    assert sources_report(report_db) == {"total": 0, "items": []}
+    assert time_to_fill_report(report_db)["filled_count"] == 0
+    assert talent_pool_report(report_db)["total"] == 0
+
+
 def test_funnel_sources_and_soft_delete(report_db: Session) -> None:
     engineering, _ = add_fixture_data(report_db)
     funnel = funnel_report(

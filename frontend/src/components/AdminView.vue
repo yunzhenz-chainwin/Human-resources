@@ -32,7 +32,7 @@ const editingDepartment = ref<Department | null>(null)
 const userForm = reactive({ username: '', email: '', password: '', display_name: '', role: 'hr' as UserRole, department_id: null as number | null, is_active: true })
 const departmentForm = reactive({ name: '', parent_id: null as number | null, is_active: true })
 
-const roleLabels: Record<UserRole, string> = { it: 'IT 管理員', admin: '相容管理員', hr: 'HR', manager: '用人主管' }
+const roleLabels: Record<UserRole, string> = { it: 'IT 管理員', admin: '相容管理員', hr: 'HR', manager: '部門主管' }
 const isSystemAdmin = computed(() => ['it', 'admin'].includes(props.currentUser.role))
 const tabs = computed(() => isSystemAdmin.value
   ? ([['users','使用者'],['departments','部門'],['catalogs','技能與標籤'],['settings','系統設定'],['audits','稽核紀錄']] as const)
@@ -80,6 +80,10 @@ async function saveUser() {
   if (!userForm.email.trim() || !userForm.display_name.trim()) return
   if (!editingUser.value && (!userForm.username.trim() || userForm.password.length < 5)) {
     error.value = '新帳號必須填寫帳號及至少 5 字元密碼'
+    return
+  }
+  if (userForm.role === 'manager' && !userForm.department_id) {
+    error.value = '部門主管帳號必須指定所屬部門'
     return
   }
   saving.value = true
@@ -148,14 +152,14 @@ onMounted(load)
   </section>
   <section v-else class="admin-page">
     <div class="page-heading"><div><h1>帳號與權限</h1><p>{{ isSystemAdmin ? '管理使用者、部門及系統基礎資料；所有變更都會留下稽核紀錄。' : '新增及管理 HR／用人主管的後台登入帳號；資料會保存至系統資料庫。' }}</p></div><button class="button secondary" :disabled="loading" @click="load">{{ loading ? '載入中…' : '重新整理' }}</button></div>
-    <div v-if="error" class="alert error-alert"><span>!</span><p>{{ error }}</p><button @click="error = ''">×</button></div>
+    <div v-if="error" class="alert error-alert" role="alert"><span>!</span><p>{{ error }}</p><button aria-label="關閉錯誤訊息" @click="error = ''">×</button></div>
     <ItOperationsPanel v-if="isSystemAdmin" />
-    <div class="admin-tabs panel">
-      <button v-for="item in tabs" :key="item[0]" :class="{ active: tab === item[0] }" @click="tab = item[0]">{{ item[1] }}</button>
+    <div class="admin-tabs panel" role="tablist" aria-label="帳號與權限功能">
+       <button v-for="item in tabs" :key="item[0]" role="tab" :aria-selected="tab === item[0]" :class="{ active: tab === item[0] }" @click="tab = item[0]">{{ item[1] }}</button>
     </div>
 
     <div v-if="tab === 'users'" class="panel admin-section">
-      <header><div><h2>使用者帳號</h2><p>{{ users.length }} 個內部帳號，系統不開放公開註冊。</p></div><button class="button primary" @click="openUser()">＋ 新增帳號</button></header>
+      <header><div><h2>使用者帳號</h2><p>{{ users.length }} 個內部帳號；部門主管登入後只能看到所屬部門職缺與實際應徵者。</p></div><button class="button primary" @click="openUser()">＋ 新增帳號</button></header>
       <div class="admin-table"><table><thead><tr><th>使用者</th><th>角色</th><th>部門</th><th>狀態</th><th></th></tr></thead><tbody>
         <tr v-for="user in users" :key="user.id"><td><strong>{{ user.display_name }}</strong><small>{{ user.username }} · {{ user.email }}</small></td><td>{{ roleLabels[user.role] }}</td><td>{{ departmentName(user.department_id) }}</td><td><span class="status" :data-status="user.is_active ? 'approved' : 'archived'">{{ user.is_active ? '啟用' : '停用' }}</span></td><td><button v-if="isSystemAdmin || ['hr','manager'].includes(user.role)" class="text-button" @click="openUser(user)">編輯</button></td></tr>
       </tbody></table></div>
@@ -178,10 +182,10 @@ onMounted(load)
     <div v-else class="panel admin-section"><header><div><h2>稽核紀錄</h2><p>最近 {{ audits.length }} 筆登入、管理操作與個資存取紀錄。</p></div></header><div class="admin-table"><table><thead><tr><th>時間</th><th>操作者</th><th>動作</th><th>資源</th><th>來源 IP</th></tr></thead><tbody><tr v-for="item in audits" :key="item.id"><td>{{ date(item.created_at) }}</td><td>#{{ item.actor_user_id || '系統' }}</td><td><strong>{{ item.action }}</strong></td><td>{{ item.resource_type }} {{ item.resource_id ? `#${item.resource_id}` : '' }}</td><td>{{ item.ip_address || '—' }}</td></tr></tbody></table></div></div>
   </section>
 
-      <div v-if="userDialog" class="modal-overlay" @click.self="userDialog = false"><form class="modal-card compact-modal" @submit.prevent="saveUser"><header><div><small>ADMIN</small><h2>{{ editingUser ? '編輯使用者' : '新增使用者' }}</h2></div><button type="button" @click="userDialog = false">×</button></header><div class="form-grid"><label>帳號 *<input v-model="userForm.username" :disabled="!!editingUser" required></label><label>顯示名稱 *<input v-model="userForm.display_name" required></label><label>Email *<input v-model="userForm.email" type="email" required></label><label>{{ editingUser ? '新密碼（不變請留空）' : '密碼（至少 5 字元）*' }}<input v-model="userForm.password" type="password" :required="!editingUser" minlength="5"></label><label>角色<select v-model="userForm.role"><option v-if="isSystemAdmin" value="it">IT 管理員</option><option v-if="isSystemAdmin" value="admin">相容管理員</option><option value="hr">HR</option><option value="manager">用人主管</option></select></label><label>部門<select v-model="userForm.department_id"><option :value="null">不限部門</option><option v-for="item in departments" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label v-if="editingUser"><input v-model="userForm.is_active" class="inline-check" type="checkbox"> 啟用帳號</label></div><footer><button type="button" class="button secondary" @click="userDialog = false">取消</button><button class="button primary" :disabled="saving">{{ saving ? '儲存中…' : '儲存' }}</button></footer></form></div>
+      <div v-if="userDialog" class="modal-overlay" @click.self="userDialog = false" @keydown.esc="userDialog = false"><form class="modal-card compact-modal" role="dialog" aria-modal="true" aria-labelledby="user-dialog-title" @submit.prevent="saveUser"><header><div><small>ADMIN</small><h2 id="user-dialog-title">{{ editingUser ? '編輯使用者' : '新增使用者' }}</h2></div><button type="button" aria-label="關閉使用者視窗" @click="userDialog = false">×</button></header><div class="form-grid"><label>帳號 *<input v-model="userForm.username" :disabled="!!editingUser" required></label><label>顯示名稱 *<input v-model="userForm.display_name" required></label><label>Email *<input v-model="userForm.email" type="email" required></label><label>{{ editingUser ? '新密碼（不變請留空）' : '密碼（至少 5 字元）*' }}<input v-model="userForm.password" type="password" :required="!editingUser" minlength="5"></label><label>角色<select v-model="userForm.role"><option v-if="isSystemAdmin" value="it">IT 管理員</option><option v-if="isSystemAdmin" value="admin">相容管理員</option><option value="hr">HR</option><option value="manager">部門主管</option></select></label><label>部門 {{ userForm.role === 'manager' ? '*' : '' }}<select v-model="userForm.department_id" :required="userForm.role === 'manager'"><option v-if="userForm.role !== 'manager'" :value="null">不限部門</option><option v-for="item in departments.filter(item => item.is_active)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label v-if="editingUser"><input v-model="userForm.is_active" class="inline-check" type="checkbox"> 啟用帳號</label></div><footer><button type="button" class="button secondary" @click="userDialog = false">取消</button><button class="button primary" :disabled="saving">{{ saving ? '儲存中…' : '儲存' }}</button></footer></form></div>
 
-  <div v-if="departmentDialog" class="modal-overlay" @click.self="departmentDialog = false"><form class="modal-card compact-modal" @submit.prevent="saveDepartment"><header><div><small>ORGANIZATION</small><h2>{{ editingDepartment ? '編輯部門' : '新增部門' }}</h2></div><button type="button" @click="departmentDialog = false">×</button></header><div class="form-grid"><label>部門名稱 *<input v-model="departmentForm.name" required></label><label>上層部門<select v-model="departmentForm.parent_id"><option :value="null">無</option><option v-for="item in departments.filter(item => item.id !== editingDepartment?.id)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label v-if="editingDepartment"><input v-model="departmentForm.is_active" class="inline-check" type="checkbox"> 啟用部門</label></div><footer><button type="button" class="button secondary" @click="departmentDialog = false">取消</button><button class="button primary" :disabled="saving">{{ saving ? '儲存中…' : '儲存' }}</button></footer></form></div>
-  <Transition name="toast"><div v-if="notice" class="toast"><span>✓</span>{{ notice }}</div></Transition>
+  <div v-if="departmentDialog" class="modal-overlay" @click.self="departmentDialog = false" @keydown.esc="departmentDialog = false"><form class="modal-card compact-modal" role="dialog" aria-modal="true" aria-labelledby="department-dialog-title" @submit.prevent="saveDepartment"><header><div><small>ORGANIZATION</small><h2 id="department-dialog-title">{{ editingDepartment ? '編輯部門' : '新增部門' }}</h2></div><button type="button" aria-label="關閉部門視窗" @click="departmentDialog = false">×</button></header><div class="form-grid"><label>部門名稱 *<input v-model="departmentForm.name" required></label><label>上層部門<select v-model="departmentForm.parent_id"><option :value="null">無</option><option v-for="item in departments.filter(item => item.id !== editingDepartment?.id)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label v-if="editingDepartment"><input v-model="departmentForm.is_active" class="inline-check" type="checkbox"> 啟用部門</label></div><footer><button type="button" class="button secondary" @click="departmentDialog = false">取消</button><button class="button primary" :disabled="saving">{{ saving ? '儲存中…' : '儲存' }}</button></footer></form></div>
+  <Transition name="toast"><div v-if="notice" class="toast" role="status" aria-live="polite"><span>✓</span>{{ notice }}</div></Transition>
 </template>
 
 <style scoped>

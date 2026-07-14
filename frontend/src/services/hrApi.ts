@@ -15,6 +15,7 @@ export type CandidateDto = {
   has_photo: boolean
   photo_updated_at: string | null
   created_at: string
+  updated_at: string
 }
 export type CandidateWrite = {
   name?: string
@@ -41,6 +42,8 @@ export type RequisitionDto = {
   req_no: string
   title: string
   department_id: number | null
+  department_name: string | null
+  requested_by: number | null
   employment_type: string
   work_city: string
   jd: string
@@ -54,7 +57,40 @@ export type RequisitionDto = {
   published_at: string | null
   created_at: string
 }
-export type RequisitionWrite = Omit<RequisitionDto, 'id' | 'published_at' | 'created_at'>
+export type RequisitionWrite = Omit<RequisitionDto, 'id' | 'department_name' | 'requested_by' | 'published_at' | 'created_at'>
+export type DepartmentRequisitionWrite = {
+  title: string
+  employment_type: string
+  work_city: string
+  jd: string
+  summary: string | null
+  skills: string[]
+  salary_min: number | null
+  salary_max: number | null
+  salary_type: string | null
+  headcount: number
+}
+export type DepartmentApplicantDto = {
+  application_id: number
+  application_status: string
+  application_source: string
+  applied_at: string
+  match_score: number | null
+  match_status: string | null
+  candidate: CandidateDto
+}
+export type DepartmentJobDto = {
+  requisition: RequisitionDto
+  applicants: DepartmentApplicantDto[]
+}
+export type DepartmentWorkspaceDto = {
+  department_id: number
+  department_name: string
+  total_jobs: number
+  total_applications: number
+  total_candidates: number
+  jobs: DepartmentJobDto[]
+}
 
 export type ResumeSource = 'p104' | 'p1111' | 'generic' | 'direct'
 export type ParsedResume = {
@@ -171,13 +207,18 @@ export const hrApi = {
     method: id ? 'PATCH' : 'POST', body: JSON.stringify(payload),
   }),
   approveRequisition: (id: number) => apiRequest<RequisitionDto>(`/requisitions/${id}/approve`, { method: 'POST' }),
+  departmentWorkspace: () => apiRequest<DepartmentWorkspaceDto>('/department/workspace'),
+  createDepartmentRequisition: (payload: DepartmentRequisitionWrite) => apiRequest<RequisitionDto>('/department/requisitions', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
 
   resumes: (status?: string) => apiRequest<ResumeDto[]>(`/resumes${status ? `?parse_status=${encodeURIComponent(status)}&page_size=100` : '?page_size=100'}`),
   resume: (id: number) => apiRequest<ResumeDto>(`/resumes/${id}`),
-  uploadResumes: (files: File[], source: ResumeSource) => {
+  uploadResumes: (files: File[], source: ResumeSource, candidateId?: number) => {
     const body = new FormData()
     files.forEach(file => body.append('files', file))
     body.append('source_platform', source)
+    if (candidateId !== undefined) body.append('candidate_id', String(candidateId))
     return apiRequest<ResumeUploadResult[]>('/resumes/upload', { method: 'POST', body })
   },
   updateResumeParsed: (id: number, parsed_payload: ParsedResume) => apiRequest<ResumeDto>(`/resumes/${id}/parsed`, {

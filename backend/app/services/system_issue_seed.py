@@ -88,6 +88,12 @@ SYSTEM_ISSUE_SEED: tuple[dict[str, Any], ...] = (
     },
 )
 
+# Rerunning the catalog may refresh explanatory text, but workflow fields are
+# owned by IT once an issue exists and must never be reset by a seed script.
+_REFRESHABLE_FIELDS = frozenset(
+    {"description", "page", "severity", "reproduction_steps"}
+)
+
 
 def seed_system_issues(db: Session) -> tuple[int, int]:
     """Insert/update the maintained issue catalog, keyed idempotently by title."""
@@ -101,8 +107,8 @@ def seed_system_issues(db: Session) -> tuple[int, int]:
             db.add(issue)
             created += 1
         else:
-            for key, value in payload.items():
-                setattr(issue, key, value)
+            for key in _REFRESHABLE_FIELDS:
+                setattr(issue, key, payload[key])
             issue.updated_by_user_id = actor_id
             updated += 1
     db.commit()

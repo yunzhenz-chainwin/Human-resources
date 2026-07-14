@@ -16,7 +16,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.dependencies.auth import audit_pii_read, get_current_user
 from app.main import app
-from app.models import Candidate, CandidateSkill, ResumeFile
+from app.models import AuditLog, Candidate, CandidateSkill, ResumeFile
 from app.services.resume_parser import parse_text
 
 
@@ -93,12 +93,14 @@ def test_104_career_fields_are_extracted_and_confirmed(resume_client) -> None:
     # The uploaded file is represented by a durable resume_files database row;
     # IT can inspect the record even though the binary itself stays in private storage.
     it_preview = resume_client[0].get(
-        "/api/v1/admin/database/tables/resume_files/rows?search=career.docx"
+        "/api/v1/admin/database/tables/resume_files/rows?page=1&page_size=20"
     )
     assert it_preview.status_code == 200
     assert it_preview.json()["display_name"] == "履歷檔案與解析紀錄"
     assert it_preview.json()["total"] == 1
     assert it_preview.json()["rows"][0]["id"] == resume_id
+    assert "original_filename" in it_preview.json()["redacted_columns"]
+    assert "original_filename" not in it_preview.json()["rows"][0]
     detail = client.get(f"/api/v1/resumes/{resume_id}").json()
     assert detail["parsed_payload"]["current_company"] == "範例科技"
     assert detail["parsed_payload"]["highest_education"] == "學士"
@@ -165,6 +167,113 @@ def test_batch_upload_duplicate_review_and_confirm(resume_client) -> None:
         ).all()
         assert resume.parse_status == "confirmed"
         assert set(skills) == {"Python", "SQL"}
+        db.add(
+            CandidateSkill(
+                candidate_id=confirmed.json()["candidate_id"],
+                skill="Manually curated",
+                skill_norm="manually curated",
+            )
+        )
+        db.commit()
+
+    repeated = client.post(f"/api/v1/resumes/{item['id']}/confirm", json={})
+    assert repeated.status_code == 200
+    assert repeated.json() == {
+        "resume_id": item["id"],
+        "candidate_id": confirmed.json()["candidate_id"],
+        "candidate_code": confirmed.json()["candidate_code"],
+        "created": False,
+    }
+
+    other_candidate = client.post(
+        "/api/v1/candidates",
+        json={"name": "Other Candidate", "email": "other@example.test"},
+    ).json()
+    reassignment = client.post(
+        f"/api/v1/resumes/{item['id']}/confirm",
+        json={"candidate_id": other_candidate["id"]},
+    )
+    assert reassignment.status_code == 409
+    with testing_session() as db:
+        preserved_skills = set(
+            db.scalars(
+                select(CandidateSkill.skill).where(
+                    CandidateSkill.candidate_id == confirmed.json()["candidate_id"]
+                )
+            )
+        )
+        assert preserved_skills == {"Python", "SQL", "Manually curated"}
+
+
+def test_intake_upload_is_linked_to_existing_candidate(resume_client) -> None:
+    client, testing_session = resume_client
+    candidate = client.post(
+        "/api/v1/candidates",
+        json={"name": "單頁建檔人才", "email": "intake-linked@example.test"},
+    ).json()
+    response = client.post(
+        "/api/v1/resumes/upload",
+        data={"source_platform": "generic", "candidate_id": str(candidate["id"])},
+        files={
+            "files": (
+                "intake-linked.docx",
+                docx_bytes("姓名：單頁建檔人才\nEmail：intake-linked@example.test"),
+                "application/octet-stream",
+            )
+        },
+    )
+    assert response.status_code == 201
+    with testing_session() as db:
+        stored = db.get(ResumeFile, response.json()[0]["id"])
+        assert stored.candidate_id == candidate["id"]
+
+
+def test_hr_candidate_writes_are_persisted_and_audited(resume_client) -> None:
+    client, testing_session = resume_client
+    created_response = client.post(
+        "/api/v1/candidates",
+        json={
+            "name": "Database Verified Candidate",
+            "email": "database-verified@example.test",
+            "city": "Taipei",
+        },
+    )
+    assert created_response.status_code == 201
+    created = created_response.json()
+    assert created["id"]
+    assert created["code"]
+    assert created["updated_at"]
+
+    updated_response = client.patch(
+        f"/api/v1/candidates/{created['id']}",
+        json={"city": "New Taipei"},
+    )
+    assert updated_response.status_code == 200
+    assert updated_response.json()["city"] == "New Taipei"
+
+    deleted_response = client.delete(f"/api/v1/candidates/{created['id']}")
+    assert deleted_response.status_code == 204
+
+    with testing_session() as db:
+        stored = db.get(Candidate, created["id"])
+        assert stored is not None
+        assert stored.city == "New Taipei"
+        assert stored.deleted_at is not None
+        actions = list(
+            db.scalars(
+                select(AuditLog.action)
+                .where(
+                    AuditLog.resource_type == "candidate",
+                    AuditLog.resource_id == str(created["id"]),
+                )
+                .order_by(AuditLog.id)
+            )
+        )
+        assert actions == [
+            "candidate_create",
+            "candidate_update",
+            "candidate_delete",
+        ]
 
 
 def test_mixed_batch_is_classified_per_file_and_source_can_be_reviewed(resume_client) -> None:
@@ -262,7 +371,7 @@ def test_confirm_does_not_link_resume_to_soft_deleted_candidate(resume_client) -
 
 
 def test_talent_pool_application_without_job_id(resume_client) -> None:
-    client, _ = resume_client
+    client, testing_session = resume_client
     content = docx_bytes("姓名：吳佳蓉\nEmail：wu@example.com\n技能：Vue、TypeScript")
     response = client.post(
         "/api/v1/public/applications",
@@ -277,9 +386,14 @@ def test_talent_pool_application_without_job_id(resume_client) -> None:
     )
     assert response.status_code == 201
     assert response.json()["duplicate"] is False
+    assert response.json()["candidate_id"] is not None
     detail = client.get(f"/api/v1/resumes/{response.json()['resume_id']}").json()
     assert detail["parsed_payload"]["name"] == "吳佳蓉"
     assert detail["parsed_payload"]["skills"] == ["Vue", "TypeScript"]
+    assert detail["candidate_id"] == response.json()["candidate_id"]
+    with testing_session() as db:
+        stored = db.get(ResumeFile, response.json()["resume_id"])
+        assert stored.candidate_id == response.json()["candidate_id"]
 
 
 def test_candidate_activities_are_listed_newest_first(resume_client) -> None:
