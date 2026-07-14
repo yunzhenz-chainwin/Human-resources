@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +8,33 @@ from app.parsers import select_adapter
 from app.services.ocr import extract_pdf_with_ocr
 
 PARSER_VERSION = "adapters-2.0"
+
+# OCR (Tesseract) 對中文常見的雜訊:字與字之間插入空白、標點變成小型/直排異體字。
+# 只針對 OCR 產出的文字做正規化,數位 PDF 的文字層不受影響。
+_OCR_PUNCT_MAP = {
+    "﹕": ":", "︰": ":", "∶": ":",
+    "﹒": ".",
+    "﹣": "-", "－": "-", "‐": "-", "–": "-", "—": "-",
+    "﹢": "+", "＋": "+",
+    "＠": "@",
+}
+_CJK = r"一-鿿"
+# 當空白至少一側是中文字時移除它(避免拆掉英文詞之間的正常空白)。
+_OCR_SPACE_RE = re.compile(
+    rf"(?<=[{_CJK}])[ \t]+(?=[{_CJK}0-9A-Za-z:.@+\-])"
+    rf"|(?<=[0-9A-Za-z:.@+\-])[ \t]+(?=[{_CJK}])"
+)
+
+
+def normalize_ocr_text(text: str) -> str:
+    """整理 OCR 文字:還原異體標點、移除中文字間被插入的空白。"""
+    for src, dst in _OCR_PUNCT_MAP.items():
+        text = text.replace(src, dst)
+    previous = None
+    while previous != text:
+        previous = text
+        text = _OCR_SPACE_RE.sub("", text)
+    return text
 
 
 @dataclass
@@ -91,7 +119,10 @@ def parse_resume(path: Path, requested_platform: str) -> ParserResult:
                 0.0,
                 ocr_result.error_message or "PDF requires manual review",
             )
-        return parse_text(ocr_result.text, requested_platform)
+        text = ocr_result.text
+        if ocr_result.status == "ocr_extracted":
+            text = normalize_ocr_text(text)
+        return parse_text(text, requested_platform)
     try:
         return parse_text(extract_text(path), requested_platform)
     except Exception as exc:

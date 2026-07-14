@@ -147,6 +147,11 @@ class LocalTesseractProvider:
                 check=True,
                 capture_output=capture_output,
                 text=True,
+                # Tesseract emits UTF-8; decode it explicitly so hosts whose
+                # locale is not UTF-8 (e.g. Windows cp950/Big5) don't crash on
+                # CJK output. errors="replace" keeps a stray byte from aborting.
+                encoding="utf-8",
+                errors="replace",
                 timeout=remaining,
             )
         except subprocess.TimeoutExpired as exc:
