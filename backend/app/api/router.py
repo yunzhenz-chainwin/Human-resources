@@ -9,25 +9,25 @@ from app.api.routes.public import router as public_router
 from app.api.routes.reports import router as reports_router
 from app.api.routes.requisitions import router as requisitions_router
 from app.api.routes.resumes import router as resumes_router
-from app.dependencies.auth import get_current_user
+from app.dependencies.auth import require_recruiting_user
 
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["system"])
 api_router.include_router(public_router, tags=["public"])
 api_router.include_router(auth_router, tags=["auth"])
 api_router.include_router(
-    candidates_router, tags=["candidates"], dependencies=[Depends(get_current_user)]
+    candidates_router, tags=["candidates"], dependencies=[Depends(require_recruiting_user)]
 )
 api_router.include_router(
-    requisitions_router, tags=["requisitions"], dependencies=[Depends(get_current_user)]
+    requisitions_router, tags=["requisitions"], dependencies=[Depends(require_recruiting_user)]
 )
 api_router.include_router(
-    resumes_router, tags=["resumes"], dependencies=[Depends(get_current_user)]
+    resumes_router, tags=["resumes"], dependencies=[Depends(require_recruiting_user)]
 )
 api_router.include_router(
-    matches_router, tags=["matches"], dependencies=[Depends(get_current_user)]
+    matches_router, tags=["matches"], dependencies=[Depends(require_recruiting_user)]
 )
 api_router.include_router(
-    reports_router, tags=["reports"], dependencies=[Depends(get_current_user)]
+    reports_router, tags=["reports"], dependencies=[Depends(require_recruiting_user)]
 )
 api_router.include_router(admin_router, tags=["admin"])

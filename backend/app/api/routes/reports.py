@@ -28,7 +28,7 @@ def _validate_dates(from_date: date | None, to_date: date | None) -> None:
 
 
 def _scoped_department(user: User, department_id: int | None) -> int | None:
-    if user.role == "admin":
+    if user.role in {"admin", "hr"}:
         return department_id
     enforce_department_scope(user, department_id or user.department_id)
     return user.department_id

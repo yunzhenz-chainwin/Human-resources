@@ -6,7 +6,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.dependencies.auth import enforce_department_scope, get_current_user
+from app.dependencies.auth import (
+    enforce_department_scope,
+    get_current_user,
+    require_recruiting_manager,
+)
 from app.models import JobRequisition, User
 from app.schemas.hr import RequisitionCreate, RequisitionRead, RequisitionUpdate
 
@@ -20,7 +24,7 @@ def list_requisitions(
     user: User = Depends(get_current_user),
 ) -> list[JobRequisition]:
     query = select(JobRequisition).order_by(JobRequisition.updated_at.desc())
-    if user.role != "admin":
+    if user.role == "manager":
         query = query.where(JobRequisition.department_id == user.department_id)
     if requisition_status:
         query = query.where(JobRequisition.status == requisition_status)
@@ -31,7 +35,7 @@ def list_requisitions(
 def create_requisition(
     payload: RequisitionCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiting_manager),
 ) -> JobRequisition:
     enforce_department_scope(user, payload.department_id)
     data = payload.model_dump()
@@ -72,7 +76,7 @@ def update_requisition(
     requisition_id: int,
     payload: RequisitionUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiting_manager),
 ) -> JobRequisition:
     requisition = db.get(JobRequisition, requisition_id)
     if not requisition:
@@ -96,7 +100,7 @@ def update_requisition(
 def approve_requisition(
     requisition_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiting_manager),
 ) -> JobRequisition:
     requisition = db.get(JobRequisition, requisition_id)
     if not requisition:

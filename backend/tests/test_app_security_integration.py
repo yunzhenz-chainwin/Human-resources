@@ -11,12 +11,13 @@ import app.main as main_module
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_db
-from app.models import Candidate, Department, JobRequisition, User
+from app.models import Candidate, Department, JobApplication, JobRequisition, User
 from app.models.security import AuditLog
 from app.services.security import hash_password
 
 PASSWORDS = {
     "admin": "Admin-Integration-Password-123",
+    "it": "IT-Integration-Password-123",
     "hr": "HR-Integration-Password-123",
     "manager": "Manager-Integration-Password-123",
 }
@@ -48,6 +49,14 @@ def secured_app_client(monkeypatch) -> Generator[tuple[TestClient, sessionmaker,
         db.flush()
         users = [
             User(
+                username="it",
+                email="it@app.test",
+                password_hash=hash_password(PASSWORDS["it"]),
+                display_name="IT",
+                role="it",
+                is_active=True,
+            ),
+            User(
                 username="admin",
                 email="admin@app.test",
                 password_hash=hash_password(PASSWORDS["admin"]),
@@ -75,7 +84,10 @@ def secured_app_client(monkeypatch) -> Generator[tuple[TestClient, sessionmaker,
             ),
         ]
         candidate = Candidate(code="SEC-001", name="Security Candidate", source="direct")
-        db.add_all([*users, candidate])
+        scoped_candidate = Candidate(
+            code="SEC-002", name="Engineering Candidate", source="direct"
+        )
+        db.add_all([*users, candidate, scoped_candidate])
         db.flush()
         public_job = JobRequisition(
             req_no="SEC-SALES-001",
@@ -88,12 +100,33 @@ def secured_app_client(monkeypatch) -> Generator[tuple[TestClient, sessionmaker,
             published_at=datetime.now(UTC),
         )
         db.add(public_job)
+        engineering_job = JobRequisition(
+            req_no="SEC-ENG-001",
+            title="Backend Engineer",
+            department_id=engineering.id,
+            employment_type="full_time",
+            work_city="Taipei",
+            jd="Build responsibly",
+            status="draft",
+        )
+        db.add(engineering_job)
+        db.flush()
+        db.add(
+            JobApplication(
+                requisition_id=engineering_job.id,
+                candidate_id=scoped_candidate.id,
+                status="submitted",
+                source="career_site",
+            )
+        )
         db.commit()
         ids = {
             "engineering": engineering.id,
             "sales": sales.id,
             "candidate": candidate.id,
+            "scoped_candidate": scoped_candidate.id,
             "sales_job": public_job.id,
+            "engineering_job": engineering_job.id,
         }
 
     def override_db():
@@ -155,24 +188,81 @@ def test_admin_token_accesses_all_protected_modules(secured_app_client) -> None:
     }
 
 
-@pytest.mark.parametrize("role", ["hr", "manager"])
+@pytest.mark.parametrize("role", ["manager"])
 def test_non_admin_roles_cannot_access_admin(secured_app_client, role: str) -> None:
     client, _, _ = secured_app_client
     assert client.get("/api/v1/admin/users", headers=login_headers(client, role)).status_code == 403
 
 
-def test_cross_department_matching_and_reports_are_forbidden(secured_app_client) -> None:
+def test_hr_can_manage_login_accounts_but_not_system_settings(secured_app_client) -> None:
+    client, _, _ = secured_app_client
+    headers = login_headers(client, "hr")
+    assert client.get("/api/v1/admin/users", headers=headers).status_code == 200
+    assert client.get("/api/v1/admin/departments", headers=headers).status_code == 200
+    assert client.get("/api/v1/admin/settings", headers=headers).status_code == 403
+
+
+def test_it_can_administer_but_cannot_read_recruiting_data(secured_app_client) -> None:
+    client, _, _ = secured_app_client
+    headers = login_headers(client, "it")
+    assert client.get("/api/v1/admin/users", headers=headers).status_code == 200
+    assert client.get("/api/v1/candidates", headers=headers).status_code == 403
+    assert client.get("/api/v1/requisitions", headers=headers).status_code == 403
+
+
+def test_hr_has_global_recruiting_scope(secured_app_client) -> None:
     client, _, ids = secured_app_client
     headers = login_headers(client, "hr")
     assert client.get(
         f"/api/v1/requisitions/{ids['sales_job']}/matches", headers=headers
+    ).status_code == 200
+    assert client.get(
+        f"/api/v1/reports/funnel?department_id={ids['sales']}", headers=headers
+    ).status_code == 200
+    jobs = client.get("/api/v1/requisitions", headers=headers)
+    assert jobs.status_code == 200
+    assert {job["id"] for job in jobs.json()} == {
+        ids["sales_job"],
+        ids["engineering_job"],
+    }
+
+
+def test_manager_is_department_scoped_and_read_only(secured_app_client) -> None:
+    client, _, ids = secured_app_client
+    headers = login_headers(client, "manager")
+    assert client.get(
+        f"/api/v1/requisitions/{ids['sales_job']}", headers=headers
+    ).status_code == 403
+    assert [job["id"] for job in client.get(
+        "/api/v1/requisitions", headers=headers
+    ).json()] == [ids["engineering_job"]]
+    assert [candidate["id"] for candidate in client.get(
+        "/api/v1/candidates", headers=headers
+    ).json()] == [ids["scoped_candidate"]]
+    assert client.get(
+        f"/api/v1/candidates/{ids['scoped_candidate']}", headers=headers
+    ).status_code == 200
+    assert client.get(
+        f"/api/v1/candidates/{ids['candidate']}", headers=headers
     ).status_code == 403
     assert client.get(
         f"/api/v1/reports/funnel?department_id={ids['sales']}", headers=headers
     ).status_code == 403
-    scoped_jobs = client.get("/api/v1/requisitions", headers=headers)
-    assert scoped_jobs.status_code == 200
-    assert scoped_jobs.json() == []
+    assert client.post(
+        "/api/v1/candidates",
+        headers=headers,
+        json={"name": "Must Not Create"},
+    ).status_code == 403
+    assert client.patch(
+        f"/api/v1/candidates/{ids['candidate']}",
+        headers=headers,
+        json={"name": "Must Not Edit"},
+    ).status_code == 403
+    assert client.patch(
+        f"/api/v1/requisitions/{ids['sales_job']}",
+        headers=headers,
+        json={"title": "Must Not Edit"},
+    ).status_code == 403
 
 
 def test_candidate_detail_creates_real_audit_log(secured_app_client) -> None:

@@ -51,6 +51,24 @@ export type MatchDto = {
 }
 
 export type MatchList = { items: MatchDto[]; total: number }
+export type MatchReadiness = {
+  strategy: string
+  pilot_status: 'needs_candidates' | 'ready_for_shadow_pilot' | 'ready_for_weight_tuning'
+  metrics: {
+    candidate_count: number
+    eligible_count: number
+    eligibility_rate: number
+    average_eligible_score: number
+    data_completeness: number
+    labeled_outcomes: number
+    feedback_coverage: number
+    positive_outcomes: number
+    precision_at_5: number | null
+  }
+  adopted_capabilities: string[]
+  next_experiments: string[]
+  excluded_features: string[]
+}
 
 export type ReportFilters = { from?: string; to?: string; department_id?: number }
 export type FunnelReport = {
@@ -90,6 +108,8 @@ export const matchingReportsApi = {
     request<MatchList>(`/requisitions/${requisitionId}/matches?include_ineligible=${includeIneligible}`),
   rematch: (requisitionId: number) =>
     request<MatchList>(`/requisitions/${requisitionId}/rematch`, { method: 'POST' }),
+  readiness: (requisitionId: number) =>
+    request<MatchReadiness>(`/requisitions/${requisitionId}/match-readiness`),
   updateMatchStatus: (matchId: number, status: MatchStatus) =>
     request<MatchDto>(`/matches/${matchId}/status`, {
       method: 'POST', body: JSON.stringify({ status }),

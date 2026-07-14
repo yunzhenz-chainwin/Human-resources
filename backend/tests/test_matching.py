@@ -19,7 +19,7 @@ from app.models import (
     JobRequisition,
     MatchResult,
 )
-from app.services.matching import resolve_weights, score_candidate
+from app.services.matching import assess_matching_readiness, resolve_weights, score_candidate
 
 
 @pytest.fixture()
@@ -144,6 +144,25 @@ def test_score_is_deterministic_and_gates_hard_requirements(matching_client) -> 
         assert sum(resolve_weights({"skill": 9}).values()) == pytest.approx(1.0)
 
 
+def test_skill_alias_has_auditable_evidence(matching_client) -> None:
+    _, testing_session = matching_client
+    with testing_session() as db:
+        requisition = db.get(JobRequisition, 1)
+        requisition.match_weights = {
+            "required_skills": ["PostgreSQL"],
+            "preferred_skills": ["FastAPI"],
+        }
+        candidate = db.get(Candidate, 1)
+        result = score_candidate(requisition, candidate, ["Postgres", "Fast API"])
+        assert result.gate_passed is True
+        assert result.breakdown["skill"]["evidence"] == {
+            "PostgreSQL": "Postgres",
+            "FastAPI": "Fast API",
+        }
+        assert result.breakdown["recommendation"] in {"strong", "potential", "review"}
+        assert "missing" in result.breakdown["data_quality"]
+
+
 def test_rematch_ranks_and_preserves_manual_status(matching_client) -> None:
     client, _ = matching_client
     response = client.post("/api/v1/requisitions/1/rematch")
@@ -198,3 +217,21 @@ def test_match_unique_pair_and_score_constraints(matching_client) -> None:
         )
         with pytest.raises(IntegrityError):
             db.commit()
+
+
+def test_matching_readiness_supports_shadow_pilot(matching_client) -> None:
+    client, testing_session = matching_client
+    assert client.post("/api/v1/requisitions/1/rematch").status_code == 200
+    response = client.get("/api/v1/requisitions/1/match-readiness")
+    assert response.status_code == 200
+    readiness = response.json()
+    assert readiness["pilot_status"] == "ready_for_shadow_pilot"
+    assert readiness["metrics"]["candidate_count"] == 4
+    assert readiness["metrics"]["eligible_count"] == 2
+    assert "semantic_embeddings_shadow_score" in readiness["next_experiments"]
+    assert "age" in readiness["excluded_features"]
+
+    with testing_session() as db:
+        results = list(db.scalars(select(MatchResult)).all())
+        report = assess_matching_readiness(results)
+        assert 0 <= report["metrics"]["data_completeness"] <= 1

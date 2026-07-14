@@ -5,8 +5,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.dependencies.auth import audit_pii_read
-from app.models import Candidate, CandidateActivity
+from app.dependencies.auth import (
+    audit_pii_read,
+    candidate_scope_clause,
+    enforce_candidate_scope,
+    get_current_user,
+    require_recruiting_manager,
+)
+from app.models import Candidate, CandidateActivity, User
 from app.schemas.hr import (
     CandidateActivityCreate,
     CandidateActivityRead,
@@ -24,10 +30,11 @@ def list_candidates(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[Candidate]:
     query = (
         select(Candidate)
-        .where(Candidate.deleted_at.is_(None))
+        .where(Candidate.deleted_at.is_(None), candidate_scope_clause(user))
         .order_by(Candidate.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -36,7 +43,11 @@ def list_candidates(
 
 
 @router.post("", response_model=CandidateRead, status_code=status.HTTP_201_CREATED)
-def create_candidate(payload: CandidateCreate, db: Session = Depends(get_db)) -> Candidate:
+def create_candidate(
+    payload: CandidateCreate,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_recruiting_manager),
+) -> Candidate:
     now = datetime.now(UTC)
     candidate = Candidate(
         code=f"T{now.year}-{now.strftime('%m%d%H%M%S%f')[-10:]}",
@@ -71,7 +82,10 @@ def get_candidate(
 
 @router.patch("/{candidate_id}", response_model=CandidateRead)
 def update_candidate(
-    candidate_id: int, payload: CandidateUpdate, db: Session = Depends(get_db)
+    candidate_id: int,
+    payload: CandidateUpdate,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_recruiting_manager),
 ) -> Candidate:
     candidate = db.get(Candidate, candidate_id)
     if not candidate or candidate.deleted_at:
@@ -94,13 +108,17 @@ def update_candidate(
     status_code=status.HTTP_201_CREATED,
 )
 def create_activity(
-    candidate_id: int, payload: CandidateActivityCreate, db: Session = Depends(get_db)
+    candidate_id: int,
+    payload: CandidateActivityCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_manager),
 ) -> CandidateActivity:
     candidate = db.get(Candidate, candidate_id)
     if not candidate or candidate.deleted_at:
         raise HTTPException(status_code=404, detail="人才不存在")
     activity = CandidateActivity(
         candidate_id=candidate_id,
+        user_id=user.id,
         type=payload.type,
         content=payload.content,
         happened_at=payload.happened_at or datetime.now(UTC),
@@ -118,10 +136,12 @@ def list_activities(
     candidate_id: int,
     page_size: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[CandidateActivity]:
     candidate = db.get(Candidate, candidate_id)
     if not candidate or candidate.deleted_at:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    enforce_candidate_scope(db, user, candidate_id)
     statement = (
         select(CandidateActivity)
         .where(CandidateActivity.candidate_id == candidate_id)
@@ -138,13 +158,20 @@ def list_activities(
     include_in_schema=False,
 )
 def create_contact_alias(
-    candidate_id: int, payload: CandidateActivityCreate, db: Session = Depends(get_db)
+    candidate_id: int,
+    payload: CandidateActivityCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_manager),
 ) -> CandidateActivity:
-    return create_activity(candidate_id, payload, db)
+    return create_activity(candidate_id, payload, db, user)
 
 
 @router.delete("/{candidate_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_candidate(candidate_id: int, db: Session = Depends(get_db)) -> None:
+def delete_candidate(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_recruiting_manager),
+) -> None:
     candidate = db.get(Candidate, candidate_id)
     if not candidate or candidate.deleted_at:
         raise HTTPException(status_code=404, detail="人才不存在")

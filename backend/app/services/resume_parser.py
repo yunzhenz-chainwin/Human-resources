@@ -7,7 +7,7 @@ from docx import Document
 from app.parsers import select_adapter
 from app.services.ocr import extract_pdf_with_ocr
 
-PARSER_VERSION = "adapters-2.0"
+PARSER_VERSION = "adapters-2.1"
 
 # OCR (Tesseract) 對中文常見的雜訊:字與字之間插入空白、標點變成小型/直排異體字。
 # 只針對 OCR 產出的文字做正規化,數位 PDF 的文字層不受影響。
@@ -45,6 +45,9 @@ class ParserResult:
     payload: dict
     confidence: dict[str, float]
     overall_confidence: float
+    source_confidence: float = 0.0
+    source_evidence: list[dict] | None = None
+    source_review_required: bool = True
     error_message: str | None = None
 
 
@@ -89,6 +92,8 @@ def parse_text(text: str, requested_platform: str = "generic") -> ParserResult:
         if parsed.layout_recognized and has_identity and overall >= 0.55
         else "needs_review"
     )
+    if parsed.source_review_required:
+        status = "needs_review"
     error = None
     if not parsed.layout_recognized:
         error = (
@@ -102,6 +107,9 @@ def parse_text(text: str, requested_platform: str = "generic") -> ParserResult:
         parsed.payload,
         parsed.confidence,
         overall,
+        parsed.source_confidence,
+        parsed.source_evidence,
+        parsed.source_review_required,
         error,
     )
 
@@ -117,6 +125,9 @@ def parse_resume(path: Path, requested_platform: str) -> ParserResult:
                 {},
                 {},
                 0.0,
+                0.0,
+                [{"type": "ocr_failure", "marker": "no_text", "weight": 0.0}],
+                True,
                 ocr_result.error_message or "PDF requires manual review",
             )
         text = ocr_result.text
@@ -133,5 +144,8 @@ def parse_resume(path: Path, requested_platform: str) -> ParserResult:
             {},
             {},
             0.0,
+            0.0,
+            [{"type": "extraction_failure", "marker": path.suffix.lower(), "weight": 0.0}],
+            True,
             str(exc)[:1000],
         )

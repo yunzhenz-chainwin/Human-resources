@@ -58,6 +58,10 @@ def _parse_into(resume: ResumeFile, path: Path, source_platform: str) -> None:
     resume.parsed_payload = parsed.payload
     resume.field_confidence = parsed.confidence
     resume.overall_confidence = parsed.overall_confidence
+    resume.requested_source_platform = source_platform
+    resume.source_confidence = parsed.source_confidence
+    resume.source_evidence = parsed.source_evidence
+    resume.source_review_required = parsed.source_review_required
     resume.parser_version = PARSER_VERSION
     resume.error_message = parsed.error_message
 

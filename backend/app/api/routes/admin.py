@@ -1,20 +1,26 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_, select
+from sqlalchemy import MetaData, Table, func, inspect, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.dependencies.auth import require_roles
+from app.dependencies.auth import require_system_admin, require_user_admin
 from app.models.organization import Department, User
-from app.models.security import AuditLog, SkillCatalog, SystemSetting, Tag
+from app.models.security import AuditLog, SkillCatalog, SystemIssue, SystemSetting, Tag
 from app.schemas.admin import (
     AuditRead,
     CatalogCreate,
     CatalogRead,
+    DatabaseColumnRead,
+    DatabaseOverviewRead,
+    DatabaseTableRead,
     DepartmentCreate,
     DepartmentRead,
     DepartmentUpdate,
     SettingRead,
     SettingWrite,
+    SystemIssueCreate,
+    SystemIssueRead,
+    SystemIssueUpdate,
     UserCreate,
     UserRead,
     UserUpdate,
@@ -22,7 +28,17 @@ from app.schemas.admin import (
 from app.services.security import hash_password, write_audit
 
 router = APIRouter(prefix="/admin")
-admin_user = require_roles("admin")
+admin_user = require_system_admin
+user_admin = require_user_admin
+
+
+def _enforce_hr_user_scope(actor: User, target_role: str, target: User | None = None) -> None:
+    if actor.role != "hr":
+        return
+    if target_role not in {"hr", "manager"} or (
+        target is not None and target.role not in {"hr", "manager"}
+    ):
+        raise HTTPException(status_code=403, detail="HR can only manage HR and manager accounts")
 
 
 def _department(db: Session, department_id: int | None) -> Department | None:
@@ -48,18 +64,22 @@ def _commit_audit(
 
 @router.get("/users", response_model=list[UserRead])
 def list_users(
-    _: User = Depends(admin_user), db: Session = Depends(get_db)
+    actor: User = Depends(user_admin), db: Session = Depends(get_db)
 ) -> list[User]:
-    return list(db.scalars(select(User).order_by(User.id)).all())
+    query = select(User).order_by(User.id)
+    if actor.role == "hr":
+        query = query.where(User.role.in_(("hr", "manager")))
+    return list(db.scalars(query).all())
 
 
 @router.post("/users", response_model=UserRead, status_code=201)
 def create_user(
     payload: UserCreate,
-    actor: User = Depends(admin_user),
+    actor: User = Depends(user_admin),
     db: Session = Depends(get_db),
 ) -> User:
     username = payload.username.strip().lower()
+    _enforce_hr_user_scope(actor, payload.role)
     if db.scalar(
         select(User).where(or_(User.username == username, User.email == payload.email))
     ):
@@ -85,13 +105,14 @@ def create_user(
 def update_user(
     user_id: int,
     payload: UserUpdate,
-    actor: User = Depends(admin_user),
+    actor: User = Depends(user_admin),
     db: Session = Depends(get_db),
 ) -> User:
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     values = payload.model_dump(exclude_unset=True)
+    _enforce_hr_user_scope(actor, values.get("role", user.role), user)
     if "department_id" in values:
         _department(db, values["department_id"])
     if password := values.pop("password", None):
@@ -107,7 +128,7 @@ def update_user(
 
 @router.get("/departments", response_model=list[DepartmentRead])
 def list_departments(
-    _: User = Depends(admin_user), db: Session = Depends(get_db)
+    _: User = Depends(user_admin), db: Session = Depends(get_db)
 ) -> list[Department]:
     return list(db.scalars(select(Department).order_by(Department.name)).all())
 
@@ -278,3 +299,114 @@ def list_audit_logs(
     if resource_type:
         statement = statement.where(AuditLog.resource_type == resource_type)
     return list(db.scalars(statement).all())
+
+
+@router.get("/system-issues", response_model=list[SystemIssueRead])
+def list_system_issues(
+    status: str | None = None,
+    severity: str | None = None,
+    _: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> list[SystemIssue]:
+    statement = select(SystemIssue).order_by(SystemIssue.updated_at.desc())
+    if status:
+        statement = statement.where(SystemIssue.status == status)
+    if severity:
+        statement = statement.where(SystemIssue.severity == severity)
+    return list(db.scalars(statement).all())
+
+
+@router.post("/system-issues", response_model=SystemIssueRead, status_code=201)
+def create_system_issue(
+    payload: SystemIssueCreate,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> SystemIssue:
+    values = payload.model_dump()
+    for key, value in values.items():
+        if isinstance(value, str):
+            values[key] = value.strip()
+    issue = SystemIssue(
+        **values,
+        created_by_user_id=actor.id,
+        updated_by_user_id=actor.id,
+    )
+    db.add(issue)
+    db.flush()
+    _commit_audit(db, actor, "create", "system_issue", issue.id)
+    db.refresh(issue)
+    return issue
+
+
+@router.patch("/system-issues/{issue_id}", response_model=SystemIssueRead)
+def update_system_issue(
+    issue_id: int,
+    payload: SystemIssueUpdate,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> SystemIssue:
+    issue = db.get(SystemIssue, issue_id)
+    if issue is None:
+        raise HTTPException(status_code=404, detail="System issue not found")
+    values = payload.model_dump(exclude_unset=True)
+    for key, value in values.items():
+        setattr(issue, key, value.strip() if isinstance(value, str) else value)
+    issue.updated_by_user_id = actor.id
+    _commit_audit(
+        db,
+        actor,
+        "update",
+        "system_issue",
+        issue.id,
+        {"fields": sorted(values)},
+    )
+    db.refresh(issue)
+    return issue
+
+
+@router.get("/database/overview", response_model=DatabaseOverviewRead)
+def database_overview(
+    _: User = Depends(admin_user), db: Session = Depends(get_db)
+) -> DatabaseOverviewRead:
+    """Return schema metadata only; never expose URLs, credentials, or row values."""
+    connection = db.connection()
+    connection.execute(select(1))
+    inspector = inspect(connection)
+    dialect = connection.dialect.name
+    version_info = connection.dialect.server_version_info
+    version = ".".join(str(part) for part in version_info) if version_info else None
+    metadata = MetaData()
+    tables: list[DatabaseTableRead] = []
+    for table_name in sorted(inspector.get_table_names()):
+        columns = inspector.get_columns(table_name)
+        primary_keys = set(
+            (inspector.get_pk_constraint(table_name) or {}).get("constrained_columns") or []
+        )
+        row_count: int | None
+        try:
+            table = Table(table_name, metadata, autoload_with=connection)
+            row_count = db.scalar(select(func.count()).select_from(table))
+        except Exception:  # pragma: no cover - permissions vary by production DB
+            row_count = None
+        tables.append(
+            DatabaseTableRead(
+                name=table_name,
+                row_count=row_count,
+                columns=[
+                    DatabaseColumnRead(
+                        name=column["name"],
+                        type=str(column["type"]),
+                        nullable=bool(column.get("nullable", True)),
+                        primary_key=column["name"] in primary_keys,
+                    )
+                    for column in columns
+                ],
+            )
+        )
+    return DatabaseOverviewRead(
+        healthy=True,
+        dialect=dialect,
+        server_version=version,
+        transport_security="local process" if dialect == "sqlite" else "deployment managed",
+        tables=tables,
+    )

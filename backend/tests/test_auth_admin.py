@@ -14,7 +14,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.dependencies.auth import audit_pii_read, enforce_department_scope, get_current_user
 from app.models.organization import Department, User
-from app.models.security import AuditLog, RefreshToken  # noqa: F401
+from app.models.security import AuditLog, RefreshToken, SystemIssue  # noqa: F401
 from app.services.security import bootstrap_admin, hash_password, verify_password
 
 
@@ -137,12 +137,46 @@ def test_role_and_department_scope(auth_client) -> None:
     client, _ = auth_client
     hr = login(client, "hruser", "HR-Test-Password-123")
     headers = bearer(hr["access_token"])
-    assert client.get("/admin/users", headers=headers).status_code == 403
+    assert client.get("/admin/users", headers=headers).status_code == 200
     assert client.get("/scoped/1", headers=headers).status_code == 200
-    assert client.get("/scoped/999", headers=headers).status_code == 403
+    assert client.get("/scoped/999", headers=headers).status_code == 200
 
     admin = login(client, "rootadmin", "Bootstrap-Test-Password-123")
     assert client.get("/scoped/999", headers=bearer(admin["access_token"])).status_code == 200
+
+
+def test_hr_creates_persisted_login_without_privilege_escalation(auth_client) -> None:
+    client, testing_session = auth_client
+    hr = login(client, "hruser", "HR-Test-Password-123")
+    headers = bearer(hr["access_token"])
+    created = client.post(
+        "/admin/users",
+        json={
+            "username": "manager2",
+            "email": "manager2@example.test",
+            "password": "hr123",
+            "display_name": "Manager Two",
+            "role": "manager",
+            "department_id": 1,
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    assert login(client, "manager2", "hr123")["access_token"]
+    with testing_session() as db:
+        assert db.scalar(select(User).where(User.username == "manager2")) is not None
+    denied = client.post(
+        "/admin/users",
+        json={
+            "username": "shadowit",
+            "email": "shadowit@example.test",
+            "password": "it123",
+            "display_name": "Shadow IT",
+            "role": "it",
+        },
+        headers=headers,
+    )
+    assert denied.status_code == 403
 
 
 def test_admin_manages_resources_and_secret_settings(auth_client) -> None:
@@ -186,7 +220,7 @@ def test_admin_manages_resources_and_secret_settings(auth_client) -> None:
 
 def test_personal_data_read_writes_audit(auth_client) -> None:
     client, testing_session = auth_client
-    tokens = login(client, "manager", "Manager-Test-Password-123")
+    tokens = login(client, "hruser", "HR-Test-Password-123")
     assert client.get("/pii/42", headers=bearer(tokens["access_token"])).status_code == 200
     with testing_session() as db:
         log = db.scalar(
@@ -207,3 +241,51 @@ def test_bootstrap_requires_explicit_environment(auth_client) -> None:
     settings.bootstrap_admin_password = None
     with testing_session() as db:
         assert bootstrap_admin(db) is None
+
+
+def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> None:
+    client, testing_session = auth_client
+    admin = login(client, "rootadmin", "Bootstrap-Test-Password-123")
+    headers = bearer(admin["access_token"])
+
+    created = client.post(
+        "/admin/system-issues",
+        headers=headers,
+        json={
+            "title": "Candidate page timeout",
+            "description": "The page did not finish loading.",
+            "page": "/candidates",
+            "severity": "high",
+            "status": "open",
+            "reproduction_steps": "Open the page and apply a filter.",
+        },
+    )
+    assert created.status_code == 201
+    issue = created.json()
+    assert issue["created_by_user_id"] == issue["updated_by_user_id"]
+    assert client.patch(
+        f"/admin/system-issues/{issue['id']}",
+        headers=headers,
+        json={"status": "resolved", "resolution_notes": "Index rebuilt."},
+    ).json()["status"] == "resolved"
+    assert len(client.get("/admin/system-issues", headers=headers).json()) == 1
+    with testing_session() as db:
+        assert db.get(SystemIssue, issue["id"]).resolution_notes == "Index rebuilt."
+
+    overview_response = client.get("/admin/database/overview", headers=headers)
+    assert overview_response.status_code == 200
+    overview = overview_response.json()
+    assert overview["healthy"] is True
+    assert overview["dialect"] == "sqlite"
+    users_table = next(item for item in overview["tables"] if item["name"] == "users")
+    assert isinstance(users_table["row_count"], int)
+    assert {column["name"] for column in users_table["columns"]} >= {"id", "username"}
+    assert "database_url" not in overview
+    assert "rows" not in users_table
+
+    hr = login(client, "hruser", "HR-Test-Password-123")
+    manager = login(client, "manager", "Manager-Test-Password-123")
+    for tokens in (hr, manager):
+        denied_headers = bearer(tokens["access_token"])
+        assert client.get("/admin/system-issues", headers=denied_headers).status_code == 403
+        assert client.get("/admin/database/overview", headers=denied_headers).status_code == 403

@@ -19,7 +19,9 @@ class Department(TimestampMixin, Base):
 
 class User(TimestampMixin, Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("role IN ('admin','hr','manager')", name="valid_role"),)
+    __table_args__ = (
+        CheckConstraint("role IN ('admin','it','hr','manager')", name="valid_role"),
+    )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)

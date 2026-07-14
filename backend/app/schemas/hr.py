@@ -124,6 +124,12 @@ class ResumeRead(BaseModel):
     candidate_id: int | None
     original_filename: str | None
     source_platform: str
+    requested_source_platform: str | None
+    source_confidence: float | None
+    source_evidence: list[dict] | None
+    source_review_required: bool
+    source_reviewed_by: int | None
+    source_reviewed_at: datetime | None
     parse_status: str
     parsed_payload: dict | None
     field_confidence: dict | None
@@ -147,6 +153,10 @@ class ResumeParsedUpdate(BaseModel):
     city: str | None = Field(default=None, max_length=50)
     current_title: str | None = Field(default=None, max_length=100)
     total_years: float | None = Field(default=None, ge=0, le=80)
+    current_company: str | None = Field(default=None, max_length=100)
+    highest_education: str | None = Field(default=None, max_length=20)
+    expected_title: str | None = Field(default=None, max_length=100)
+    expected_cities: list[str] = Field(default_factory=list, max_length=30)
     skills: list[str] = Field(default_factory=list, max_length=100)
 
     @field_validator("skills")
@@ -167,6 +177,9 @@ class ResumeUploadResult(BaseModel):
     id: int
     original_filename: str
     source_platform: Literal["direct", "p104", "p1111", "generic"]
+    source_confidence: float | None
+    source_evidence: list[dict] | None
+    source_review_required: bool
     parse_status: str
     duplicate: bool = False
 
@@ -180,3 +193,7 @@ class ResumeConfirmResult(BaseModel):
 
 class ResumeConfirmRequest(BaseModel):
     candidate_id: int | None = None
+
+
+class ResumeSourceReview(BaseModel):
+    source_platform: Literal["direct", "p104", "p1111", "generic"]

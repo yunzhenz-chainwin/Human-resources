@@ -1,6 +1,6 @@
 import { apiRequest } from './hrApi'
 
-export type UserRole = 'admin' | 'hr' | 'manager'
+export type UserRole = 'it' | 'admin' | 'hr' | 'manager'
 export type AdminUser = {
   id: number
   username: string
@@ -39,6 +39,22 @@ export type AuditLog = {
   ip_address: string | null
   created_at: string
 }
+export type IssueSeverity = 'low' | 'medium' | 'high' | 'critical'
+export type IssueStatus = 'open' | 'investigating' | 'resolved' | 'closed'
+export type SystemIssue = {
+  id: number; title: string; description: string; page: string
+  severity: IssueSeverity; status: IssueStatus
+  reproduction_steps: string | null; resolution_notes: string | null
+  created_by_user_id: number | null; updated_by_user_id: number | null
+  created_at: string; updated_at: string
+}
+export type SystemIssueWrite = Omit<SystemIssue, 'id' | 'created_by_user_id' | 'updated_by_user_id' | 'created_at' | 'updated_at'>
+export type DatabaseColumn = { name: string; type: string; nullable: boolean; primary_key: boolean }
+export type DatabaseTable = { name: string; row_count: number | null; columns: DatabaseColumn[] }
+export type DatabaseOverview = {
+  healthy: boolean; dialect: string; server_version: string | null
+  transport_security: string; tables: DatabaseTable[]
+}
 
 export type UserWrite = {
   username?: string
@@ -69,4 +85,12 @@ export const adminApi = {
   tags: () => apiRequest<CatalogItem[]>('/admin/tags'),
   settings: () => apiRequest<SystemSetting[]>('/admin/settings'),
   audits: () => apiRequest<AuditLog[]>('/admin/audit-logs?limit=100'),
+  systemIssues: () => apiRequest<SystemIssue[]>('/admin/system-issues'),
+  createSystemIssue: (payload: SystemIssueWrite) => apiRequest<SystemIssue>('/admin/system-issues', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  updateSystemIssue: (id: number, payload: Partial<SystemIssueWrite>) => apiRequest<SystemIssue>(`/admin/system-issues/${id}`, {
+    method: 'PATCH', body: JSON.stringify(payload),
+  }),
+  databaseOverview: () => apiRequest<DatabaseOverview>('/admin/database/overview'),
 }

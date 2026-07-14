@@ -1,5 +1,6 @@
 【去識別合成測試資料，非真實履歷】
 104人力銀行 求職者履歷
+pda.104.com.tw/resumes/
 基本資料
 求職者姓名：測試甲
 電子郵件：synthetic.104@example.test

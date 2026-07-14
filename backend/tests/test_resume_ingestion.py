@@ -16,7 +16,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.dependencies.auth import audit_pii_read, get_current_user
 from app.main import app
-from app.models import CandidateSkill, ResumeFile
+from app.models import Candidate, CandidateSkill, ResumeFile
 from app.services.resume_parser import parse_text
 
 
@@ -57,7 +57,8 @@ def resume_client():
 
 def test_parser_recognizes_104_and_generic_custom_formats() -> None:
     fixed = parse_text(
-        "104人力銀行\n姓名：王小明\nEmail: ming@example.com\n手機：0912-345-678\n"
+        "104人力銀行\npda.104.com.tw/resumes/\n"
+        "姓名：王小明\nEmail: ming@example.com\n手機：0912-345-678\n"
         "居住地：台北市\n目前職稱：後端工程師\n工作年資：5年\n技能：Python、FastAPI、SQL"
     )
     assert fixed.source_platform == "p104"
@@ -74,10 +75,41 @@ def test_parser_recognizes_104_and_generic_custom_formats() -> None:
     assert custom.status == "parsed"
 
 
+def test_104_career_fields_are_extracted_and_confirmed(resume_client) -> None:
+    client, testing_session = resume_client
+    content = docx_bytes(
+        "104人力銀行\n姓名：陳職涯\nEmail：career@example.com\n手機：0912-333-444\n"
+        "居住地：台北市\n目前職稱：軟體工程師\n目前公司：範例科技\n"
+        "最高學歷：國立範例大學 資工系 學士\n希望職務：資深後端工程師\n"
+        "希望工作地點：台北市、新北市\n工作年資：6年\n技能：Python、FastAPI、PostgreSQL"
+    )
+    upload = client.post(
+        "/api/v1/resumes/upload",
+        data={"source_platform": "generic"},
+        files=[("files", ("career.docx", content, "application/octet-stream"))],
+    )
+    assert upload.status_code == 201
+    resume_id = upload.json()[0]["id"]
+    detail = client.get(f"/api/v1/resumes/{resume_id}").json()
+    assert detail["parsed_payload"]["current_company"] == "範例科技"
+    assert detail["parsed_payload"]["highest_education"] == "學士"
+    assert detail["parsed_payload"]["expected_title"] == "資深後端工程師"
+    assert detail["parsed_payload"]["expected_cities"] == ["台北市", "新北市"]
+
+    confirmed = client.post(f"/api/v1/resumes/{resume_id}/confirm", json={})
+    assert confirmed.status_code == 200
+    with testing_session() as db:
+        candidate = db.get(Candidate, confirmed.json()["candidate_id"])
+        assert candidate.current_company == "範例科技"
+        assert candidate.highest_education == "學士"
+        assert candidate.expected_title == "資深後端工程師"
+        assert candidate.expected_cities == ["台北市", "新北市"]
+
+
 def test_batch_upload_duplicate_review_and_confirm(resume_client) -> None:
     client, testing_session = resume_client
     content = docx_bytes(
-        "1111人力銀行\n姓名：林志偉\nEmail：lin@example.com\n手機：0911-222-333\n"
+        "1111人力銀行\ncareermaster.1111.com.tw/careermaster/resume/Template\n姓名：林志偉\nEmail：lin@example.com\n手機：0911-222-333\n"
         "居住地：新北市\n目前職稱：資料工程師\n工作年資：3年\n技能：Python、SQL"
     )
     files = [("files", ("resume.docx", content, "application/octet-stream"))]
@@ -124,6 +156,100 @@ def test_batch_upload_duplicate_review_and_confirm(resume_client) -> None:
         ).all()
         assert resume.parse_status == "confirmed"
         assert set(skills) == {"Python", "SQL"}
+
+
+def test_mixed_batch_is_classified_per_file_and_source_can_be_reviewed(resume_client) -> None:
+    client, testing_session = resume_client
+    files = [
+        (
+            "files",
+            (
+                "board-a.docx",
+                docx_bytes(
+                    "104人力銀行 求職者履歷\npda.104.com.tw/resumes/\n求職者姓名：測試甲\n"
+                    "Email：a104@example.test\n手機：0912-000-101\n累積年資：2年"
+                ),
+                "application/octet-stream",
+            ),
+        ),
+        (
+            "files",
+            (
+                "board-b.docx",
+                docx_bytes(
+                    "1111人力銀行 1111履歷表\n"
+                    "careermaster.1111.com.tw/careermaster/resume/Template\n"
+                    "履歷姓名：測試乙\n"
+                    "Email：b1111@example.test\n手機：0912-000-102\n累計年資：3年"
+                ),
+                "application/octet-stream",
+            ),
+        ),
+        (
+            "files",
+            (
+                "custom.docx",
+                docx_bytes(
+                    "姓名：測試丙\nEmail：custom@example.test\n手機：0912-000-103\n"
+                    "工作經歷：4年\nSkills：Python, SQL"
+                ),
+                "application/octet-stream",
+            ),
+        ),
+    ]
+    response = client.post(
+        "/api/v1/resumes/upload", data={"source_platform": "generic"}, files=files
+    )
+    assert response.status_code == 201
+    items = response.json()
+    assert [item["source_platform"] for item in items] == ["p104", "p1111", "direct"]
+    assert all(item["source_evidence"] for item in items)
+    assert all(item["source_confidence"] >= 0.70 for item in items)
+
+    reviewed = client.put(
+        f"/api/v1/resumes/{items[2]['id']}/source",
+        json={"source_platform": "direct"},
+    )
+    assert reviewed.status_code == 200
+    assert reviewed.json()["source_platform"] == "direct"
+    assert reviewed.json()["source_review_required"] is False
+    assert reviewed.json()["source_confidence"] == 1.0
+    assert reviewed.json()["source_evidence"][-1]["type"] == "human_override"
+    with testing_session() as db:
+        stored = db.get(ResumeFile, items[2]["id"])
+        assert stored.source_reviewed_by == 1
+
+
+def test_confirm_does_not_link_resume_to_soft_deleted_candidate(resume_client) -> None:
+    client, testing_session = resume_client
+    deleted = client.post(
+        "/api/v1/candidates",
+        json={"name": "舊人才", "email": "rejoin@example.test", "phone": "0912-000-555"},
+    ).json()
+    assert client.delete(f"/api/v1/candidates/{deleted['id']}").status_code == 204
+    upload = client.post(
+        "/api/v1/resumes/upload",
+        data={"source_platform": "generic"},
+        files={
+            "files": (
+                "rejoin.docx",
+                docx_bytes(
+                    "姓名：重新加入\nEmail：rejoin@example.test\n手機：0912-000-555\n技能：Python"
+                ),
+                "application/octet-stream",
+            )
+        },
+    )
+    assert upload.status_code == 201
+    resume_id = upload.json()[0]["id"]
+    confirmed = client.post(f"/api/v1/resumes/{resume_id}/confirm", json={})
+    assert confirmed.status_code == 200
+    assert confirmed.json()["created"] is True
+    assert confirmed.json()["candidate_id"] != deleted["id"]
+    with testing_session() as db:
+        new_candidate = db.get(Candidate, confirmed.json()["candidate_id"])
+        assert new_candidate is not None
+        assert new_candidate.deleted_at is None
 
 
 def test_talent_pool_application_without_job_id(resume_client) -> None:

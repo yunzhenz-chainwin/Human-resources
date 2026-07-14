@@ -8,7 +8,14 @@ from app.models.candidate import (
 from app.models.matching import MatchResult
 from app.models.organization import Department, User
 from app.models.recruitment import JobApplication, JobRequisition, ResumeFile
-from app.models.security import AuditLog, RefreshToken, SkillCatalog, SystemSetting, Tag
+from app.models.security import (
+    AuditLog,
+    RefreshToken,
+    SkillCatalog,
+    SystemIssue,
+    SystemSetting,
+    Tag,
+)
 
 __all__ = [
     "Candidate",
@@ -27,4 +34,5 @@ __all__ = [
     "Tag",
     "SystemSetting",
     "AuditLog",
+    "SystemIssue",
 ]

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.parsers import select_adapter
+from app.parsers.registry import detect_source
 from app.services.resume_parser import parse_text
 
 FIXTURES = Path(__file__).parent / "fixtures" / "resumes"
@@ -43,7 +44,7 @@ def fixture_text(name: str) -> str:
         ),
         (
             "generic_synthetic_v1.txt",
-            "generic",
+            "direct",
             {
                 "name": "測試丙",
                 "email": "synthetic.generic@example.test",
@@ -60,7 +61,7 @@ def test_synthetic_golden_regression(filename: str, platform: str, expected: dic
     result = parse_text(fixture_text(filename))
     assert result.source_platform == platform
     assert result.status == "parsed"
-    assert result.payload == expected
+    assert {key: result.payload.get(key) for key in expected} == expected
     assert result.overall_confidence >= 0.85
     assert all(0 <= value <= 1 for value in result.confidence.values())
 
@@ -88,3 +89,45 @@ def test_adapters_have_independent_versions() -> None:
     assert p1111_result.version.startswith("p1111-")
     assert generic_result.version.startswith("generic-")
     assert len({p104_result.version, p1111_result.version, generic_result.version}) == 3
+
+
+def test_source_detection_is_explainable_and_marks_ambiguous_claims() -> None:
+    platform, confidence, evidence, review = detect_source(
+        fixture_text("p104_synthetic_v1.txt"), "generic"
+    )
+    assert platform == "p104"
+    assert confidence >= 0.70
+    assert review is False
+    assert {item["type"] for item in evidence} & {"platform_brand", "document_title"}
+
+    platform, confidence, evidence, review = detect_source(
+        "姓名：測試；Email: test@example.test", "p1111"
+    )
+    assert platform == "p1111"
+    assert confidence == 0.35
+    assert review is True
+    assert any(item["type"] == "uploader_claim" for item in evidence)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "104人力銀行 求職者履歷\n求職者姓名：測試\n累積年資：3年",
+        "1111人力銀行 1111履歷表\n中文姓名：測試\n專長技能：Python",
+        "求職者履歷\n求職者姓名：測試\n最近工作：工程師\n累積年資：3年",
+    ],
+)
+def test_brand_or_common_fields_alone_do_not_prove_platform_export(text: str) -> None:
+    platform, confidence, evidence, review = detect_source(text)
+    assert platform == "generic"
+    assert confidence == 0.40
+    assert review is True
+    assert any(item["type"] == "unverified_platform_claim" for item in evidence)
+
+
+def test_ocr_name_without_colon_is_recovered() -> None:
+    result = parse_text(
+        "TalentHub履歷表\n姓名王小明13213321\n"
+        "E-mail: candidate@example.com\n聯絡電話: 0912-345-678"
+    )
+    assert result.payload["name"] == "王小明"

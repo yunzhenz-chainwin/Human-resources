@@ -24,5 +24,5 @@ class CurrentUserRead(BaseModel):
     username: str
     email: str
     display_name: str
-    role: Literal["admin", "hr", "manager"]
+    role: Literal["admin", "it", "hr", "manager"]
     department_id: int | None

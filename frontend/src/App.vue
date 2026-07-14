@@ -36,9 +36,13 @@ const jobs = ref<RequisitionDto[]>([])
 const search = ref('')
 const candidateStatus = ref('all')
 const resumeStatus = ref('all')
-const source = ref<ResumeSource>('p104')
 const uploadFiles = ref<File[]>([])
 const uploadInput = ref<HTMLInputElement | null>(null)
+const intakeInput = ref<HTMLInputElement | null>(null)
+const intakeFiles = ref<File[]>([])
+const intakeJobId = ref<number | null>(null)
+const intakeNotes = ref('')
+const intakeDone = ref(false)
 const selectedCandidate = ref<CandidateDto | null>(null)
 const candidateActivities = ref<ActivityDto[]>([])
 const selectedResume = ref<ResumeDto | null>(null)
@@ -47,6 +51,7 @@ const dialog = ref<Dialog>(null)
 const editingCandidate = ref<CandidateDto | null>(null)
 const editingJob = ref<RequisitionDto | null>(null)
 const candidateForm = reactive<CandidateWrite>({ name: '', email: '', phone: '', city: '', current_title: '', total_years: 0, source: 'manual', status: 'new' })
+const intakeForm = reactive<CandidateWrite>({ name: '', email: '', phone: '', city: '', current_title: '', total_years: 0, source: 'manual', status: 'new' })
 const activityForm = reactive({ type: '電話聯繫', content: '', next_status: 'contacted' })
 const jobForm = reactive({
   req_no: '', title: '', department_id: null as number | null, employment_type: 'full_time', work_city: '台北市',
@@ -54,17 +59,25 @@ const jobForm = reactive({
   salary_type: 'monthly', headcount: 1, status: 'draft',
 })
 
-const nav: { id: Page; label: string; icon: string; available: boolean }[] = [
-  { id: 'dashboard', label: '工作總覽', icon: '⌂', available: true },
-  { id: 'candidates', label: '人才資料庫', icon: '人', available: true },
-  { id: 'resumes', label: '履歷匯入與校對', icon: '⇧', available: true },
-  { id: 'jobs', label: '職缺管理', icon: '▣', available: true },
-  { id: 'matching', label: '智慧配對', icon: '◎', available: true },
-  { id: 'reports', label: '數據報表', icon: '⌁', available: true },
-  { id: 'admin', label: '帳號與權限', icon: '⚙', available: true },
+const allNav: { id: Page; label: string; icon: string; roles: string[] }[] = [
+  { id: 'dashboard', label: '工作總覽', icon: '⌂', roles: ['it', 'admin', 'hr', 'manager'] },
+  { id: 'candidates', label: '人才庫', icon: '人', roles: ['admin', 'hr', 'manager'] },
+  { id: 'resumes', label: '履歷辨識中心', icon: '▤', roles: ['admin', 'hr'] },
+  { id: 'jobs', label: '職缺管理', icon: '◇', roles: ['admin', 'hr', 'manager'] },
+  { id: 'matching', label: '人才媒合', icon: '◎', roles: ['admin', 'hr', 'manager'] },
+  { id: 'reports', label: '招募分析', icon: '⌁', roles: ['admin', 'hr'] },
+  { id: 'admin', label: '帳號與權限', icon: '⚙', roles: ['it', 'admin', 'hr'] },
 ]
 
-const pageTitle = computed(() => nav.find(item => item.id === page.value)?.label || '')
+const nav = computed(() => allNav.filter(item => item.roles.includes(authState.user?.role || '')))
+const roleProfile = computed(() => ({
+  it: { label: 'IT 管理員', scope: '系統管理', note: '帳號權限、組織與系統設定，不接觸招募個資' },
+  admin: { label: '相容管理員', scope: '系統全域', note: '保留既有管理與招募權限' },
+  hr: { label: 'HR 招募夥伴', scope: '全公司資料', note: '所有職缺、人才庫與招募分析' },
+  manager: { label: '用人主管', scope: '所屬部門', note: '負責職缺、推薦人才與面試決策' },
+}[authState.user?.role || 'manager']))
+
+const pageTitle = computed(() => nav.value.find(item => item.id === page.value)?.label || 'TalentHub')
 const filteredCandidates = computed(() => candidates.value.filter(candidate => {
   const q = search.value.trim().toLocaleLowerCase()
   const inSearch = !q || [candidate.name, candidate.email, candidate.phone, candidate.current_title, candidate.city, candidate.source]
@@ -86,7 +99,7 @@ const resumeStatusLabels: Record<string, string> = {
 const jobStatusLabels: Record<string, string> = {
   draft: '草稿', submitted: '待審核', approved: '已核准', sourcing: '招募中', interviewing: '面試中', filled: '已補齊', closed: '已關閉',
 }
-const sourceLabels: Record<string, string> = { p104: '104 人力銀行', p1111: '1111 人力銀行', generic: '一般履歷', direct: '自製履歷', manual: '手動建立' }
+const sourceLabels: Record<string, string> = { p104: '疑似 104 匯出格式', p1111: '疑似 1111 匯出格式', generic: '來源無法驗證', direct: '一般／自製履歷', manual: '手動建立' }
 
 function setNotice(message: string) {
   notice.value = message
@@ -104,6 +117,14 @@ async function refreshAll(silent = false) {
   try {
     await hrApi.health()
     apiOnline.value = true
+    if (authState.user?.role === 'it') {
+      candidates.value = []
+      resumes.value = []
+      jobs.value = []
+      lastSync.value = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })
+      if (!silent) setNotice('系統狀態已同步')
+      return
+    }
     const [candidateResult, resumeResult, jobResult] = await Promise.all([
       hrApi.candidates(), hrApi.resumes(), hrApi.requisitions(),
     ])
@@ -120,10 +141,13 @@ async function refreshAll(silent = false) {
   }
 }
 
-function navigate(target: Page) {
+async function navigate(target: Page) {
   page.value = target
   sidebarOpen.value = false
   error.value = ''
+  if (['candidates', 'resumes', 'jobs', 'matching', 'reports'].includes(target)) {
+    await refreshAll(true)
+  }
 }
 
 function openCandidate(candidate?: CandidateDto) {
@@ -191,16 +215,68 @@ function selectFiles(event: Event) {
   uploadFiles.value = Array.from((event.target as HTMLInputElement).files || [])
 }
 
+function selectIntakeFiles(event: Event) {
+  intakeFiles.value = Array.from((event.target as HTMLInputElement).files || [])
+  intakeDone.value = false
+}
+
+function removeIntakeFile(index: number) {
+  intakeFiles.value.splice(index, 1)
+  if (!intakeFiles.value.length && intakeInput.value) intakeInput.value.value = ''
+}
+
+async function submitIntake() {
+  if (!intakeForm.name?.trim()) return showError('請先填寫人才姓名')
+  saving.value = true
+  error.value = ''
+  intakeDone.value = false
+  let created: CandidateDto | null = null
+  try {
+    created = (await hrApi.saveCandidate({
+      ...intakeForm,
+      name: intakeForm.name.trim(),
+      email: intakeForm.email || null,
+      phone: intakeForm.phone || null,
+      source: 'manual',
+    })).data
+    const target = jobs.value.find(job => job.id === intakeJobId.value)
+    const note = [target ? `目標職缺：${target.req_no} ${target.title}` : '', intakeNotes.value.trim()].filter(Boolean).join('\n')
+    if (note) await hrApi.addActivity(created.id, { type: '招募建檔', content: note, next_status: 'new' })
+    let detectionSummary = ''
+    if (intakeFiles.value.length) {
+      const uploaded = (await hrApi.uploadResumes(intakeFiles.value, 'generic')).data
+      const counts = uploaded.reduce<Record<string, number>>((result, item) => {
+        result[item.source_platform] = (result[item.source_platform] || 0) + 1
+        return result
+      }, {})
+      const reviewCount = uploaded.filter(item => item.source_review_required).length
+      detectionSummary = `；來源判別 ${Object.entries(counts).map(([key, count]) => `${sourceLabels[key] || key} ${count}`).join('、')}${reviewCount ? `，${reviewCount} 份待確認` : ''}`
+    }
+    await refreshAll(true)
+    Object.assign(intakeForm, { name: '', email: '', phone: '', city: '', current_title: '', total_years: 0, source: 'manual', status: 'new' })
+    intakeJobId.value = null
+    intakeNotes.value = ''
+    intakeFiles.value = []
+    if (intakeInput.value) intakeInput.value.value = ''
+    intakeDone.value = true
+    setNotice(`已建立 ${created.name}，資料已寫入人才庫${detectionSummary}`)
+  } catch (cause) {
+    if (created) showError(`人才 ${created.name} 已建立，但履歷或備註未完整送出：${cause instanceof Error ? cause.message : '請稍後重試'}`)
+    else showError(cause)
+  } finally { saving.value = false }
+}
+
 async function upload() {
   if (!uploadFiles.value.length) return showError('請先選擇履歷檔案')
   saving.value = true
   error.value = ''
   try {
-    await hrApi.uploadResumes(uploadFiles.value, source.value)
+    const uploaded = (await hrApi.uploadResumes(uploadFiles.value, 'generic')).data
     uploadFiles.value = []
     if (uploadInput.value) uploadInput.value.value = ''
     resumes.value = (await hrApi.resumes()).data
-    setNotice('履歷已上傳並加入解析佇列')
+    const reviewCount = uploaded.filter(item => item.source_review_required).length
+    setNotice(`已逐檔自動判別來源並加入解析佇列${reviewCount ? `，${reviewCount} 份需要人工確認` : ''}`)
   } catch (cause) { showError(cause) } finally { saving.value = false }
 }
 
@@ -239,6 +315,13 @@ function normalizeSkills(value: unknown): string[] {
   return String(value || '').split(/[,，\n]/).map(v => v.trim()).filter(Boolean)
 }
 
+function sourceEvidence(resume: ResumeDto): string {
+  if ((resume.source_evidence || []).some(item => item.type === 'unverified_platform_claim')) {
+    return '只偵測到品牌文字或相似欄位，不足以證明是官方匯出檔'
+  }
+  return (resume.source_evidence || []).map(item => String(item.marker || item.type || '')).filter(Boolean).join('、') || '沒有足夠的平台特徵'
+}
+
 async function reparse(resume: ResumeDto) {
   saving.value = true
   try {
@@ -246,6 +329,16 @@ async function reparse(resume: ResumeDto) {
     resumes.value = (await hrApi.resumes()).data
     if (selectedResume.value?.id === resume.id) selectedResume.value = (await hrApi.resume(resume.id)).data
     setNotice('履歷已重新加入解析佇列')
+  } catch (cause) { showError(cause) } finally { saving.value = false }
+}
+
+async function reviewResumeSource(value: ResumeSource) {
+  if (!selectedResume.value) return
+  saving.value = true
+  try {
+    selectedResume.value = (await hrApi.reviewResumeSource(selectedResume.value.id, value)).data
+    resumes.value = (await hrApi.resumes()).data
+    setNotice(`來源已確認為${sourceLabels[value] || value}`)
   } catch (cause) { showError(cause) } finally { saving.value = false }
 }
 
@@ -319,11 +412,12 @@ onMounted(() => authSession.initialize())
   <div v-else class="app-shell">
     <button v-if="sidebarOpen" class="mobile-overlay" aria-label="關閉選單" @click="sidebarOpen = false"></button>
     <aside class="sidebar" :class="{ open: sidebarOpen }">
-      <div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><strong>TalentHub</strong><small>HR 招募管理</small></div></div>
+      <div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><strong>TalentHub</strong><small>人才與職涯平台</small></div></div>
       <nav>
+        <div class="role-scope"><small>目前工作範圍</small><strong>{{ roleProfile.scope }}</strong><span>{{ roleProfile.note }}</span></div>
         <p class="nav-label">招募工作台</p>
-        <button v-for="item in nav" :key="item.id" class="nav-item" :class="{ active: page === item.id, disabled: !item.available }" @click="navigate(item.id)">
-          <span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><em v-if="!item.available">待建</em><em v-else-if="item.id === 'resumes' && pendingReviewCount">{{ pendingReviewCount }}</em>
+        <button v-for="item in nav" :key="item.id" class="nav-item" :class="{ active: page === item.id }" @click="navigate(item.id)">
+          <span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><em v-if="item.id === 'resumes' && pendingReviewCount">{{ pendingReviewCount }}</em>
         </button>
       </nav>
       <div class="sidebar-footer"><div class="connection"><i :class="{ online: apiOnline }"></i><div><strong>{{ apiOnline ? 'API 已連線' : 'API 未連線' }}</strong><small>{{ API_BASE }}</small></div></div></div>
@@ -332,63 +426,115 @@ onMounted(() => authSession.initialize())
     <main class="main">
       <header class="topbar">
         <button class="menu-button" @click="sidebarOpen = true">☰</button>
-        <div class="top-title"><strong>{{ pageTitle }}</strong><small>最後同步：{{ lastSync }}</small></div>
+        <div class="top-title"><strong>{{ pageTitle }}</strong><small>{{ roleProfile.scope }} · 最後同步 {{ lastSync }}</small></div>
         <button class="button secondary" :disabled="loading" @click="refreshAll()">{{ loading ? '同步中…' : '重新同步' }}</button>
-        <div class="user-session"><span class="avatar">{{ authState.user.display_name.slice(0, 1) }}</span><div><strong>{{ authState.user.display_name }}</strong><small>{{ authState.user.role }}</small></div><button class="text-button" @click="logout">登出</button></div>
+        <div class="user-session"><span class="avatar">{{ authState.user.display_name.slice(0, 1) }}</span><div><strong>{{ authState.user.display_name }}</strong><small>{{ roleProfile.label }}</small></div><button class="text-button" @click="logout">登出</button></div>
       </header>
 
       <div class="content">
         <div v-if="error" class="alert error-alert"><span>!</span><p><strong>操作未完成</strong>{{ error }}</p><button @click="error = ''">×</button></div>
 
         <section v-if="page === 'dashboard'" class="page">
-          <div class="page-heading"><div><p class="eyebrow">TODAY</p><h1>招募工作總覽</h1><p>所有數字皆由目前資料庫即時彙整。</p></div></div>
-          <div class="metric-grid">
-            <article><span>人才總數</span><strong>{{ candidates.length }}</strong><small>資料庫有效人才</small></article>
-            <article><span>待校對履歷</span><strong>{{ pendingReviewCount }}</strong><small>待人工確認或解析失敗</small></article>
-            <article><span>解析佇列</span><strong>{{ resumes.filter(r => ['pending','processing'].includes(r.parse_status)).length }}</strong><small>等待或正在處理</small></article>
-            <article><span>招募中職缺</span><strong>{{ activeJobCount }}</strong><small>已核准且開放中</small></article>
+          <div v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" class="intake-page">
+            <header class="intake-welcome">
+              <div><p class="eyebrow">NEW TALENT INTAKE</p><h1>嗨，{{ authState.user.display_name }}，今天想認識哪位人才？</h1><p>基本資料、履歷與招募方向都在這一頁。填完一次送出，接下來交給系統整理。</p></div>
+              <div class="intake-progress" aria-label="建檔流程"><span class="active">1</span><i></i><span :class="{ active: intakeFiles.length }">2</span><i></i><span :class="{ active: intakeJobId || intakeNotes }">3</span></div>
+            </header>
+
+            <form class="intake-workspace" @submit.prevent="submitIntake">
+              <section class="intake-card identity-card">
+                <div class="intake-step"><span>01</span><div><h2>先從基本資料開始</h2><p>只要姓名是必填，其餘可以稍後再補。</p></div></div>
+                <div class="intake-fields">
+                  <label class="wide">姓名 <b>*</b><input v-model="intakeForm.name" required autofocus placeholder="例如：林小安"></label>
+                  <label>Email<input v-model="intakeForm.email" type="email" placeholder="name@example.com"></label>
+                  <label>聯絡電話<input v-model="intakeForm.phone" placeholder="09xx-xxx-xxx"></label>
+                  <label>目前職稱<input v-model="intakeForm.current_title" placeholder="例如：前端工程師"></label>
+                  <label>居住地<input v-model="intakeForm.city" placeholder="例如：台北市"></label>
+                  <label>總年資<input v-model.number="intakeForm.total_years" type="number" min="0" step="0.5" placeholder="0"></label>
+                </div>
+              </section>
+
+              <section class="intake-card resume-intake-card">
+                <div class="intake-step"><span>02</span><div><h2>把履歷一起帶進來</h2><p>可一次選多檔；沒有履歷也能先建立人才。</p></div></div>
+                <p class="source-auto-note"><span>✦</span><strong>來源由系統逐檔自動判別</strong><small>只有偵測到指定匯出網域與版型特徵才標示疑似平台格式；單有品牌字樣或通用欄位一律待人工覆核。</small></p>
+                <button class="intake-dropzone" type="button" @click="intakeInput?.click()"><span class="upload-heart">＋</span><strong>{{ intakeFiles.length ? `已選擇 ${intakeFiles.length} 份履歷` : '選擇一份或多份履歷' }}</strong><small>PDF、DOC、DOCX · 檔案將送入 OCR 校對佇列</small></button>
+                <input ref="intakeInput" class="visually-hidden" type="file" multiple accept=".pdf,.doc,.docx,application/pdf" @change="selectIntakeFiles">
+                <ul v-if="intakeFiles.length" class="intake-file-list"><li v-for="(file, index) in intakeFiles" :key="`${file.name}-${file.size}`"><span><strong>{{ file.name }}</strong><small>{{ (file.size / 1024 / 1024).toFixed(2) }} MB</small></span><button type="button" aria-label="移除檔案" @click="removeIntakeFile(index)">×</button></li></ul>
+              </section>
+
+              <section class="intake-card direction-card">
+                <div class="intake-step"><span>03</span><div><h2>給招募夥伴一點方向</h2><p>選擇目標職缺並留下第一手觀察。</p></div></div>
+                <div class="intake-fields">
+                  <label class="wide">目標職缺<select v-model="intakeJobId"><option :value="null">先不指定職缺</option><option v-for="job in jobs" :key="job.id" :value="job.id">{{ job.req_no }} · {{ job.title }}</option></select></label>
+                  <label class="wide">招募備註<textarea v-model="intakeNotes" rows="5" placeholder="例如：朋友推薦、具備 SaaS 經驗，下週方便聯繫…"></textarea></label>
+                </div>
+              </section>
+
+              <footer class="intake-submit-bar">
+                <div><strong>{{ intakeForm.name || '新人才' }}</strong><span>人才資料寫入資料庫；履歷另送 OCR 解析與人工校對。</span></div>
+                <button class="button primary intake-submit" type="submit" :disabled="saving || !intakeForm.name?.trim()">{{ saving ? '正在安心保存…' : '完成建檔' }} <span>→</span></button>
+              </footer>
+              <div v-if="intakeDone" class="intake-success"><span>✓</span><div><strong>人才資料已好好收進人才庫</strong><p>你可以直接開始建立下一位；履歷解析結果請至「履歷匯入」校對。</p></div></div>
+            </form>
+          </div>
+          <template v-else>
+          <div class="welcome-banner">
+            <div><p class="eyebrow">{{ roleProfile.label }}</p><h1>{{ authState.user.display_name }}，歡迎回來</h1><p>{{ roleProfile.note }}。{{ authState.user.role === 'it' ? '以下是系統管理入口。' : '以下是你今天需要關注的招募進度。' }}</p></div>
+            <div class="scope-orbit"><span>{{ roleProfile.scope }}</span><small>資料存取範圍</small></div>
+          </div>
+          <div v-if="authState.user.role !== 'it'" class="metric-grid">
+            <article><span>人才總數</span><strong>{{ candidates.length }}</strong><small>目前權限範圍內的人才</small></article>
+            <article v-if="authState.user.role !== 'manager'"><span>待校對履歷</span><strong>{{ pendingReviewCount }}</strong><small>待人工確認或解析失敗</small></article>
+            <article v-if="authState.user.role !== 'manager'"><span>解析佇列</span><strong>{{ resumes.filter(r => ['pending','processing'].includes(r.parse_status)).length }}</strong><small>等待或正在處理</small></article>
+            <article v-else><span>推薦人才</span><strong>{{ candidates.filter(c => ['priority','interviewing'].includes(c.status)).length }}</strong><small>等待主管檢視與決策</small></article>
+            <article v-if="authState.user.role === 'manager'"><span>面試進行中</span><strong>{{ candidates.filter(c => c.status === 'interviewing').length }}</strong><small>所屬職缺的面試人才</small></article>
+            <article><span>招募中職缺</span><strong>{{ activeJobCount }}</strong><small>目前權限範圍內的職缺</small></article>
           </div>
           <div class="dashboard-actions">
-            <article class="panel"><div><span class="action-icon">⇧</span><div><h3>匯入外部履歷</h3><p>批次上傳 104、1111 或其他格式，送入解析與校對流程。</p></div></div><button class="button primary" @click="navigate('resumes')">開始匯入</button></article>
-            <article class="panel"><div><span class="action-icon">人</span><div><h3>篩選人才</h3><p>依姓名、聯絡方式、來源、職稱與狀態搜尋。</p></div></div><button class="button secondary" @click="navigate('candidates')">開啟人才庫</button></article>
+            <article v-if="authState.user.role === 'it'" class="panel"><div><span class="action-icon">⚙</span><div><h3>管理系統與權限</h3><p>維護帳號角色、部門、系統設定與稽核紀錄。</p></div></div><button class="button primary" @click="navigate('admin')">開啟管理中心</button></article>
+            <article v-else-if="authState.user.role !== 'manager'" class="panel"><div><span class="action-icon">⇧</span><div><h3>匯入外部履歷</h3><p>批次上傳 104、1111 或其他格式，送入 OCR 解析與欄位校對。</p></div></div><button class="button primary" @click="navigate('resumes')">開始匯入</button></article>
+            <article v-else class="panel"><div><span class="action-icon">◎</span><div><h3>檢視推薦人才</h3><p>依技能、經驗與職缺條件查看配對說明，快速做出面試決策。</p></div></div><button class="button primary" @click="navigate('matching')">開始審閱</button></article>
+            <article v-if="authState.user.role !== 'it'" class="panel"><div><span class="action-icon">人</span><div><h3>篩選人才</h3><p>依姓名、聯絡方式、來源、職稱與狀態搜尋。</p></div></div><button class="button secondary" @click="navigate('candidates')">開啟人才庫</button></article>
           </div>
+          </template>
         </section>
 
         <section v-else-if="page === 'candidates'" class="page">
-          <div class="page-heading"><div><h1>人才資料庫</h1><p>從 API 讀取 {{ candidates.length }} 筆人才資料。</p></div><button class="button primary" @click="openCandidate()">＋ 手動新增人才</button></div>
+          <div class="page-heading"><div><p class="eyebrow">{{ roleProfile.scope }}</p><h1>{{ authState.user.role === 'manager' ? '職缺關聯人才' : '人才資料庫' }}</h1><p>{{ authState.user.role === 'manager' ? '僅顯示與你所屬部門職缺相關的人才。' : `目前共 ${candidates.length} 筆人才資料，可跨職缺搜尋與管理。` }}</p></div><button v-if="authState.user.role !== 'manager'" class="button primary" @click="openCandidate()">＋ 手動新增人才</button></div>
           <div class="filter-bar panel"><label class="search-field"><span>⌕</span><input v-model="search" placeholder="搜尋姓名、Email、電話、職稱或來源"></label><select v-model="candidateStatus"><option value="all">全部狀態</option><option v-for="(label, key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select><span>{{ filteredCandidates.length }} 筆結果</span></div>
           <div class="table-card panel">
             <table><thead><tr><th>人才</th><th>聯絡方式</th><th>職稱／地區</th><th>來源</th><th>狀態</th><th>建立時間</th><th></th></tr></thead>
-              <tbody><tr v-for="candidate in filteredCandidates" :key="candidate.id"><td><button class="person-link" @click="viewCandidate(candidate)"><span class="person-avatar">{{ candidate.name.slice(0,1) }}</span><span><strong>{{ candidate.name }}</strong><small>{{ candidate.code }}</small></span></button></td><td><strong>{{ candidate.email || '—' }}</strong><small>{{ candidate.phone || '未提供電話' }}</small></td><td><strong>{{ candidate.current_title || '未填職稱' }}</strong><small>{{ candidate.city || '未填地區' }} · {{ candidate.total_years ?? 0 }} 年</small></td><td>{{ sourceLabels[candidate.source || ''] || candidate.source || '未知' }}</td><td><span class="status" :data-status="candidate.status">{{ candidateStatusLabels[candidate.status] || candidate.status }}</span></td><td>{{ date(candidate.created_at) }}</td><td><button class="text-button" @click="openCandidate(candidate)">編輯</button></td></tr></tbody>
+              <tbody><tr v-for="candidate in filteredCandidates" :key="candidate.id"><td><button class="person-link" @click="viewCandidate(candidate)"><span class="person-avatar">{{ candidate.name.slice(0,1) }}</span><span><strong>{{ candidate.name }}</strong><small>{{ candidate.code }}</small></span></button></td><td><strong>{{ candidate.email || '—' }}</strong><small>{{ candidate.phone || '未提供電話' }}</small></td><td><strong>{{ candidate.current_title || '未填職稱' }}</strong><small>{{ candidate.city || '未填地區' }} · {{ candidate.total_years ?? 0 }} 年</small></td><td>{{ sourceLabels[candidate.source || ''] || candidate.source || '未知' }}</td><td><span class="status" :data-status="candidate.status">{{ candidateStatusLabels[candidate.status] || candidate.status }}</span></td><td>{{ date(candidate.created_at) }}</td><td><button v-if="authState.user.role !== 'manager'" class="text-button" @click="openCandidate(candidate)">編輯</button><span v-else>唯讀</span></td></tr></tbody>
             </table><div v-if="!filteredCandidates.length" class="empty"><strong>找不到符合條件的人才</strong><p>請調整搜尋或篩選條件。</p></div>
           </div>
         </section>
 
         <section v-else-if="page === 'resumes'" class="page">
-          <div class="page-heading"><div><h1>履歷匯入與校對</h1><p>先標記來源，再批次上傳固定格式或自製履歷。</p></div></div>
+          <div class="page-heading"><div><h1>履歷匯入與校對</h1><p>直接混合上傳 104、1111 或自製履歷，系統會逐檔自動判別。</p></div></div>
           <div class="resume-layout">
             <div>
               <article class="panel uploader"><div class="section-head"><div><h2>1. 選擇來源與檔案</h2><p>支援 PDF、DOC、DOCX；單檔上限依後端設定。</p></div></div>
-                <div class="source-grid"><label v-for="(label, key) in Object.fromEntries(Object.entries(sourceLabels).filter(([key]) => key !== 'manual'))" :key="key" :class="{ selected: source === key }"><input v-model="source" type="radio" :value="key"><strong>{{ label }}</strong><small>{{ key === 'p104' || key === 'p1111' ? '平台固定格式' : '非固定格式' }}</small></label></div>
+                <p class="source-auto-note"><span>✦</span><strong>不需要先選來源</strong><small>同一批可混合不同格式；判定結果、信心分數與依據會顯示在右側校對區。</small></p>
                 <button class="dropzone" @click="uploadInput?.click()"><strong>點此選擇多份履歷</strong><span>可一次選擇多個檔案</span></button>
                 <input ref="uploadInput" class="visually-hidden" type="file" multiple accept=".pdf,.doc,.docx,application/pdf" @change="selectFiles">
                 <ul v-if="uploadFiles.length" class="selected-files"><li v-for="file in uploadFiles" :key="`${file.name}-${file.size}`"><span>{{ file.name }}</span><small>{{ (file.size / 1024 / 1024).toFixed(2) }} MB</small></li></ul>
                 <button class="button primary upload-button" :disabled="saving || !uploadFiles.length" @click="upload">{{ saving ? '處理中…' : `上傳 ${uploadFiles.length || ''} 份履歷` }}</button>
               </article>
               <article class="panel queue"><div class="section-head"><div><h2>2. 解析佇列</h2><p>點選待校對或失敗項目查看內容。</p></div><select v-model="resumeStatus"><option value="all">全部狀態</option><option v-for="(label, key) in resumeStatusLabels" :key="key" :value="key">{{ label }}</option></select></div>
-                <button v-for="resume in filteredResumes" :key="resume.id" class="resume-row" :class="{ active: selectedResume?.id === resume.id }" @click="openResume(resume)"><span class="file-badge">{{ resume.original_filename?.split('.').pop()?.toUpperCase() || 'FILE' }}</span><span><strong>{{ resume.original_filename || `履歷 #${resume.id}` }}</strong><small>{{ sourceLabels[resume.source_platform] || resume.source_platform }} · {{ date(resume.uploaded_at) }}</small></span><span class="status" :data-status="resume.parse_status">{{ resumeStatusLabels[resume.parse_status] || resume.parse_status }}</span></button>
+                <button v-for="resume in filteredResumes" :key="resume.id" class="resume-row" :class="{ active: selectedResume?.id === resume.id }" @click="openResume(resume)"><span class="file-badge">{{ resume.original_filename?.split('.').pop()?.toUpperCase() || 'FILE' }}</span><span><strong>{{ resume.original_filename || `履歷 #${resume.id}` }}</strong><small>{{ sourceLabels[resume.source_platform] || resume.source_platform }} · 信心 {{ Math.round((resume.source_confidence || 0) * 100) }}% · {{ date(resume.uploaded_at) }}</small></span><span class="status" :data-status="resume.source_review_required ? 'needs_review' : resume.parse_status">{{ resume.source_review_required ? '來源待確認' : resumeStatusLabels[resume.parse_status] || resume.parse_status }}</span></button>
                 <div v-if="!filteredResumes.length" class="empty"><strong>目前沒有履歷</strong><p>上傳後會顯示在解析佇列。</p></div>
               </article>
             </div>
             <article class="panel review-panel">
               <template v-if="selectedResume"><div class="section-head"><div><h2>3. 人工校對</h2><p>{{ selectedResume.original_filename }}</p></div><span class="status" :data-status="selectedResume.parse_status">{{ resumeStatusLabels[selectedResume.parse_status] || selectedResume.parse_status }}</span></div>
+                <div class="source-verdict" :class="{ uncertain: selectedResume.source_review_required }"><div><small>逐檔來源判別</small><strong>{{ sourceLabels[selectedResume.source_platform] || selectedResume.source_platform }} · {{ Math.round((selectedResume.source_confidence || 0) * 100) }}%</strong><p>依據：{{ sourceEvidence(selectedResume) }}</p></div><div v-if="selectedResume.source_review_required" class="source-review-buttons"><button v-for="value in (['p104','p1111','direct','generic'] as ResumeSource[])" :key="value" type="button" class="button secondary" :disabled="saving" @click="reviewResumeSource(value)">{{ sourceLabels[value] }}</button></div></div>
                 <div v-if="selectedResume.parse_status === 'pending' || selectedResume.parse_status === 'processing'" class="review-message"><span class="spinner"></span><strong>履歷正在等待解析</strong><p>解析完成後即可在此校對欄位。</p></div>
                 <div v-else-if="selectedResume.parse_status !== 'confirmed'" class="review-form">
                   <label>姓名 *<input v-model="parsedForm.name"></label><label>Email<input v-model="parsedForm.email" type="email"></label><label>電話<input v-model="parsedForm.phone"></label><label>居住地<input v-model="parsedForm.city"></label><label>目前職稱<input v-model="parsedForm.current_title"></label><label>總年資<input v-model.number="parsedForm.total_years" type="number" min="0" step="0.5"></label><label class="wide">技能（逗號分隔）<textarea :value="normalizeSkills(parsedForm.skills).join(', ')" rows="2" @input="parsedForm.skills = ($event.target as HTMLTextAreaElement).value.split(/[,，]/)"></textarea></label><label v-if="selectedResume.resume_text" class="wide">解析原文（僅供校對）<textarea :value="selectedResume.resume_text" rows="7" readonly></textarea></label>
                   <div v-if="selectedResume.error_message" class="inline-error wide"><strong>解析錯誤</strong>{{ selectedResume.error_message }}</div>
                 </div>
                 <div v-else class="review-message"><strong>這份履歷已確認入庫</strong><p>人才編號已建立，確認後的履歷不可再次編輯。</p></div>
-                <footer v-if="selectedResume.parse_status !== 'confirmed'" class="review-actions"><button v-if="selectedResume.parse_status === 'failed'" class="button secondary" :disabled="saving" @click="reparse(selectedResume)">重新解析</button><span></span><button class="button secondary" :disabled="saving || ['pending','processing'].includes(selectedResume.parse_status)" @click="saveParsed(false)">儲存校對</button><button class="button primary" :disabled="saving || ['pending','processing'].includes(selectedResume.parse_status)" @click="saveParsed(true)">確認並寫入人才庫</button></footer>
+                <footer v-if="selectedResume.parse_status !== 'confirmed'" class="review-actions"><button v-if="selectedResume.parse_status === 'failed'" class="button secondary" :disabled="saving" @click="reparse(selectedResume)">重新解析</button><span></span><button class="button secondary" :disabled="saving || ['pending','processing'].includes(selectedResume.parse_status)" @click="saveParsed(false)">儲存校對</button><button class="button primary" :disabled="saving || selectedResume.source_review_required || ['pending','processing'].includes(selectedResume.parse_status)" @click="saveParsed(true)">{{ selectedResume.source_review_required ? '請先確認來源' : '確認並寫入人才庫' }}</button></footer>
               </template>
               <div v-else class="empty review-empty"><strong>選擇一份履歷開始校對</strong><p>系統解析結果會顯示在這裡，HR 可修正後再寫入人才庫。</p></div>
             </article>
@@ -396,8 +542,8 @@ onMounted(() => authSession.initialize())
         </section>
 
         <section v-else-if="page === 'jobs'" class="page">
-          <div class="page-heading"><div><h1>職缺管理</h1><p>建立、編輯及核准職缺；核准後公開前台才能讀取。</p></div><button class="button primary" @click="openJob()">＋ 建立職缺</button></div>
-          <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="panel job-card"><header><span class="status" :data-status="job.status">{{ jobStatusLabels[job.status] || job.status }}</span><button class="text-button" @click="openJob(job)">編輯</button></header><h2>{{ job.title }}</h2><p>{{ job.req_no }} · {{ job.work_city }} · 需求 {{ job.headcount }} 人</p><div class="job-summary">{{ job.summary || job.jd }}</div><div class="skill-list"><span v-for="skill in job.skills || []" :key="skill">{{ skill }}</span></div><footer><small>{{ job.published_at ? `發布：${date(job.published_at)}` : '尚未發布' }}</small><button v-if="['draft','submitted'].includes(job.status)" class="button primary" :disabled="saving" @click="approveJob(job)">核准職缺</button></footer></article><div v-if="!jobs.length" class="empty panel"><strong>目前沒有職缺</strong><p>建立第一個職缺後會顯示在此。</p></div></div>
+          <div class="page-heading"><div><p class="eyebrow">{{ roleProfile.scope }}</p><h1>{{ authState.user.role === 'manager' ? '我的職缺' : '職缺管理' }}</h1><p>{{ authState.user.role === 'manager' ? '追蹤所屬部門職缺、推薦人才與招募進度。' : '建立、編輯及核准全公司職缺；核准後公開前台才能讀取。' }}</p></div><button v-if="authState.user.role !== 'manager'" class="button primary" @click="openJob()">＋ 建立職缺</button></div>
+          <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="panel job-card"><header><span class="status" :data-status="job.status">{{ jobStatusLabels[job.status] || job.status }}</span><button v-if="authState.user.role !== 'manager'" class="text-button" @click="openJob(job)">編輯</button><button v-else class="text-button" @click="navigate('matching')">查看人才 →</button></header><h2>{{ job.title }}</h2><p>{{ job.req_no }} · {{ job.work_city }} · 需求 {{ job.headcount }} 人</p><div class="job-summary">{{ job.summary || job.jd }}</div><div class="skill-list"><span v-for="skill in job.skills || []" :key="skill">{{ skill }}</span></div><footer><small>{{ job.published_at ? `發布：${date(job.published_at)}` : '尚未發布' }}</small><button v-if="authState.user.role !== 'manager' && ['draft','submitted'].includes(job.status)" class="button primary" :disabled="saving" @click="approveJob(job)">核准職缺</button></footer></article><div v-if="!jobs.length" class="empty panel"><strong>目前沒有職缺</strong><p>目前權限範圍內沒有可檢視的職缺。</p></div></div>
         </section>
 
         <MatchingView v-else-if="page === 'matching'" :jobs="jobs" />
@@ -407,7 +553,7 @@ onMounted(() => authSession.initialize())
       </div>
     </main>
 
-    <div v-if="selectedCandidate" class="drawer-overlay" @click.self="selectedCandidate = null"><aside class="detail-drawer"><header><div><span class="person-avatar large">{{ selectedCandidate.name.slice(0,1) }}</span><div><small>{{ selectedCandidate.code }}</small><h2>{{ selectedCandidate.name }}</h2><p>{{ selectedCandidate.current_title || '未填職稱' }}</p></div></div><button @click="selectedCandidate = null">×</button></header><div class="detail-body"><div class="detail-grid"><div><small>Email</small><strong>{{ selectedCandidate.email || '未提供' }}</strong></div><div><small>電話</small><strong>{{ selectedCandidate.phone || '未提供' }}</strong></div><div><small>地區</small><strong>{{ selectedCandidate.city || '未提供' }}</strong></div><div><small>來源</small><strong>{{ sourceLabels[selectedCandidate.source || ''] || selectedCandidate.source || '未知' }}</strong></div></div><div class="drawer-actions"><button class="button primary" @click="openActivity(selectedCandidate)">＋ 新增聯繫紀錄</button><button class="button secondary" @click="openCandidate(selectedCandidate)">編輯資料</button><button class="button danger" @click="archiveCandidate(selectedCandidate)">封存</button></div><h3>活動紀錄</h3><div v-if="candidateActivities.length" class="timeline"><article v-for="activity in candidateActivities" :key="activity.id"><i></i><small>{{ date(activity.happened_at) }} · {{ activity.type }}</small><p>{{ activity.content }}</p></article></div><div v-else class="empty compact"><p>尚無活動紀錄</p></div></div></aside></div>
+    <div v-if="selectedCandidate" class="drawer-overlay" @click.self="selectedCandidate = null"><aside class="detail-drawer"><header><div><span class="person-avatar large">{{ selectedCandidate.name.slice(0,1) }}</span><div><small>{{ selectedCandidate.code }}</small><h2>{{ selectedCandidate.name }}</h2><p>{{ selectedCandidate.current_title || '未填職稱' }}</p></div></div><button @click="selectedCandidate = null">×</button></header><div class="detail-body"><div class="detail-grid"><div><small>Email</small><strong>{{ selectedCandidate.email || '未提供' }}</strong></div><div><small>電話</small><strong>{{ selectedCandidate.phone || '未提供' }}</strong></div><div><small>地區</small><strong>{{ selectedCandidate.city || '未提供' }}</strong></div><div><small>來源</small><strong>{{ sourceLabels[selectedCandidate.source || ''] || selectedCandidate.source || '未知' }}</strong></div></div><div v-if="authState.user.role !== 'manager'" class="drawer-actions"><button class="button primary" @click="openActivity(selectedCandidate)">＋ 新增聯繫紀錄</button><button class="button secondary" @click="openCandidate(selectedCandidate)">編輯資料</button><button class="button danger" @click="archiveCandidate(selectedCandidate)">封存</button></div><h3>活動紀錄</h3><div v-if="candidateActivities.length" class="timeline"><article v-for="activity in candidateActivities" :key="activity.id"><i></i><small>{{ date(activity.happened_at) }} · {{ activity.type }}</small><p>{{ activity.content }}</p></article></div><div v-else class="empty compact"><p>尚無活動紀錄</p></div></div></aside></div>
 
     <div v-if="dialog" class="modal-overlay" @click.self="dialog = null"><form class="modal-card" @submit.prevent="dialog === 'candidate' ? saveCandidate() : dialog === 'activity' ? saveActivity() : saveJob()"><header><div><small>資料會直接寫入 API</small><h2>{{ dialog === 'candidate' ? (editingCandidate ? '編輯人才' : '新增人才') : dialog === 'activity' ? '新增聯繫紀錄' : (editingJob ? '編輯職缺' : '建立職缺') }}</h2></div><button type="button" @click="dialog = null">×</button></header>
       <div v-if="dialog === 'candidate'" class="form-grid"><label>姓名 *<input v-model="candidateForm.name" required></label><label>Email<input v-model="candidateForm.email" type="email"></label><label>電話<input v-model="candidateForm.phone"></label><label>地區<input v-model="candidateForm.city"></label><label>目前職稱<input v-model="candidateForm.current_title"></label><label>總年資<input v-model.number="candidateForm.total_years" type="number" min="0" step="0.5"></label><label>來源<select v-model="candidateForm.source"><option value="manual">手動建立</option><option value="p104">104</option><option value="p1111">1111</option><option value="generic">一般履歷</option><option value="direct">自製履歷</option></select></label><label>狀態<select v-model="candidateForm.status"><option v-for="(label,key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select></label></div>

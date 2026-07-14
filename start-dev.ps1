@@ -25,7 +25,7 @@ Start-Process powershell -ArgumentList @(
 
 Write-Host ""
 Write-Host "三個伺服器已在各自視窗啟動,請等約 10-15 秒讓它們就緒後再開瀏覽器:" -ForegroundColor Green
-Write-Host "  HR 後台    : http://localhost:5173   (帳號 admin / 密碼 admin123)"
+Write-Host "  HR 後台    : http://localhost:5173   (登入帳密見 backend/.env)"
 Write-Host "  求職網站   : http://localhost:5174"
 Write-Host "  後端 API   : http://127.0.0.1:8010/docs"
 Write-Host ""

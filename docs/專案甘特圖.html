@@ -114,8 +114,21 @@
 <div class="wrap">
   <header class="top">
     <h1>TalentHub 專案甘特圖</h1>
-    <p class="sub">2026-07-20 啟動｜方案A：1 名全端工程師（詳 docs/07）</p>
+    <p class="sub">v1.2｜2026-07-14 更新｜MVP 實作軌與正式上線軌（詳 docs/07）</p>
   </header>
+
+  <div class="card">
+    <h2 class="sec">本次平行工作流進度</h2>
+    <table>
+      <thead><tr><th>工作流</th><th>狀態</th><th>下一個正式上線關卡</th></tr></thead>
+      <tbody>
+        <tr><td>多角色權限與資料範圍</td><td>已完成 MVP</td><td>IT／HR／主管三角色 UAT 與越權測試</td></tr>
+        <tr><td>104／1111 OCR 固定欄位入庫</td><td>已完成 MVP</td><td>各 10 份授權去識別樣本校準與準確率報告</td></tr>
+        <tr><td>可解釋人才職缺配對</td><td>已完成 MVP</td><td>由 HR 校準權重、必要條件與公平性檢核</td></tr>
+        <tr><td>角色化互動介面／官網整合</td><td>已完成介面基線</td><td>套用公司 Logo、色票、導覽與 SSO／反向代理規格</td></tr>
+      </tbody>
+    </table>
+  </div>
 
   <div class="card">
     <div class="gantt">
@@ -141,7 +154,7 @@
       <span class="it"><span class="sw dia"></span>一般里程碑</span>
       <span class="it"><span class="sw hot"></span>M2 MVP 試營運</span>
       <span class="it"><span class="sw wknd"></span>週末</span>
-      <span class="it"><span class="sw td"></span>今天 2026-07-13</span>
+      <span class="it"><span class="sw td"></span>本次更新 2026-07-14</span>
     </div>
   </div>
 
@@ -155,7 +168,7 @@
     </table>
   </div>
 
-  <footer>資料來源：docs/07-開發時程與里程碑.md（v1.0）｜總跨度 2026-07-13 ~ 2026-12-05</footer>
+  <footer>資料來源：docs/07-開發時程與里程碑.md（v1.2）｜更新日 2026-07-14｜總跨度 2026-07-13 ~ 2026-12-05</footer>
 </div>
 
 <script>
@@ -259,7 +272,7 @@
   });
 
   // ---- 今天縱線（跨越 bars 區）----
-  var today=d(2026,7,13);
+  var today=d(2026,7,14);
   var todayLine=document.createElement('div');
   todayLine.className='today'; todayLine.style.left=pct(today)+'%';
   todayLine.innerHTML='<span class="flag">今天 '+fmt(today)+'</span>';

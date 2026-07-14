@@ -72,6 +72,12 @@ export type ResumeDto = {
   candidate_id: number | null
   original_filename: string | null
   source_platform: string
+  requested_source_platform: string | null
+  source_confidence: number | null
+  source_evidence: Record<string, unknown>[] | null
+  source_review_required: boolean
+  source_reviewed_by: number | null
+  source_reviewed_at: string | null
   parse_status: 'pending' | 'processing' | 'parsed' | 'needs_review' | 'confirmed' | 'failed' | string
   parsed_payload: ParsedResume | null
   field_confidence: Record<string, number> | null
@@ -87,7 +93,7 @@ export type ResumeDto = {
   updated_at: string
   confirmed_at: string | null
 }
-export type ResumeUploadResult = Pick<ResumeDto, 'id' | 'original_filename' | 'source_platform' | 'parse_status'> & { duplicate: boolean }
+export type ResumeUploadResult = Pick<ResumeDto, 'id' | 'original_filename' | 'source_platform' | 'source_confidence' | 'source_evidence' | 'source_review_required' | 'parse_status'> & { duplicate: boolean }
 export type ResumeConfirmResult = { resume_id: number; candidate_id: number; candidate_code: string; created: boolean }
 
 import { API_BASE, authSession } from './auth'
@@ -159,4 +165,7 @@ export const hrApi = {
     method: 'POST', body: candidateId ? JSON.stringify({ candidate_id: candidateId }) : undefined,
   }),
   reparseResume: (id: number) => apiRequest<ResumeDto>(`/resumes/${id}/reparse`, { method: 'POST' }),
+  reviewResumeSource: (id: number, source_platform: ResumeSource) => apiRequest<ResumeDto>(`/resumes/${id}/source`, {
+    method: 'PUT', body: JSON.stringify({ source_platform }),
+  }),
 }

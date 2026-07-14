@@ -7,9 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class UserCreate(BaseModel):
     username: str = Field(min_length=2, max_length=100)
     email: str = Field(min_length=3, max_length=255)
-    password: str = Field(min_length=12, max_length=1024)
+    password: str = Field(min_length=5, max_length=1024)
     display_name: str = Field(min_length=1, max_length=100)
-    role: Literal["admin", "hr", "manager"]
+    role: Literal["admin", "it", "hr", "manager"]
     department_id: int | None = None
 
     @field_validator("email")
@@ -23,9 +23,9 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     email: str | None = Field(default=None, min_length=3, max_length=255)
-    password: str | None = Field(default=None, min_length=12, max_length=1024)
+    password: str | None = Field(default=None, min_length=5, max_length=1024)
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
-    role: Literal["admin", "hr", "manager"] | None = None
+    role: Literal["admin", "it", "hr", "manager"] | None = None
     department_id: int | None = None
     is_active: bool | None = None
 
@@ -107,3 +107,64 @@ class AuditRead(BaseModel):
     details: dict | None
     ip_address: str | None
     created_at: datetime
+
+
+IssueSeverity = Literal["low", "medium", "high", "critical"]
+IssueStatus = Literal["open", "investigating", "resolved", "closed"]
+
+
+class SystemIssueCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=10000)
+    page: str = Field(min_length=1, max_length=255)
+    severity: IssueSeverity = "medium"
+    status: IssueStatus = "open"
+    reproduction_steps: str | None = Field(default=None, max_length=20000)
+    resolution_notes: str | None = Field(default=None, max_length=20000)
+
+
+class SystemIssueUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, min_length=1, max_length=10000)
+    page: str | None = Field(default=None, min_length=1, max_length=255)
+    severity: IssueSeverity | None = None
+    status: IssueStatus | None = None
+    reproduction_steps: str | None = Field(default=None, max_length=20000)
+    resolution_notes: str | None = Field(default=None, max_length=20000)
+
+
+class SystemIssueRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    title: str
+    description: str
+    page: str
+    severity: str
+    status: str
+    reproduction_steps: str | None
+    resolution_notes: str | None
+    created_by_user_id: int | None
+    updated_by_user_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DatabaseColumnRead(BaseModel):
+    name: str
+    type: str
+    nullable: bool
+    primary_key: bool
+
+
+class DatabaseTableRead(BaseModel):
+    name: str
+    row_count: int | None
+    columns: list[DatabaseColumnRead]
+
+
+class DatabaseOverviewRead(BaseModel):
+    healthy: bool
+    dialect: str
+    server_version: str | None
+    transport_security: str
+    tables: list[DatabaseTableRead]

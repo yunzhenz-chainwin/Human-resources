@@ -63,6 +63,10 @@ class FieldRules:
     years: tuple[str, ...]
     skills: tuple[str, ...]
     city: tuple[str, ...] = ("居住地", "居住地區", "所在地", "通訊地址")
+    company: tuple[str, ...] = ("目前公司", "現職公司", "最近公司", "任職公司")
+    education: tuple[str, ...] = ("最高學歷", "學歷", "教育程度")
+    expected_title: tuple[str, ...] = ("希望職稱", "希望職務", "期望職務", "應徵職務")
+    expected_city: tuple[str, ...] = ("希望工作地點", "期望工作地點", "工作地點")
 
 
 def label(text: str, labels: tuple[str, ...], max_length: int = 100) -> str | None:
@@ -87,6 +91,20 @@ def _name(text: str, aliases: tuple[str, ...]) -> tuple[str | None, float]:
     value = label(text, aliases, 40)
     if value:
         return value, 0.98
+    # OCR often drops the colon between a short identity label and its value.
+    # Restrict this recovery to a CJK personal-name shape so headings such as
+    # "姓名與聯絡資料" cannot consume an arbitrary line.
+    cjk_aliases = tuple(item for item in aliases if item.lower() != "name")
+    if cjk_aliases:
+        joined = "|".join(
+            re.escape(item) for item in sorted(cjk_aliases, key=len, reverse=True)
+        )
+        ocr_value = re.search(
+            rf"(?:^|\n)\s*(?:{joined})\s*[：:]?\s*([\u4e00-\u9fff·]{{2,8}})",
+            text,
+        )
+        if ocr_value:
+            return ocr_value.group(1), 0.88
     excluded = {"履歷", "自傳", "工作經歷", "技能專長", "學歷", "基本資料"}
     for line in (item.strip() for item in text.splitlines()[:12]):
         if re.fullmatch(r"[\u4e00-\u9fff·]{2,8}", line) and line not in excluded:
@@ -124,6 +142,32 @@ def extract_fields(text: str, rules: FieldRules) -> tuple[dict, dict[str, float]
         (item.replace("臺", "台") for item in TAIWAN_CITIES if item in city_source), None
     )
     title = label(text, rules.title)
+    company = label(text, rules.company)
+    education_value = label(text, rules.education)
+    education = next(
+        (
+            degree
+            for degree in ("博士", "碩士", "研究所", "學士", "大學", "專科", "高職", "高中", "國中")
+            if education_value and degree in education_value
+        ),
+        education_value,
+    )
+    expected_title = label(text, rules.expected_title)
+    # Older board exports sometimes only expose the target title. Preserve the
+    # legacy current_title fallback while also retaining its true semantics.
+    title = title or expected_title
+    expected_city_value = label(text, rules.expected_city, 200)
+    expected_cities = (
+        sorted(
+            {
+                city.replace("臺", "台")
+                for city in TAIWAN_CITIES
+                if city in expected_city_value
+            }
+        )
+        if expected_city_value
+        else []
+    )
     years_labels = "|".join(re.escape(item) for item in rules.years)
     years_match = re.search(
         rf"(?:{years_labels})\s*[：:]?\s*(\d+(?:\.\d+)?)\s*年", text, re.I
@@ -148,4 +192,17 @@ def extract_fields(text: str, rules: FieldRules) -> tuple[dict, dict[str, float]
         "total_years": 0.92 if years_match else 0.0,
         "skills": min(0.95, 0.55 + len(skills) * 0.05) if skills else 0.0,
     }
+    # Keep the original seven-field payload stable for older integrations, but
+    # expose additional canonical career fields whenever the source contains
+    # an explicit label.  These map directly to Candidate columns on confirm.
+    optional_fields = {
+        "current_company": (company, 0.88),
+        "highest_education": (education, 0.90),
+        "expected_title": (expected_title, 0.88),
+        "expected_cities": (expected_cities or None, 0.90),
+    }
+    for field, (value, score) in optional_fields.items():
+        if value:
+            payload[field] = value
+            confidence[field] = score
     return payload, confidence

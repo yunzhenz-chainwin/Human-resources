@@ -5,10 +5,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
-from app.dependencies.auth import enforce_department_scope, get_current_user
+from app.dependencies.auth import (
+    enforce_department_scope,
+    get_current_user,
+    require_recruiting_manager,
+)
 from app.models import JobRequisition, MatchResult, User
 from app.schemas.matching import MatchFeedback, MatchList, MatchRead, MatchStatusUpdate
-from app.services.matching import rematch_requisition
+from app.services.matching import assess_matching_readiness, rematch_requisition
 
 router = APIRouter()
 
@@ -67,7 +71,7 @@ def list_matches(
 def rematch(
     requisition_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiting_manager),
 ) -> MatchList:
     requisition = _requisition(db, requisition_id, user)
     rematch_requisition(db, requisition)
@@ -81,12 +85,27 @@ def rematch(
     )
 
 
+@router.get("/requisitions/{requisition_id}/match-readiness")
+def match_readiness(
+    requisition_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    _requisition(db, requisition_id, user)
+    results = list(
+        db.scalars(
+            select(MatchResult).where(MatchResult.requisition_id == requisition_id)
+        ).all()
+    )
+    return assess_matching_readiness(results)
+
+
 @router.post("/matches/{match_id}/feedback", response_model=MatchRead)
 def match_feedback(
     match_id: int,
     payload: MatchFeedback,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiting_manager),
 ) -> MatchResult:
     result = _match(db, match_id)
     _requisition(db, result.requisition_id, user)
@@ -103,7 +122,7 @@ def update_match_status(
     match_id: int,
     payload: MatchStatusUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiting_manager),
 ) -> MatchResult:
     result = _match(db, match_id)
     _requisition(db, result.requisition_id, user)

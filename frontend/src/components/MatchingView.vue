@@ -4,6 +4,7 @@ import type { RequisitionDto } from '../services/hrApi'
 import {
   matchingReportsApi,
   type MatchDto,
+  type MatchReadiness,
   type MatchStatus,
   type ScorePart,
 } from '../services/matchingReportsApi'
@@ -11,6 +12,7 @@ import {
 const props = defineProps<{ jobs: RequisitionDto[] }>()
 const selectedJobId = ref<number | null>(null)
 const matches = ref<MatchDto[]>([])
+const readiness = ref<MatchReadiness | null>(null)
 const loading = ref(false)
 const recalculating = ref(false)
 const includeIneligible = ref(true)
@@ -46,7 +48,12 @@ async function loadMatches() {
   loading.value = true
   error.value = ''
   try {
-    matches.value = (await matchingReportsApi.matches(selectedJobId.value, includeIneligible.value)).items
+    const [matchResult, readinessResult] = await Promise.all([
+      matchingReportsApi.matches(selectedJobId.value, includeIneligible.value),
+      matchingReportsApi.readiness(selectedJobId.value),
+    ])
+    matches.value = matchResult.items
+    readiness.value = readinessResult
   } catch (cause) {
     error.value = message(cause)
   } finally {
@@ -113,6 +120,13 @@ function values(values: unknown[] | undefined) {
       <button class="button primary" :disabled="!selectedJobId || recalculating" @click="rematch">{{ recalculating ? '重新計算中…' : '重新計算配對' }}</button>
     </div>
     <div v-if="error" class="match-error">{{ error }}</div>
+    <div v-if="readiness" class="readiness panel">
+      <div><span>試行狀態</span><strong>{{ readiness.pilot_status === 'ready_for_weight_tuning' ? '可校準權重' : readiness.pilot_status === 'ready_for_shadow_pilot' ? '適合影子試行' : '需要人才資料' }}</strong></div>
+      <div><span>資料完整度</span><strong>{{ Math.round(readiness.metrics.data_completeness * 100) }}%</strong></div>
+      <div><span>可媒合率</span><strong>{{ Math.round(readiness.metrics.eligibility_rate * 100) }}%</strong></div>
+      <div><span>有效回饋</span><strong>{{ readiness.metrics.labeled_outcomes }} 筆</strong></div>
+      <p>目前採技能優先與可解釋規則；累積至少 30 筆面試／錄用／拒絕結果後，再校準權重與測試語意混合排序。</p>
+    </div>
     <div v-if="loading" class="match-empty panel"><span class="spinner"></span><strong>讀取配對結果…</strong></div>
     <div v-else-if="!jobs.length" class="match-empty panel"><strong>尚無職缺</strong><p>請先建立職缺並設定技能與條件。</p></div>
     <div v-else-if="!sortedMatches.length" class="match-empty panel"><strong>尚無配對結果</strong><p>按下「重新計算配對」，系統會以資料庫人才進行評分。</p></div>
@@ -128,5 +142,5 @@ function values(values: unknown[] | undefined) {
 </template>
 
 <style scoped>
-.match-toolbar{display:flex;align-items:end;gap:14px;padding:14px;margin-bottom:14px}.match-toolbar label{font-size:9px;color:#627570}.match-toolbar select{display:block;margin-top:5px;height:38px;min-width:280px;border:1px solid #dce5e2;border-radius:8px;background:#fff;padding:0 10px}.match-toolbar .check{display:flex;align-items:center;gap:6px;height:38px}.match-toolbar .check input{margin:0}.match-toolbar>span{flex:1;color:#758581;font-size:9px}.match-error{padding:11px 14px;background:#fff0ef;color:#943f3a;border-radius:8px;margin-bottom:12px;font-size:10px}.match-empty{text-align:center;padding:70px 20px}.match-empty strong,.match-empty p{display:block;font-size:12px}.match-empty p{font-size:9px;color:#758581}.match-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.match-card{padding:18px}.match-card header{display:flex;justify-content:space-between;align-items:center}.candidate{display:flex;align-items:center;gap:11px}.candidate>span{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:#dfeeea;color:#286e66;font-weight:700}.candidate h2{font-size:14px;margin:0}.candidate p{font-size:8px;color:#7d8d89;margin:4px 0}.score{text-align:right;color:#216b63}.score.failed{color:#a55049}.score strong,.score small{display:block}.score strong{font-size:27px}.score small{font-size:8px}.score-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:18px 0}.score-grid>div{background:#f7f9f8;border-radius:8px;padding:10px}.score-grid span{display:flex;justify-content:space-between;font-size:9px}.score-grid em{font-style:normal;color:#47726b}.score-grid i{display:block;height:4px;background:#dfe8e5;border-radius:4px;margin:7px 0}.score-grid u{display:block;height:100%;background:#3e8c80;border-radius:4px;text-decoration:none}.score-grid small{display:block;font-size:7px;line-height:1.5}.hit{color:#39806b}.miss{color:#a65a52}.feedback{padding:9px;background:#fff3e9;color:#855b37;border-radius:7px;font-size:9px;margin-bottom:12px}.feedback strong{display:block;margin-bottom:3px}.match-card footer{border-top:1px solid #edf1f0;padding-top:12px;display:flex;align-items:center;gap:8px}.match-card footer>div{flex:1}.match-card footer strong,.match-card footer small{display:block;font-size:9px}.match-card footer small{font-size:8px;color:#81908d;margin-top:3px}.match-card footer select{height:37px;border:1px solid #dce5e2;border-radius:8px;background:#fff;font-size:9px;padding:0 8px}@media(max-width:1050px){.match-list{grid-template-columns:1fr}.match-toolbar{align-items:stretch;flex-direction:column}.match-toolbar select{width:100%;min-width:0}}
+.match-toolbar{display:flex;align-items:end;gap:14px;padding:14px;margin-bottom:14px}.match-toolbar label{font-size:9px;color:#627570}.match-toolbar select{display:block;margin-top:5px;height:38px;min-width:280px;border:1px solid #dce5e2;border-radius:8px;background:#fff;padding:0 10px}.match-toolbar .check{display:flex;align-items:center;gap:6px;height:38px}.match-toolbar .check input{margin:0}.match-toolbar>span{flex:1;color:#758581;font-size:9px}.match-error{padding:11px 14px;background:#fff0ef;color:#943f3a;border-radius:8px;margin-bottom:12px;font-size:10px}.readiness{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:14px;margin-bottom:14px;background:#fffaf1;border-color:#eadfc8}.readiness div{padding:8px 10px;border-right:1px solid #eadfc8}.readiness div:nth-child(4){border:0}.readiness span,.readiness strong{display:block}.readiness span{font-size:8px;color:#846f56}.readiness strong{font-size:13px;margin-top:3px;color:#4d6d65}.readiness p{grid-column:1/-1;margin:0;padding:9px 10px 2px;font-size:9px;color:#746758;line-height:1.7;border-top:1px dashed #ddcfb3}.match-empty{text-align:center;padding:70px 20px}.match-empty strong,.match-empty p{display:block;font-size:12px}.match-empty p{font-size:9px;color:#758581}.match-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.match-card{padding:18px}.match-card header{display:flex;justify-content:space-between;align-items:center}.candidate{display:flex;align-items:center;gap:11px}.candidate>span{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:#dfeeea;color:#286e66;font-weight:700}.candidate h2{font-size:14px;margin:0}.candidate p{font-size:8px;color:#7d8d89;margin:4px 0}.score{text-align:right;color:#216b63}.score.failed{color:#a55049}.score strong,.score small{display:block}.score strong{font-size:27px}.score small{font-size:8px}.score-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:18px 0}.score-grid>div{background:#f7f9f8;border-radius:8px;padding:10px}.score-grid span{display:flex;justify-content:space-between;font-size:9px}.score-grid em{font-style:normal;color:#47726b}.score-grid i{display:block;height:4px;background:#dfe8e5;border-radius:4px;margin:7px 0}.score-grid u{display:block;height:100%;background:#3e8c80;border-radius:4px;text-decoration:none}.score-grid small{display:block;font-size:7px;line-height:1.5}.hit{color:#39806b}.miss{color:#a65a52}.feedback{padding:9px;background:#fff3e9;color:#855b37;border-radius:7px;font-size:9px;margin-bottom:12px}.feedback strong{display:block;margin-bottom:3px}.match-card footer{border-top:1px solid #edf1f0;padding-top:12px;display:flex;align-items:center;gap:8px}.match-card footer>div{flex:1}.match-card footer strong,.match-card footer small{display:block;font-size:9px}.match-card footer small{font-size:8px;color:#81908d;margin-top:3px}.match-card footer select{height:37px;border:1px solid #dce5e2;border-radius:8px;background:#fff;font-size:9px;padding:0 8px}@media(max-width:1050px){.match-list{grid-template-columns:1fr}.match-toolbar{align-items:stretch;flex-direction:column}.match-toolbar select{width:100%;min-width:0}.readiness{grid-template-columns:1fr 1fr}.readiness div:nth-child(2){border:0}}
 </style>

@@ -18,6 +18,8 @@ DEFAULT_WEIGHTS = {
 }
 AUTO_STATUSES = {"recommended", "ineligible"}
 EXCLUDED_CANDIDATE_STATUSES = {"hired", "declined", "archived", "withdrawn"}
+POSITIVE_OUTCOME_STATUSES = {"interview", "offered", "hired"}
+NEGATIVE_OUTCOME_STATUSES = {"rejected_by_manager", "withdrawn"}
 EDUCATION_RANK = {
     "國中": 1,
     "高中": 2,
@@ -40,6 +42,16 @@ ADJACENT_CITIES = {
     "台南市": {"嘉義縣", "嘉義市", "高雄市"},
     "高雄市": {"台南市", "屏東縣"},
 }
+SKILL_ALIASES = {
+    "fast api": "fastapi",
+    "nodejs": "node.js",
+    "node js": "node.js",
+    "postgres": "postgresql",
+    "postgres sql": "postgresql",
+    "powerbi": "power bi",
+    "vue.js": "vue",
+    "vuejs": "vue",
+}
 
 
 @dataclass(frozen=True)
@@ -51,6 +63,13 @@ class ScoreResult:
 
 def normalize_text(value: str | None) -> str:
     return "".join((value or "").strip().casefold().replace("臺", "台").split())
+
+
+def canonical_skill(value: str | None) -> str:
+    """Normalize conservative spelling variants without guessing proficiency."""
+
+    readable = " ".join((value or "").strip().casefold().split())
+    return normalize_text(SKILL_ALIASES.get(readable, readable))
 
 
 def _education_rank(value: str | None) -> int:
@@ -123,19 +142,25 @@ def score_candidate(
 ) -> ScoreResult:
     weights = resolve_weights(requisition.match_weights)
     required, preferred = _skill_requirements(requisition)
-    normalized_candidate_skills = {normalize_text(skill) for skill in candidate_skills}
+    normalized_candidate_skills = {
+        canonical_skill(skill): skill for skill in candidate_skills if canonical_skill(skill)
+    }
     required_hits = [
-        skill for skill in required if normalize_text(skill) in normalized_candidate_skills
+        skill for skill in required if canonical_skill(skill) in normalized_candidate_skills
     ]
     required_misses = [
-        skill for skill in required if normalize_text(skill) not in normalized_candidate_skills
+        skill for skill in required if canonical_skill(skill) not in normalized_candidate_skills
     ]
     preferred_hits = [
-        skill for skill in preferred if normalize_text(skill) in normalized_candidate_skills
+        skill for skill in preferred if canonical_skill(skill) in normalized_candidate_skills
     ]
     preferred_misses = [
-        skill for skill in preferred if normalize_text(skill) not in normalized_candidate_skills
+        skill for skill in preferred if canonical_skill(skill) not in normalized_candidate_skills
     ]
+    skill_evidence = {
+        skill: normalized_candidate_skills[canonical_skill(skill)]
+        for skill in required_hits + preferred_hits
+    }
 
     candidate_education = max(
         [_education_rank(candidate.highest_education)]
@@ -204,6 +229,22 @@ def score_candidate(
     }
     breakdown: dict[str, Any] = {
         "gate": {"passed": not gate_misses, "miss": gate_misses},
+        "data_quality": {
+            "missing": [
+                field
+                for field, value in (
+                    ("current_title", candidate.current_title),
+                    ("total_years", candidate.total_years),
+                    ("highest_education", candidate.highest_education),
+                    (
+                        "expected_salary",
+                        candidate.expected_salary_min or candidate.expected_salary_max,
+                    ),
+                    ("location", candidate.expected_cities or candidate.city),
+                )
+                if value is None
+            ]
+        },
     }
     weighted_total = 0.0
     for key, (component_score, hits, misses) in components.items():
@@ -216,8 +257,19 @@ def score_candidate(
             "hit": hits,
             "miss": misses,
         }
+        if key == "skill":
+            breakdown[key]["evidence"] = skill_evidence
     passed = not gate_misses
     total = round(min(100.0, max(0.0, weighted_total * 100)), 2) if passed else 0.0
+    breakdown["recommendation"] = (
+        "ineligible"
+        if not passed
+        else "strong"
+        if total >= 80
+        else "potential"
+        if total >= 60
+        else "review"
+    )
     return ScoreResult(passed, total, breakdown)
 
 
@@ -274,3 +326,82 @@ def rematch_requisition(db: Session, requisition: JobRequisition) -> list[MatchR
         item[2]
         for item in sorted(computed, key=lambda item: (item[2].rank is None, item[2].rank or 0))
     ]
+
+
+def assess_matching_readiness(results: list[MatchResult]) -> dict[str, Any]:
+    """Summarize whether current results are ready for a measured skills-first pilot."""
+
+    total = len(results)
+    eligible = [item for item in results if item.gate_passed]
+    labeled = [
+        item
+        for item in results
+        if item.status in POSITIVE_OUTCOME_STATUSES | NEGATIVE_OUTCOME_STATUSES
+    ]
+    positives = [item for item in labeled if item.status in POSITIVE_OUTCOME_STATUSES]
+    top_five = sorted(
+        eligible,
+        key=lambda item: (item.rank is None, item.rank or 0, -float(item.total_score)),
+    )[:5]
+    labeled_top_five = [item for item in top_five if item in labeled]
+    precision_at_five = (
+        sum(item.status in POSITIVE_OUTCOME_STATUSES for item in labeled_top_five)
+        / len(labeled_top_five)
+        if labeled_top_five
+        else None
+    )
+    completeness_scores: list[float] = []
+    for item in results:
+        missing = (item.score_breakdown or {}).get("data_quality", {}).get("missing", [])
+        completeness_scores.append(max(0.0, 1 - len(set(missing)) / 5))
+    completeness = sum(completeness_scores) / total if total else 0.0
+    average_score = (
+        sum(float(item.total_score) for item in eligible) / len(eligible) if eligible else 0.0
+    )
+    pilot_status = (
+        "needs_candidates"
+        if not total
+        else "ready_for_weight_tuning"
+        if len(labeled) >= 30
+        else "ready_for_shadow_pilot"
+    )
+    return {
+        "strategy": "explainable_skills_first_v2",
+        "pilot_status": pilot_status,
+        "metrics": {
+            "candidate_count": total,
+            "eligible_count": len(eligible),
+            "eligibility_rate": round(len(eligible) / total, 4) if total else 0.0,
+            "average_eligible_score": round(average_score, 2),
+            "data_completeness": round(completeness, 4),
+            "labeled_outcomes": len(labeled),
+            "feedback_coverage": round(len(labeled) / total, 4) if total else 0.0,
+            "positive_outcomes": len(positives),
+            "precision_at_5": round(precision_at_five, 4)
+            if precision_at_five is not None
+            else None,
+        },
+        "adopted_capabilities": [
+            "required_and_preferred_skills",
+            "skill_alias_normalization",
+            "hard_eligibility_gates",
+            "weighted_structured_ranking",
+            "explainable_evidence",
+            "human_feedback_loop",
+            "data_quality_signals",
+        ],
+        "next_experiments": [
+            "external_skill_taxonomy",
+            "semantic_embeddings_shadow_score",
+            "hybrid_rank_fusion",
+            "learning_to_rank_after_30_labeled_outcomes",
+        ],
+        "excluded_features": [
+            "age",
+            "gender",
+            "photo",
+            "religion",
+            "disability",
+            "marital_status",
+        ],
+    }

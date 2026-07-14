@@ -8,15 +8,16 @@ one if that policy ever changes.
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import shutil
 import subprocess
-import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from pypdf import PdfReader
 
@@ -62,7 +63,7 @@ class OCRProviderError(RuntimeError):
 
 
 class LocalTesseractProvider:
-    """OCR scanned PDFs using local Poppler and Tesseract executables."""
+    """OCR scanned PDFs using PyMuPDF rendering and local Tesseract."""
 
     name = "local_tesseract"
 
@@ -70,65 +71,82 @@ class LocalTesseractProvider:
         self,
         *,
         tesseract_command: str = "tesseract",
-        renderer_command: str = "pdftoppm",
         languages: str = "chi_tra+eng",
     ) -> None:
-        self.tesseract_command = tesseract_command
-        self.renderer_command = renderer_command
+        self.tesseract_command = self._resolve_tesseract(tesseract_command)
         self.languages = languages
 
     def available(self) -> bool:
         return bool(
-            shutil.which(self.tesseract_command) and shutil.which(self.renderer_command)
+            self.tesseract_command and importlib.util.find_spec("pymupdf")
         )
+
+    @staticmethod
+    def _resolve_tesseract(command: str) -> str | None:
+        discovered = shutil.which(command)
+        if discovered:
+            return discovered
+        if command != "tesseract":
+            return None
+        for candidate in (
+            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+            Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+        ):
+            if candidate.is_file():
+                return str(candidate)
+        return None
 
     def recognize(self, pdf_path: Path, page_count: int, limits: OCRLimits) -> str:
         if not self.available():
             raise OCRProviderError(
                 "ocr_unavailable",
-                "Local Tesseract OCR and/or PDF renderer is not installed",
+                "Local Tesseract OCR and/or PyMuPDF renderer is not installed",
             )
 
         deadline = time.monotonic() + limits.timeout_seconds
-        # pdftoppm's scale-to keeps both dimensions within this bound, which
-        # guarantees a raster no larger than max_pixels_per_page.
+        import pymupdf
+
         max_dimension = max(1, math.isqrt(limits.max_pixels_per_page))
         chunks: list[str] = []
-        with tempfile.TemporaryDirectory(prefix="talenthub-ocr-") as temporary:
-            temporary_path = Path(temporary)
-            for page_number in range(1, page_count + 1):
-                image_prefix = temporary_path / f"page-{page_number}"
-                self._run(
-                    [
-                        self.renderer_command,
-                        "-f",
-                        str(page_number),
-                        "-l",
-                        str(page_number),
-                        "-singlefile",
-                        "-png",
-                        "-scale-to",
-                        str(max_dimension),
-                        str(pdf_path),
-                        str(image_prefix),
-                    ],
-                    deadline,
-                )
-                image_path = image_prefix.with_suffix(".png")
-                completed = self._run(
-                    [
-                        self.tesseract_command,
-                        str(image_path),
-                        "stdout",
-                        "-l",
-                        self.languages,
-                    ],
-                    deadline,
-                    capture_output=True,
-                )
-                chunks.append(completed.stdout)
-                if sum(len(chunk) for chunk in chunks) > limits.max_output_chars:
-                    raise OCRProviderError("output_too_large", "OCR output exceeds limit")
+        # Use the application's writable storage instead of the Windows service
+        # account temp directory, which may deny child OCR processes access.
+        temporary_root = Path.cwd() / "storage" / "ocr-temp"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        temporary_files: list[Path] = []
+        try:
+            with pymupdf.open(pdf_path) as document:
+                for page_number, page in enumerate(document, start=1):
+                    if time.monotonic() >= deadline:
+                        raise OCRProviderError("ocr_timeout", "OCR exceeded its time limit")
+                    longest_side = max(page.rect.width, page.rect.height, 1)
+                    scale = max_dimension / longest_side
+                    pixmap = page.get_pixmap(
+                        matrix=pymupdf.Matrix(scale, scale),
+                        alpha=False,
+                        colorspace=pymupdf.csRGB,
+                    )
+                    if pixmap.width * pixmap.height > limits.max_pixels_per_page:
+                        raise OCRProviderError("page_too_large", "Rendered page exceeds limit")
+                    image_path = temporary_root / f"{uuid4().hex}-page-{page_number}.png"
+                    image_path.write_bytes(pixmap.tobytes("png"))
+                    temporary_files.append(image_path)
+                    completed = self._run(
+                        [
+                            self.tesseract_command or "tesseract",
+                            str(image_path),
+                            "stdout",
+                            "-l",
+                            self.languages,
+                        ],
+                        deadline,
+                        capture_output=True,
+                    )
+                    chunks.append(completed.stdout)
+                    if sum(len(chunk) for chunk in chunks) > limits.max_output_chars:
+                        raise OCRProviderError("output_too_large", "OCR output exceeds limit")
+        finally:
+            for temporary_file in temporary_files:
+                temporary_file.unlink(missing_ok=True)
         return "\n".join(chunks).strip()
 
     @staticmethod

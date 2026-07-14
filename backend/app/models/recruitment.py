@@ -81,6 +81,10 @@ class ResumeFile(Base):
             "overall_confidence IS NULL OR (overall_confidence >= 0 AND overall_confidence <= 1)",
             name="valid_overall_confidence",
         ),
+        CheckConstraint(
+            "source_confidence IS NULL OR (source_confidence >= 0 AND source_confidence <= 1)",
+            name="valid_source_confidence",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True)
@@ -95,6 +99,16 @@ class ResumeFile(Base):
     source_platform: Mapped[str] = mapped_column(
         String(20), default="direct", server_default="direct"
     )
+    requested_source_platform: Mapped[str | None] = mapped_column(String(20))
+    source_confidence: Mapped[Decimal | None] = mapped_column(Numeric(3, 2))
+    source_evidence: Mapped[list[dict] | None] = mapped_column(JSON)
+    source_review_required: Mapped[bool] = mapped_column(
+        default=True, server_default="true", nullable=False
+    )
+    source_reviewed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    source_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     platform_code: Mapped[str | None] = mapped_column(String(50))
     parse_status: Mapped[str] = mapped_column(
         String(20), default="pending", server_default="pending", index=True

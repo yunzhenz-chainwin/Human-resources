@@ -1,6 +1,6 @@
 import { computed, reactive } from 'vue'
 
-export type UserRole = 'admin' | 'hr' | 'manager'
+export type UserRole = 'it' | 'admin' | 'hr' | 'manager'
 export type CurrentUser = {
   id: number
   username: string
