@@ -16,6 +16,7 @@ from app.schemas.public import (
     PublicApplicationResult,
     PublicJob,
     PublicTalentPoolResult,
+    PublicTalentProfileCreate,
 )
 from app.services.applications import (
     normalize_email,
@@ -316,6 +317,32 @@ async def join_talent_pool(
         db.rollback()
         prepared.discard()
         raise
+
+
+@router.post(
+    "/talent-pool/json",
+    response_model=PublicTalentPoolResult,
+    status_code=status.HTTP_201_CREATED,
+)
+def join_talent_pool_json(
+    payload: PublicTalentProfileCreate,
+    db: Session = Depends(get_db),
+) -> PublicTalentPoolResult:
+    candidate, created = _save_talent_profile(
+        db,
+        name=payload.name,
+        email=payload.email,
+        phone=payload.phone,
+        city=payload.city,
+        current_title=payload.current_title,
+        total_years=payload.total_years,
+        skills=payload.skills,
+    )
+    return PublicTalentPoolResult(
+        candidate_id=candidate.id,
+        status="created" if created else "updated",
+        duplicate=not created,
+    )
 
 
 @router.post(

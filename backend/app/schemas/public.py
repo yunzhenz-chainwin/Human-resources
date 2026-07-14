@@ -54,6 +54,32 @@ class PublicApplicationCreate(BaseModel):
         return self
 
 
+class PublicTalentProfileCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, min_length=8, max_length=50)
+    city: str | None = Field(default=None, max_length=50)
+    current_title: str | None = Field(default=None, max_length=100)
+    total_years: float | None = Field(default=None, ge=0, le=80)
+    skills: list[str] = Field(default_factory=list, max_length=50)
+    consent: bool
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str | None) -> str | None:
+        if value and ("@" not in value or "." not in value.rsplit("@", 1)[-1]):
+            raise ValueError("Invalid email address")
+        return value
+
+    @model_validator(mode="after")
+    def validate_contact_and_consent(self):
+        if not self.email and not self.phone:
+            raise ValueError("Email or phone is required")
+        if not self.consent:
+            raise ValueError("Consent is required")
+        return self
+
+
 class PublicApplicationResult(BaseModel):
     application_id: int
     status: str
