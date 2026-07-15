@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import fitz
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,8 +16,9 @@ from app.dependencies.auth import (
     enforce_candidate_scope,
     get_current_user,
     require_recruiting_manager,
+    require_recruiting_user,
 )
-from app.models import Candidate, CandidateActivity, User
+from app.models import Candidate, CandidateActivity, Department, User
 from app.schemas.hr import (
     CandidateActivityCreate,
     CandidateActivityRead,
@@ -47,6 +48,35 @@ def _photo_candidate(db: Session, user: User, candidate_id: int) -> Candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
     enforce_candidate_scope(db, user, candidate_id)
     return candidate
+
+
+def _activity_candidate(db: Session, user: User, candidate_id: int) -> Candidate:
+    """Resolve a candidate without revealing out-of-scope candidate existence."""
+    enforce_candidate_scope(db, user, candidate_id)
+    candidate = db.get(Candidate, candidate_id)
+    if not candidate or candidate.deleted_at:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    return candidate
+
+
+def _activity_read(
+    activity: CandidateActivity,
+    author: User | None,
+    department: Department | None,
+) -> CandidateActivityRead:
+    return CandidateActivityRead(
+        id=activity.id,
+        candidate_id=activity.candidate_id,
+        user_id=activity.user_id,
+        author_name=author.display_name if author else None,
+        author_role=author.role if author else None,
+        author_department_id=author.department_id if author else None,
+        author_department_name=department.name if department else None,
+        type=activity.type,
+        content=activity.content,
+        happened_at=activity.happened_at,
+        created_at=activity.created_at,
+    )
 
 
 def _validated_photo(data: bytes, content_type: str | None) -> tuple[str, str]:
@@ -254,12 +284,16 @@ def delete_candidate_photo(
 def create_activity(
     candidate_id: int,
     payload: CandidateActivityCreate,
+    request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_recruiting_manager),
-) -> CandidateActivity:
-    candidate = db.get(Candidate, candidate_id)
-    if not candidate or candidate.deleted_at:
-        raise HTTPException(status_code=404, detail="人才不存在")
+    user: User = Depends(require_recruiting_user),
+) -> CandidateActivityRead:
+    if user.role == "manager" and payload.next_status is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Department managers cannot change candidate status through activities",
+        )
+    candidate = _activity_candidate(db, user, candidate_id)
     activity = CandidateActivity(
         candidate_id=candidate_id,
         user_id=user.id,
@@ -268,11 +302,33 @@ def create_activity(
         happened_at=payload.happened_at or datetime.now(UTC),
     )
     db.add(activity)
+    db.flush()
     if payload.next_status:
         candidate.status = payload.next_status
+    write_audit(
+        db,
+        user,
+        "candidate.activity.create",
+        "candidate_activity",
+        activity.id,
+        user.department_id,
+        details={
+            "candidate_id": candidate_id,
+            "activity_type": payload.type,
+            "candidate_status_changed": bool(payload.next_status),
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
     db.commit()
     db.refresh(activity)
-    return activity
+    author = db.get(User, activity.user_id) if activity.user_id is not None else None
+    department = (
+        db.get(Department, author.department_id)
+        if author and author.department_id is not None
+        else None
+    )
+    return _activity_read(activity, author, department)
 
 
 @router.get("/{candidate_id}/activities", response_model=list[CandidateActivityRead])
@@ -280,19 +336,21 @@ def list_activities(
     candidate_id: int,
     page_size: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> list[CandidateActivity]:
-    candidate = db.get(Candidate, candidate_id)
-    if not candidate or candidate.deleted_at:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    enforce_candidate_scope(db, user, candidate_id)
+    user: User = Depends(require_recruiting_user),
+) -> list[CandidateActivityRead]:
+    _activity_candidate(db, user, candidate_id)
     statement = (
-        select(CandidateActivity)
+        select(CandidateActivity, User, Department)
+        .outerjoin(User, User.id == CandidateActivity.user_id)
+        .outerjoin(Department, Department.id == User.department_id)
         .where(CandidateActivity.candidate_id == candidate_id)
         .order_by(CandidateActivity.happened_at.desc(), CandidateActivity.id.desc())
         .limit(page_size)
     )
-    return list(db.scalars(statement).all())
+    return [
+        _activity_read(activity, author, department)
+        for activity, author, department in db.execute(statement).all()
+    ]
 
 
 @router.post(
@@ -304,10 +362,11 @@ def list_activities(
 def create_contact_alias(
     candidate_id: int,
     payload: CandidateActivityCreate,
+    request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_recruiting_manager),
-) -> CandidateActivity:
-    return create_activity(candidate_id, payload, db, user)
+    user: User = Depends(require_recruiting_user),
+) -> CandidateActivityRead:
+    return create_activity(candidate_id, payload, request, db, user)
 
 
 @router.delete("/{candidate_id}", status_code=status.HTTP_204_NO_CONTENT)

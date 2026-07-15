@@ -157,6 +157,15 @@ def test_batch_upload_duplicate_review_and_confirm(resume_client) -> None:
     confirmed = client.post(f"/api/v1/resumes/{item['id']}/confirm", json={})
     assert confirmed.status_code == 200
     assert confirmed.json()["created"] is True
+    assert any(
+        resume["id"] == item["id"] for resume in client.get("/api/v1/resumes").json()
+    )
+    assert all(
+        resume["id"] != item["id"]
+        for resume in client.get(
+            "/api/v1/resumes", params={"include_confirmed": False}
+        ).json()
+    )
 
     with testing_session() as db:
         resume = db.get(ResumeFile, item["id"])

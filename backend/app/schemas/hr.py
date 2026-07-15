@@ -1,7 +1,14 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class CandidateCreate(BaseModel):
@@ -64,6 +71,11 @@ class CandidateActivityRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     candidate_id: int
+    user_id: int | None
+    author_name: str | None
+    author_role: str | None
+    author_department_id: int | None
+    author_department_name: str | None
     type: str
     content: str
     happened_at: datetime
@@ -168,6 +180,8 @@ class ResumeRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     candidate_id: int | None
+    target_requisition_id: int | None
+    uploaded_by: int | None
     original_filename: str | None
     source_platform: str
     requested_source_platform: str | None
@@ -222,6 +236,7 @@ class ResumeParsedUpdate(BaseModel):
 class ResumeUploadResult(BaseModel):
     id: int
     original_filename: str
+    target_requisition_id: int | None
     source_platform: Literal["direct", "p104", "p1111", "generic"]
     source_confidence: float | None
     source_evidence: list[dict] | None
@@ -243,3 +258,69 @@ class ResumeConfirmRequest(BaseModel):
 
 class ResumeSourceReview(BaseModel):
     source_platform: Literal["direct", "p104", "p1111", "generic"]
+
+
+InterviewResult = Literal[
+    "pending",
+    "advance",
+    "hold",
+    "rejected",
+    "offered",
+    "hired",
+    "no_show",
+    "cancelled",
+]
+InterviewStage = Literal["hr", "manager"]
+
+
+class ApplicationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: int = Field(gt=0)
+    requisition_id: int = Field(gt=0)
+
+
+class ApplicationInterviewUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interview_at: datetime | None = None
+    interview_result: InterviewResult | None = None
+    interview_notes: str | None = Field(default=None, max_length=10000)
+
+    @field_validator("interview_at")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("interview_at must include a timezone offset")
+        return value
+
+    @model_validator(mode="after")
+    def require_update_field(self):
+        if not self.model_fields_set:
+            raise ValueError("At least one interview field is required")
+        return self
+
+
+class ApplicationInterviewStageRead(BaseModel):
+    stage: InterviewStage
+    interview_at: datetime | None
+    interview_result: InterviewResult | None
+    interview_notes: str | None
+    updated_by: int | None
+    updated_at: datetime | None
+
+
+class ApplicationRead(BaseModel):
+    id: int
+    candidate_id: int
+    requisition_id: int
+    status: str
+    source: str
+    applied_at: datetime
+    interview_at: datetime | None
+    interview_result: InterviewResult | None
+    interview_notes: str | None
+    hr_interview: ApplicationInterviewStageRead
+    manager_interview: ApplicationInterviewStageRead
+    candidate: CandidateRead
+    requisition: RequisitionRead

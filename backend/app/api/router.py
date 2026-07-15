@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from app.api.routes.admin import router as admin_router
+from app.api.routes.applications import router as applications_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.candidates import router as candidates_router
 from app.api.routes.department import router as department_router
@@ -25,6 +26,11 @@ api_router.include_router(
 )
 api_router.include_router(
     resumes_router, tags=["resumes"], dependencies=[Depends(require_recruiting_user)]
+)
+api_router.include_router(
+    applications_router,
+    tags=["applications"],
+    dependencies=[Depends(require_recruiting_user)],
 )
 api_router.include_router(
     matches_router, tags=["matches"], dependencies=[Depends(require_recruiting_user)]

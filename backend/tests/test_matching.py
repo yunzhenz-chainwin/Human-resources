@@ -17,6 +17,7 @@ from app.models import (
     Candidate,
     CandidateEducation,
     CandidateSkill,
+    Department,
     JobApplication,
     JobRequisition,
     MatchResult,
@@ -286,6 +287,102 @@ def test_manager_match_overview_only_exposes_actual_applicants(
     hr_response = client.get("/api/v1/requisitions/1/candidate-match-overview")
     assert hr_response.status_code == 200
     assert hr_response.json()["total_candidates"] == 4
+
+
+def test_manager_can_update_only_matches_for_actual_own_department_applicants(
+    matching_client,
+) -> None:
+    client, testing_session = matching_client
+    criteria = client.get("/api/v1/requisitions/1/matching-criteria").json()
+    rematched = client.post("/api/v1/requisitions/1/rematch")
+    assert rematched.status_code == 200
+    matches_by_candidate = {
+        item["candidate_id"]: item["id"] for item in rematched.json()["items"]
+    }
+    applied_match_id = matches_by_candidate[1]
+    unapplied_match_id = matches_by_candidate[2]
+
+    with testing_session() as db:
+        own_department = Department(name="Product")
+        other_department = Department(name="Sales")
+        db.add_all([own_department, other_department])
+        db.flush()
+        requisition = db.get(JobRequisition, 1)
+        assert requisition is not None
+        requisition.department_id = own_department.id
+        db.add(
+            JobApplication(
+                requisition_id=requisition.id,
+                candidate_id=1,
+                status="submitted",
+                source="career_site",
+            )
+        )
+        db.commit()
+        own_department_id = own_department.id
+        other_department_id = other_department.id
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=10,
+        role="manager",
+        department_id=own_department_id,
+        is_active=True,
+    )
+    assert client.put(
+        "/api/v1/requisitions/1/matching-criteria",
+        json=criteria,
+    ).status_code == 403
+    assert client.post("/api/v1/requisitions/1/rematch").status_code == 403
+
+    status_response = client.post(
+        f"/api/v1/matches/{applied_match_id}/status",
+        json={"status": "interview"},
+    )
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "interview"
+    feedback_response = client.post(
+        f"/api/v1/matches/{applied_match_id}/feedback",
+        json={"status": "rejected_by_manager", "reason": "Role expectations differ"},
+    )
+    assert feedback_response.status_code == 200
+    assert feedback_response.json()["status"] == "rejected_by_manager"
+    assert feedback_response.json()["feedback_reason"] == "Role expectations differ"
+
+    assert client.post(
+        f"/api/v1/matches/{unapplied_match_id}/status",
+        json={"status": "interview"},
+    ).status_code == 403
+    assert client.post(
+        f"/api/v1/matches/{unapplied_match_id}/feedback",
+        json={"status": "rejected_by_manager", "reason": "Must not update"},
+    ).status_code == 403
+    with testing_session() as db:
+        unapplied = db.get(MatchResult, unapplied_match_id)
+        assert unapplied is not None
+        assert unapplied.status == "recommended"
+        assert unapplied.feedback_reason is None
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=11,
+        role="manager",
+        department_id=other_department_id,
+        is_active=True,
+    )
+    assert client.post(
+        f"/api/v1/matches/{applied_match_id}/status",
+        json={"status": "interview"},
+    ).status_code == 403
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=1,
+        role="hr",
+        department_id=other_department_id,
+        is_active=True,
+    )
+    assert client.post(
+        f"/api/v1/matches/{unapplied_match_id}/status",
+        json={"status": "shortlisted"},
+    ).status_code == 200
 
 
 def test_hr_can_update_matching_criteria_and_recalculate(matching_client) -> None:

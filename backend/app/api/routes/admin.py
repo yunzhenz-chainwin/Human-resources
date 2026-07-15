@@ -1,4 +1,6 @@
 import json
+import secrets
+import string
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -21,20 +23,31 @@ from sqlalchemy import (
     inspect,
     or_,
     select,
+    update,
 )
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.dependencies.auth import require_system_admin, require_user_admin
+from app.models.candidate import Candidate
 from app.models.organization import Department, User
-from app.models.security import AuditLog, SkillCatalog, SystemIssue, SystemSetting, Tag
+from app.models.recruitment import JobRequisition
+from app.models.security import (
+    AuditLog,
+    RefreshToken,
+    SkillCatalog,
+    SystemIssue,
+    SystemSetting,
+    Tag,
+)
 from app.schemas.admin import (
     AuditRead,
     CatalogCreate,
     CatalogRead,
     DatabaseColumnRead,
     DatabaseOverviewRead,
+    DatabaseRowDetailRead,
     DatabaseRowMutationRead,
     DatabaseRowWrite,
     DatabaseTablePreviewRead,
@@ -47,6 +60,7 @@ from app.schemas.admin import (
     SystemIssueCreate,
     SystemIssueRead,
     SystemIssueUpdate,
+    TemporaryPasswordResetRead,
     UserCreate,
     UserRead,
     UserUpdate,
@@ -56,6 +70,9 @@ from app.services.security import hash_password, write_audit
 router = APIRouter(prefix="/admin")
 admin_user = require_system_admin
 user_admin = require_user_admin
+
+_TEMP_PASSWORD_LENGTH = 24
+_TEMP_PASSWORD_SPECIALS = "!@#$%^&*-_=+"
 
 _REDACTED_COLUMN_MARKERS = (
     "password", "hash", "token", "secret", "api_key", "private_key",
@@ -129,6 +146,15 @@ _TABLE_REVEALABLE_COLUMNS: dict[str, frozenset[str]] = {
             "source_note",
             "summary",
             "blacklist_reason",
+        }
+    ),
+    "resume_files": frozenset(
+        {
+            "original_filename",
+            "parsed_payload",
+            "field_confidence",
+            "source_evidence",
+            "error_message",
         }
     ),
 }
@@ -399,6 +425,55 @@ def _database_row(table: Table, primary_key, row_id: Any, db: Session) -> dict[s
     return dict(row._mapping)
 
 
+def _database_related_context(
+    row: dict[str, Any], db: Session, reveal_pii: bool
+) -> dict[str, Any]:
+    """Return safe labels for foreign keys without exposing authentication data."""
+    related: dict[str, Any] = {}
+    candidate_id = row.get("candidate_id")
+    if candidate_id is not None:
+        candidate = db.get(Candidate, candidate_id)
+        if candidate:
+            candidate_summary: dict[str, Any] = {
+                "id": candidate.id,
+                "code": candidate.code,
+            }
+            if reveal_pii:
+                candidate_summary["name"] = candidate.name
+            related["candidate"] = candidate_summary
+
+    requisition_id = row.get("target_requisition_id") or row.get("requisition_id")
+    if requisition_id is not None:
+        requisition = db.get(JobRequisition, requisition_id)
+        if requisition:
+            related["requisition"] = {
+                "id": requisition.id,
+                "req_no": requisition.req_no,
+                "title": requisition.title,
+                "department_id": requisition.department_id,
+                "department_name": requisition.department_name,
+            }
+
+    for field, label in (
+        ("uploaded_by", "uploader"),
+        ("source_reviewed_by", "source_reviewer"),
+        ("requested_by", "requester"),
+        ("approved_by", "approver"),
+    ):
+        user_id = row.get(field)
+        if user_id is None:
+            continue
+        user = db.get(User, user_id)
+        if user:
+            related[label] = {
+                "id": user.id,
+                "username": user.username,
+                "display_name": user.display_name,
+                "role": user.role,
+            }
+    return related
+
+
 def _enforce_hr_user_scope(actor: User, target_role: str, target: User | None = None) -> None:
     if actor.role != "hr":
         return
@@ -437,14 +512,66 @@ def _commit_audit(
     db.commit()
 
 
+def _generate_temporary_password() -> str:
+    """Generate a copy-friendly password with strong entropy and mixed classes."""
+    characters = string.ascii_letters + string.digits + _TEMP_PASSWORD_SPECIALS
+    password = [
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.digits),
+        secrets.choice(_TEMP_PASSWORD_SPECIALS),
+    ]
+    password.extend(
+        secrets.choice(characters) for _ in range(_TEMP_PASSWORD_LENGTH - len(password))
+    )
+    secrets.SystemRandom().shuffle(password)
+    return "".join(password)
+
+
+def _user_reads(db: Session, users: list[User]) -> list[UserRead]:
+    if not users:
+        return []
+    user_ids = [user.id for user in users]
+    last_logins = dict(
+        db.execute(
+            select(AuditLog.actor_user_id, func.max(AuditLog.created_at))
+            .where(
+                AuditLog.action == "login",
+                AuditLog.actor_user_id.in_(user_ids),
+            )
+            .group_by(AuditLog.actor_user_id)
+        ).all()
+    )
+    password_changes = dict(
+        db.execute(
+            select(AuditLog.resource_id, func.max(AuditLog.created_at))
+            .where(
+                AuditLog.resource_type == "user",
+                AuditLog.action == "password.reset",
+                AuditLog.resource_id.in_([str(user_id) for user_id in user_ids]),
+            )
+            .group_by(AuditLog.resource_id)
+        ).all()
+    )
+    return [
+        UserRead.model_validate(user).model_copy(
+            update={
+                "last_login_at": last_logins.get(user.id),
+                "password_changed_at": password_changes.get(str(user.id), user.created_at),
+            }
+        )
+        for user in users
+    ]
+
+
 @router.get("/users", response_model=list[UserRead])
 def list_users(
     actor: User = Depends(user_admin), db: Session = Depends(get_db)
-) -> list[User]:
+) -> list[UserRead]:
     query = select(User).order_by(User.id)
     if actor.role == "hr":
         query = query.where(User.role.in_(("hr", "manager")))
-    return list(db.scalars(query).all())
+    return _user_reads(db, list(db.scalars(query).all()))
 
 
 @router.post("/users", response_model=UserRead, status_code=201)
@@ -488,6 +615,17 @@ def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     values = payload.model_dump(exclude_unset=True)
+    password = values.pop("password", None)
+    if password:
+        if actor.role not in {"admin", "it"}:
+            raise HTTPException(
+                status_code=403,
+                detail="Only system administrators can reset passwords",
+            )
+        raise HTTPException(
+            status_code=422,
+            detail="Use the secure temporary password reset endpoint",
+        )
     _enforce_hr_user_scope(actor, values.get("role", user.role), user)
     _require_manager_department(
         values.get("role", user.role),
@@ -495,8 +633,6 @@ def update_user(
     )
     if "department_id" in values:
         _department(db, values["department_id"])
-    if password := values.pop("password", None):
-        user.password_hash = hash_password(password)
     for key, value in values.items():
         setattr(user, key, value.strip() if isinstance(value, str) else value)
     if actor.id == user.id and not user.is_active:
@@ -504,6 +640,61 @@ def update_user(
     _commit_audit(db, actor, "update", "user", user.id, {"fields": sorted(values)})
     db.refresh(user)
     return user
+
+
+@router.post(
+    "/users/{user_id}/reset-password",
+    response_model=TemporaryPasswordResetRead,
+)
+def reset_user_password(
+    user_id: int,
+    request: Request,
+    response: Response,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> TemporaryPasswordResetRead:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    temporary_password = _generate_temporary_password()
+    user.password_hash = hash_password(temporary_password)
+    revoked_at = datetime.now(UTC)
+    revoked = db.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=revoked_at)
+    )
+    sessions_revoked = max(int(revoked.rowcount or 0), 0)
+    audit = write_audit(
+        db,
+        actor,
+        "password.reset",
+        "user",
+        user.id,
+        department_id=user.department_id,
+        details={
+            "target_username": user.username,
+            "sessions_revoked": sessions_revoked,
+            "temporary_password_issued": True,
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    db.commit()
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return TemporaryPasswordResetRead(
+        user_id=user.id,
+        username=user.username,
+        temporary_password=temporary_password,
+        password_changed_at=audit.created_at,
+        sessions_revoked=sessions_revoked,
+    )
 
 
 @router.get("/departments", response_model=list[DepartmentRead])
@@ -896,6 +1087,81 @@ def database_table_preview(
         redacted_columns=redacted_columns,
         pii_revealed=reveal_pii,
         rows=rows,
+    )
+
+
+@router.get(
+    "/database/tables/{table_name}/rows/{row_id}",
+    response_model=DatabaseRowDetailRead,
+)
+def database_row_detail(
+    table_name: str,
+    row_id: str,
+    request: Request,
+    response: Response,
+    reveal_pii: bool = Query(False),
+    pii_access_reason: str | None = Header(default=None, alias="X-PII-Access-Reason"),
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> DatabaseRowDetailRead:
+    """Show one complete safe row and human-readable relationship context."""
+    connection = db.connection()
+    inspector = inspect(connection)
+    if table_name not in inspector.get_table_names():
+        raise HTTPException(status_code=404, detail="Database table not found")
+    table = Table(table_name, MetaData(), autoload_with=connection)
+    primary_key = _single_primary_key(table)
+    normalized_id = _convert_database_value(primary_key, row_id)
+    reason = unquote(pii_access_reason or "").strip()
+    revealable_columns = _TABLE_REVEALABLE_COLUMNS.get(table_name, frozenset())
+    if reveal_pii and not revealable_columns:
+        raise HTTPException(status_code=403, detail="This table does not allow PII reveal")
+    if reveal_pii and not 5 <= len(reason) <= 200:
+        raise HTTPException(
+            status_code=422,
+            detail="PII access reason must contain between 5 and 200 characters",
+        )
+
+    redacted_columns = [
+        column.name
+        for column in table.columns
+        if _is_redacted_column(table_name, column.name)
+        and not (reveal_pii and column.name in revealable_columns)
+    ]
+    visible = [column for column in table.columns if column.name not in redacted_columns]
+    result = db.execute(
+        select(*visible).select_from(table).where(primary_key == normalized_id)
+    ).first()
+    if result is None:
+        raise HTTPException(status_code=404, detail="Database row not found")
+    row = dict(result._mapping)
+    related = _database_related_context(row, db, reveal_pii)
+
+    if reveal_pii:
+        write_audit(
+            db,
+            actor,
+            "pii.database_row_detail",
+            "database_row",
+            f"{table_name}:{normalized_id}",
+            details={
+                "reason": reason,
+                "revealed_columns": sorted(revealable_columns),
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        db.commit()
+    response.headers["Cache-Control"] = "no-store"
+    display_name, _description = _table_presentation(table_name)
+    return DatabaseRowDetailRead(
+        table_name=table_name,
+        display_name=display_name,
+        row_id=normalized_id,
+        pii_revealed=reveal_pii,
+        redacted_columns=redacted_columns,
+        row=row,
+        related=related,
     )
 
 

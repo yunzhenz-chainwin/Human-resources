@@ -9,6 +9,17 @@ export type AdminUser = {
   role: UserRole
   department_id: number | null
   is_active: boolean
+  created_at: string
+  updated_at: string
+  last_login_at: string | null
+  password_changed_at: string | null
+}
+export type TemporaryPasswordReset = {
+  user_id: number
+  username: string
+  temporary_password: string
+  password_changed_at: string
+  sessions_revoked: number
 }
 export type Department = {
   id: number
@@ -69,6 +80,11 @@ export type DatabaseTablePreview = {
   pii_revealed: boolean
   rows: Record<string, unknown>[]
 }
+export type DatabaseRowDetail = {
+  table_name: string; display_name: string; row_id: number | string
+  pii_revealed: boolean; redacted_columns: string[]
+  row: Record<string, unknown>; related: Record<string, unknown>
+}
 export type DatabaseRowMutation = {
   table_name: string; row_id: number | string; row: Record<string, unknown> | null
 }
@@ -90,6 +106,9 @@ export const adminApi = {
   }),
   updateUser: (id: number, payload: UserWrite) => apiRequest<AdminUser>(`/admin/users/${id}`, {
     method: 'PATCH', body: JSON.stringify(payload),
+  }),
+  resetUserPassword: (id: number) => apiRequest<TemporaryPasswordReset>(`/admin/users/${id}/reset-password`, {
+    method: 'POST',
   }),
   departments: () => apiRequest<Department[]>('/admin/departments'),
   createDepartment: (payload: { name: string; parent_id: number | null }) => apiRequest<Department>('/admin/departments', {
@@ -118,6 +137,17 @@ export const adminApi = {
     if (revealPii) headers.set('X-PII-Access-Reason', encodeURIComponent(reason.trim()))
     return apiRequest<DatabaseTablePreview>(
       `/admin/database/tables/${encodeURIComponent(table)}/rows?${query}`,
+      { headers },
+    )
+  },
+  databaseRowDetail: (table: string, rowId: number | string, revealPii = false, reason = '') => {
+    const query = new URLSearchParams()
+    if (revealPii) query.set('reveal_pii', 'true')
+    const headers = new Headers()
+    if (revealPii) headers.set('X-PII-Access-Reason', encodeURIComponent(reason.trim()))
+    const suffix = query.size ? `?${query}` : ''
+    return apiRequest<DatabaseRowDetail>(
+      `/admin/database/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(String(rowId))}${suffix}`,
       { headers },
     )
   },

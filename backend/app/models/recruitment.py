@@ -95,6 +95,12 @@ class ResumeFile(Base):
     candidate_id: Mapped[int | None] = mapped_column(
         ForeignKey("candidates.id", ondelete="SET NULL"), index=True
     )
+    target_requisition_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_requisitions.id", ondelete="SET NULL"), index=True
+    )
+    uploaded_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     storage_key: Mapped[str | None] = mapped_column(String(500))
     original_filename: Mapped[str | None] = mapped_column(String(255))
     file_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
@@ -159,4 +165,26 @@ class JobApplication(TimestampMixin, Base):
     )
     source: Mapped[str] = mapped_column(
         String(20), default="career_site", server_default="career_site"
+    )
+    interview_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    interview_result: Mapped[str | None] = mapped_column(String(30))
+    interview_notes: Mapped[str | None] = mapped_column(Text)
+    interview_updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    hr_interview_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hr_interview_result: Mapped[str | None] = mapped_column(String(30))
+    hr_interview_notes: Mapped[str | None] = mapped_column(Text)
+    hr_interview_updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    hr_interview_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    manager_interview_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    manager_interview_result: Mapped[str | None] = mapped_column(String(30))
+    manager_interview_notes: Mapped[str | None] = mapped_column(Text)
+    manager_interview_updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    manager_interview_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
     )

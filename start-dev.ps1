@@ -37,6 +37,21 @@ function Get-ListeningProcessId {
     return [int]$line.Matches[0].Groups[1].Value
 }
 
+function Get-LanIPv4Address {
+    try {
+        return [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+            Where-Object {
+                $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+                -not [System.Net.IPAddress]::IsLoopback($_)
+            } |
+            Select-Object -First 1 |
+            ForEach-Object { $_.IPAddressToString }
+    }
+    catch {
+        return $null
+    }
+}
+
 function Start-TalentHubService {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -119,3 +134,14 @@ foreach ($check in $checks) {
 Write-Host ""
 Write-Host "Use restart-dev.bat for a clean restart." -ForegroundColor Yellow
 Write-Host "Use stop-dev.bat to stop the three verified TalentHub services." -ForegroundColor DarkGray
+
+$computerName = [System.Net.Dns]::GetHostName()
+$lanAddress = Get-LanIPv4Address
+Write-Host ""
+Write-Host "Manager LAN URLs (Windows Firewall must allow TCP 5173/5174):" -ForegroundColor Cyan
+Write-Host "  HR / manager: http://${computerName}:5173/" -ForegroundColor Green
+Write-Host "  Career site:  http://${computerName}:5174/" -ForegroundColor Green
+if ($lanAddress) {
+    Write-Host "  IP fallback:  http://${lanAddress}:5173/ and http://${lanAddress}:5174/" -ForegroundColor DarkGray
+}
+Write-Host "Do not expose these HTTP development ports directly to the public Internet." -ForegroundColor Yellow

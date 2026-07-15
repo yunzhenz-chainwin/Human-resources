@@ -6,17 +6,25 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from sqlalchemy import delete, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.dependencies.auth import (
+    GLOBAL_RECRUITING_ROLES,
     candidate_scope_clause,
     enforce_candidate_scope,
     get_current_user,
-    require_recruiting_manager,
+    require_recruiting_user,
 )
-from app.models import Candidate, CandidateSkill, ResumeFile, User
+from app.models import (
+    Candidate,
+    CandidateSkill,
+    JobApplication,
+    JobRequisition,
+    ResumeFile,
+    User,
+)
 from app.schemas.hr import (
     ResumeConfirmRequest,
     ResumeConfirmResult,
@@ -64,6 +72,104 @@ def _apply_parse(resume: ResumeFile, path: Path, requested: str) -> None:
     resume.error_message = parsed.error_message
 
 
+def _manager_resume_scope_clause(user: User):
+    """Include targeted uploads while retaining the legacy applied-candidate scope."""
+
+    own_department_target = ResumeFile.target_requisition_id.in_(
+        select(JobRequisition.id).where(
+            JobRequisition.department_id == user.department_id
+        )
+    )
+    legacy_applied_candidate = and_(
+        ResumeFile.target_requisition_id.is_(None),
+        ResumeFile.candidate_id.in_(
+            select(Candidate.id).where(candidate_scope_clause(user))
+        ),
+    )
+    return or_(own_department_target, legacy_applied_candidate)
+
+
+def _enforce_resume_scope(db: Session, user: User, resume: ResumeFile) -> None:
+    """Enforce a target department first, falling back to legacy candidate scope."""
+
+    if user.role in GLOBAL_RECRUITING_ROLES:
+        return
+    if user.role != "manager":
+        raise HTTPException(status_code=403, detail="Outside resume scope")
+    if resume.target_requisition_id is not None:
+        if user.department_id is None:
+            raise HTTPException(status_code=403, detail="Outside resume scope")
+        target_department_id = db.scalar(
+            select(JobRequisition.department_id).where(
+                JobRequisition.id == resume.target_requisition_id
+            )
+        )
+        if target_department_id != user.department_id:
+            raise HTTPException(status_code=403, detail="Outside resume scope")
+        return
+    if resume.candidate_id is not None:
+        enforce_candidate_scope(db, user, resume.candidate_id)
+        return
+    raise HTTPException(status_code=403, detail="Outside resume scope")
+
+
+def _resolve_target_requisition(
+    db: Session,
+    user: User,
+    requisition_id: int | None,
+) -> JobRequisition | None:
+    if requisition_id is None:
+        if user.role == "manager":
+            raise HTTPException(
+                status_code=422,
+                detail="requisition_id is required for manager uploads",
+            )
+        return None
+    requisition = db.get(JobRequisition, requisition_id)
+    if requisition is None:
+        raise HTTPException(status_code=404, detail="Requisition not found")
+    if user.role == "manager":
+        if user.department_id is None or requisition.department_id != user.department_id:
+            raise HTTPException(status_code=403, detail="Outside department scope")
+    return requisition
+
+
+def _ensure_target_application(
+    db: Session,
+    resume: ResumeFile,
+    candidate: Candidate,
+    actor: User,
+) -> JobApplication | None:
+    """Create the department-workspace row, or safely reuse its unique pair."""
+
+    if resume.target_requisition_id is None:
+        return None
+    application = db.scalar(
+        select(JobApplication).where(
+            JobApplication.requisition_id == resume.target_requisition_id,
+            JobApplication.candidate_id == candidate.id,
+        )
+    )
+    if application is not None:
+        if application.resume_id is None:
+            application.resume_id = resume.id
+        return application
+    uploader = db.get(User, resume.uploaded_by) if resume.uploaded_by is not None else None
+    uploader_role = uploader.role if uploader is not None else None
+    if uploader_role is None and resume.uploaded_by == actor.id:
+        uploader_role = actor.role
+    source = "manager_upload" if uploader_role == "manager" else "hr_upload"
+    application = JobApplication(
+        requisition_id=resume.target_requisition_id,
+        candidate_id=candidate.id,
+        resume_id=resume.id,
+        status="submitted",
+        source=source,
+    )
+    db.add(application)
+    return application
+
+
 @router.post(
     "/upload", response_model=list[ResumeUploadResult], status_code=status.HTTP_201_CREATED
 )
@@ -71,11 +177,13 @@ async def upload_resumes(
     files: list[UploadFile] = File(...),
     source_platform: SourcePlatform = Form("generic"),
     candidate_id: int | None = Form(None),
+    requisition_id: int | None = Form(None),
     db: Session = Depends(get_db),
-    _user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_user),
 ) -> list[ResumeUploadResult]:
     if not files:
         raise HTTPException(status_code=422, detail="At least one resume is required")
+    target_requisition = _resolve_target_requisition(db, user, requisition_id)
     candidate: Candidate | None = None
     if candidate_id is not None:
         candidate = db.get(Candidate, candidate_id)
@@ -83,6 +191,8 @@ async def upload_resumes(
             raise HTTPException(status_code=404, detail="Candidate not found")
         if candidate.deleted_at is not None:
             raise HTTPException(status_code=409, detail="Deleted candidate cannot receive a resume")
+        if user.role == "manager":
+            enforce_candidate_scope(db, user, candidate.id)
     prepared_uploads: list[PreparedResumeUpload] = []
     results: list[ResumeUploadResult] = []
     try:
@@ -93,19 +203,34 @@ async def upload_resumes(
                 select(ResumeFile).where(ResumeFile.file_hash == upload_data.file_hash)
             )
             if existing:
+                prepared.discard()
+                _enforce_resume_scope(db, user, existing)
+                if (
+                    target_requisition is not None
+                    and existing.target_requisition_id not in (None, target_requisition.id)
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Resume file is already assigned to another requisition",
+                    )
+                if (
+                    target_requisition is not None
+                    and existing.target_requisition_id is None
+                ):
+                    # Only global recruiting users can reach an untargeted duplicate.
+                    existing.target_requisition_id = target_requisition.id
                 if candidate is not None:
                     if existing.candidate_id not in (None, candidate.id):
-                        prepared.discard()
                         raise HTTPException(
                             status_code=409,
                             detail="Resume file is already linked to another candidate",
                         )
                     existing.candidate_id = candidate.id
-                prepared.discard()
                 results.append(
                     ResumeUploadResult(
                         id=existing.id,
                         original_filename=upload_data.original_filename,
+                        target_requisition_id=existing.target_requisition_id,
                         source_platform=existing.source_platform,
                         parse_status=existing.parse_status,
                         source_confidence=existing.source_confidence,
@@ -119,6 +244,10 @@ async def upload_resumes(
             path = prepared.promote()
             resume = ResumeFile(
                 candidate_id=candidate.id if candidate is not None else None,
+                target_requisition_id=(
+                    target_requisition.id if target_requisition is not None else None
+                ),
+                uploaded_by=user.id,
                 storage_key=upload_data.storage_key,
                 original_filename=upload_data.original_filename,
                 file_hash=upload_data.file_hash,
@@ -134,6 +263,7 @@ async def upload_resumes(
                 ResumeUploadResult(
                     id=resume.id,
                     original_filename=upload_data.original_filename,
+                    target_requisition_id=resume.target_requisition_id,
                     source_platform=resume.source_platform,
                     parse_status=resume.parse_status,
                     source_confidence=resume.source_confidence,
@@ -157,6 +287,7 @@ def list_resumes(
     parse_status: str | None = None,
     source_platform: SourcePlatform | None = None,
     query: str | None = None,
+    include_confirmed: bool = Query(True),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -164,13 +295,11 @@ def list_resumes(
 ) -> list[ResumeFile]:
     statement = select(ResumeFile).order_by(ResumeFile.uploaded_at.desc())
     if user.role == "manager":
-        statement = statement.where(
-            ResumeFile.candidate_id.in_(
-                select(Candidate.id).where(candidate_scope_clause(user))
-            )
-        )
+        statement = statement.where(_manager_resume_scope_clause(user))
     if parse_status:
         statement = statement.where(ResumeFile.parse_status == parse_status)
+    elif not include_confirmed:
+        statement = statement.where(ResumeFile.parse_status != "confirmed")
     if source_platform:
         statement = statement.where(ResumeFile.source_platform == source_platform)
     if query:
@@ -191,10 +320,7 @@ def get_resume(
     resume = db.get(ResumeFile, resume_id)
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
-    if resume.candidate_id is None and user.role == "manager":
-        raise HTTPException(status_code=403, detail="Outside candidate scope")
-    if resume.candidate_id is not None:
-        enforce_candidate_scope(db, user, resume.candidate_id)
+    _enforce_resume_scope(db, user, resume)
     return resume
 
 
@@ -203,11 +329,12 @@ def update_parsed_resume(
     resume_id: int,
     payload: dict,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_user),
 ) -> ResumeFile:
     resume = db.get(ResumeFile, resume_id)
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
+    _enforce_resume_scope(db, user, resume)
     if resume.parse_status == "confirmed":
         raise HTTPException(status_code=409, detail="Confirmed resume cannot be edited")
     parsed = ResumeParsedUpdate.model_validate(payload.get("parsed_payload", payload))
@@ -225,11 +352,12 @@ def update_parsed_resume(
 def reparse_resume(
     resume_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_user),
 ) -> ResumeFile:
     resume = db.get(ResumeFile, resume_id)
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
+    _enforce_resume_scope(db, user, resume)
     if resume.parse_status == "confirmed":
         raise HTTPException(status_code=409, detail="Confirmed resume cannot be reparsed")
     with _stored_path(resume) as path:
@@ -244,12 +372,13 @@ def review_resume_source(
     resume_id: int,
     payload: ResumeSourceReview,
     db: Session = Depends(get_db),
-    user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_user),
 ) -> ResumeFile:
-    """HR/administrator human override for ambiguous automatic classification."""
+    """Human override for an ambiguous automatic source classification."""
     resume = db.get(ResumeFile, resume_id)
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
+    _enforce_resume_scope(db, user, resume)
     if resume.parse_status == "confirmed":
         raise HTTPException(status_code=409, detail="Confirmed resume source cannot be edited")
     previous = resume.source_platform
@@ -285,11 +414,12 @@ def confirm_resume(
     resume_id: int,
     request: ResumeConfirmRequest | None = None,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_user),
 ) -> ResumeConfirmResult:
     resume = db.get(ResumeFile, resume_id)
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
+    _enforce_resume_scope(db, user, resume)
     requested_candidate_id = request.candidate_id if request else None
     if resume.parse_status == "confirmed":
         if resume.candidate_id is None:
@@ -305,6 +435,8 @@ def confirm_resume(
         confirmed_candidate = db.get(Candidate, resume.candidate_id)
         if confirmed_candidate is None or confirmed_candidate.deleted_at is not None:
             raise HTTPException(status_code=409, detail="Confirmed candidate is unavailable")
+        _ensure_target_application(db, resume, confirmed_candidate, user)
+        db.commit()
         return ResumeConfirmResult(
             resume_id=resume.id,
             candidate_id=confirmed_candidate.id,
@@ -332,6 +464,8 @@ def confirm_resume(
         raise HTTPException(status_code=404, detail="Candidate not found")
     if candidate and candidate.deleted_at is not None:
         raise HTTPException(status_code=409, detail="Deleted candidate cannot receive a resume")
+    if candidate and requested_candidate_id is not None and user.role == "manager":
+        enforce_candidate_scope(db, user, candidate.id)
     email_norm = normalize_email(payload.get("email"))
     phone_norm = normalize_phone(payload.get("phone"))
     if not candidate and (email_norm or phone_norm):
@@ -379,6 +513,7 @@ def confirm_resume(
     resume.candidate_id = candidate.id
     resume.parse_status = "confirmed"
     resume.confirmed_at = datetime.now(UTC)
+    _ensure_target_application(db, resume, candidate, user)
     db.commit()
     return ResumeConfirmResult(
         resume_id=resume.id,

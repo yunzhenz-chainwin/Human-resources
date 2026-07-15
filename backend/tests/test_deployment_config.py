@@ -34,3 +34,26 @@ def test_hr_container_accepts_supported_upload_size_and_uses_lockfile() -> None:
     dockerfile = text("frontend/Dockerfile")
     assert "RUN npm ci" in dockerfile
     assert "RUN npm install" not in dockerfile
+
+
+def test_vite_lan_access_uses_fixed_ports_and_explicit_host_allowlist() -> None:
+    expected_ports = {"frontend/vite.config.js": "5173", "career-frontend/vite.config.js": "5174"}
+    for path, port in expected_ports.items():
+        config = text(path)
+        assert "host: '0.0.0.0'" in config
+        assert f"port: {port}" in config
+        assert "strictPort: true" in config
+        assert "hostname().toLowerCase()" in config
+        assert "VITE_ALLOWED_HOSTS" in config
+        assert "target: proxyTarget" in config
+
+
+def test_windows_lan_firewall_keeps_backend_private() -> None:
+    firewall = text("deploy/windows-lan/install-firewall.ps1")
+    assert "-LocalPort 5173,5174" in firewall
+    assert "LocalSubnet" in firewall
+    assert "8010" not in firewall
+
+    runner = text("deploy/windows-lan/run-service.ps1")
+    assert "alembic upgrade head" in runner
+    assert "run_backend.py" in runner

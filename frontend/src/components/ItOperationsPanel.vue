@@ -4,6 +4,7 @@ import {
   adminApi,
   type DatabaseColumn,
   type DatabaseOverview,
+  type DatabaseRowDetail,
   type DatabaseTablePreview,
   type IssueSeverity,
   type IssueStatus,
@@ -17,6 +18,9 @@ const preview = ref<DatabaseTablePreview | null>(null)
 const loading = ref(false), saving = ref(false), dialog = ref(false), previewLoading = ref(false)
 const rowDialog = ref(false), rowSaving = ref(false), rowMode = ref<'create' | 'edit'>('create')
 const privacyDialog = ref(false), piiRevealed = ref(false), privacyReason = ref('')
+const privacyTarget = ref<'table' | 'detail'>('table')
+const detailDialog = ref(false), detailLoading = ref(false), detailPiiRevealed = ref(false)
+const rowDetail = ref<DatabaseRowDetail | null>(null)
 const error = ref(''), selectedTable = ref(''), tableFilter = ref(''), rowSearch = ref('')
 const editing = ref<SystemIssue | null>(null)
 const editingRowId = ref<number | string | null>(null)
@@ -72,7 +76,8 @@ function selectTable(name: string) {
   rowSearch.value = ''
   void openTable(name)
 }
-function requestPiiReveal() {
+function requestPiiReveal(target: 'table' | 'detail' = 'table') {
+  privacyTarget.value = target
   privacyReason.value = ''
   privacyDialog.value = true
 }
@@ -83,14 +88,59 @@ async function confirmPiiReveal() {
     return
   }
   privacyDialog.value = false
-  piiRevealed.value = true
-  await openTable(selectedTable.value, preview.value?.page || 1)
-  if (!preview.value?.pii_revealed) piiRevealed.value = false
+  if (privacyTarget.value === 'detail' && rowDetail.value) {
+    detailPiiRevealed.value = true
+    await loadRowDetail(rowDetail.value.row_id)
+    if (!rowDetail.value?.pii_revealed) detailPiiRevealed.value = false
+  } else {
+    piiRevealed.value = true
+    await openTable(selectedTable.value, preview.value?.page || 1)
+    if (!preview.value?.pii_revealed) piiRevealed.value = false
+  }
 }
 async function hidePii() {
   piiRevealed.value = false
   privacyReason.value = ''
   await openTable(selectedTable.value, preview.value?.page || 1)
+}
+async function loadRowDetail(rowId: number | string) {
+  detailLoading.value = true
+  error.value = ''
+  try {
+    rowDetail.value = (await adminApi.databaseRowDetail(
+      selectedTable.value,
+      rowId,
+      detailPiiRevealed.value,
+      privacyReason.value,
+    )).data
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '無法載入資料詳細內容'
+  } finally {
+    detailLoading.value = false
+  }
+}
+async function openRowDetail(row: Record<string, unknown>) {
+  const key = primaryKeyColumn.value?.name
+  const rowId = key ? row[key] as number | string : null
+  if (rowId === null || rowId === undefined) return
+  rowDetail.value = null
+  detailPiiRevealed.value = false
+  privacyReason.value = ''
+  detailDialog.value = true
+  await loadRowDetail(rowId)
+}
+function closeRowDetail() {
+  detailDialog.value = false
+  detailPiiRevealed.value = false
+  rowDetail.value = null
+  privacyReason.value = ''
+}
+async function hideDetailPii() {
+  if (!rowDetail.value) return
+  const rowId = rowDetail.value.row_id
+  detailPiiRevealed.value = false
+  privacyReason.value = ''
+  await loadRowDetail(rowId)
 }
 function serializeRowValue(value: unknown) {
   if (value === null || value === undefined) return ''
@@ -193,6 +243,27 @@ function display(value: unknown) {
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
+const fieldLabels: Record<string, string> = {
+  id: '資料 ID', candidate_id: '人才 ID', target_requisition_id: '指定職缺 ID', requisition_id: '職缺 ID',
+  uploaded_by: '上傳人員 ID', original_filename: '原始檔名', file_size: '檔案大小', mime: '檔案格式',
+  source_platform: '來源平台', requested_source_platform: '指定來源平台', parse_status: '解析狀態',
+  parsed_payload: '履歷解析內容', field_confidence: '欄位辨識信心', overall_confidence: '整體辨識信心',
+  source_evidence: '來源判斷依據', error_message: '錯誤訊息', uploaded_at: '上傳時間', updated_at: '更新時間',
+  confirmed_at: '入庫確認時間', parser_version: '解析器版本', source_review_required: '需要來源確認',
+}
+const relatedLabels: Record<string, string> = {
+  candidate: '關聯人才', requisition: '指定職缺', uploader: '上傳人員', source_reviewer: '來源確認人員',
+  requester: '職缺申請人', approver: '職缺核准人',
+}
+function fieldLabel(name: string) { return fieldLabels[name] || name }
+function detailValue(value: unknown) {
+  if (value === null || value === undefined || value === '') return '—'
+  if (typeof value === 'object') return JSON.stringify(value, null, 2)
+  return String(value)
+}
+function isLongValue(value: unknown) {
+  return typeof value === 'object' || String(value ?? '').length > 90
+}
 onMounted(load)
 watch(view, next => {
   if (next !== 'database' && piiRevealed.value) {
@@ -238,11 +309,11 @@ watch(view, next => {
           <button v-for="table in filteredTables" :key="table.name" :class="{ selected: selectedTable === table.name }" @click="selectTable(table.name)"><strong class="table-display-name">{{ table.display_name }}</strong><span class="table-technical-name">{{ table.name }}</span><small>{{ table.row_count ?? '未知' }} 筆 · {{ table.columns.length }} 欄</small></button>
         </aside>
         <main class="preview-panel">
-          <div v-if="preview" class="preview-toolbar"><div><h3>{{ preview.display_name }}</h3><p class="table-description">{{ preview.description }}</p><small>資料表：{{ preview.table_name }} · 共 {{ preview.total }} 筆；{{ preview.redacted_columns.length }} 個敏感欄位已遮蔽</small></div><div class="preview-actions"><button v-if="revealableColumns.length && !piiRevealed" class="button privacy-button" @click="requestPiiReveal">顯示個資</button><button v-if="revealableColumns.length && piiRevealed" class="button privacy-button active" @click="hidePii">重新遮罩</button><button v-if="selectedTableMeta?.can_create" class="button primary" @click="openRowEditor()">＋ 新增資料</button><form @submit.prevent="openTable(selectedTable)"><input v-model="rowSearch" placeholder="搜尋本表文字欄位"><button class="button secondary">搜尋</button></form></div></div>
+          <div v-if="preview" class="preview-toolbar"><div><h3>{{ preview.display_name }}</h3><p class="table-description">{{ preview.description }}</p><small>資料表：{{ preview.table_name }} · 共 {{ preview.total }} 筆；{{ preview.redacted_columns.length }} 個敏感欄位已遮蔽</small></div><div class="preview-actions"><button v-if="revealableColumns.length && !piiRevealed" class="button privacy-button" @click="requestPiiReveal()">顯示個資</button><button v-if="revealableColumns.length && piiRevealed" class="button privacy-button active" @click="hidePii">重新遮罩</button><button v-if="selectedTableMeta?.can_create" class="button primary" @click="openRowEditor()">＋ 新增資料</button><form @submit.prevent="openTable(selectedTable)"><input v-model="rowSearch" placeholder="搜尋本表文字欄位"><button class="button secondary">搜尋</button></form></div></div>
           <details v-if="selectedTableMeta" class="schema-details"><summary>欄位結構（{{ selectedTableMeta.columns.length }}）</summary><div><span v-for="column in selectedTableMeta.columns" :key="column.name" :class="{ redacted: column.redacted, revealable: column.revealable }"><code>{{ column.name }}</code> {{ column.type }}<small>{{ column.primary_key ? ' PK' : '' }}{{ column.nullable ? ' 可空' : ' 必填' }}{{ column.revealable ? ' · 可授權顯示' : column.redacted ? ' · 永久遮蔽' : '' }}</small></span></div></details>
           <p v-if="selectedTableMeta?.protection_reason" class="table-protection">🔒 {{ selectedTableMeta.protection_reason }}</p>
           <div v-if="previewLoading" class="empty">讀取資料中…</div>
-          <div v-else-if="preview" class="table-scroll"><table><thead><tr><th v-for="column in preview.visible_columns" :key="column">{{ column }}</th><th v-if="selectedTableMeta?.can_update || selectedTableMeta?.can_delete" class="row-actions-head">操作</th></tr></thead><tbody><tr v-for="(row, index) in preview.rows" :key="index"><td v-for="column in preview.visible_columns" :key="column" :title="display(row[column])">{{ display(row[column]) }}</td><td v-if="selectedTableMeta?.can_update || selectedTableMeta?.can_delete" class="row-actions"><button v-if="selectedTableMeta?.can_update" @click="openRowEditor(row)">編輯</button><button v-if="selectedTableMeta?.can_delete" class="danger" @click="deleteRow(row)">刪除</button></td></tr></tbody></table><p v-if="!preview.rows.length" class="empty">沒有符合條件的資料。</p></div>
+          <div v-else-if="preview" class="table-scroll"><table><thead><tr><th v-for="column in preview.visible_columns" :key="column">{{ column }}</th><th v-if="primaryKeyColumn || selectedTableMeta?.can_update || selectedTableMeta?.can_delete" class="row-actions-head">操作</th></tr></thead><tbody><tr v-for="(row, index) in preview.rows" :key="index" :class="{ 'detail-enabled': primaryKeyColumn }" :tabindex="primaryKeyColumn ? 0 : undefined" @dblclick="openRowDetail(row)" @keydown.enter.prevent="openRowDetail(row)"><td v-for="column in preview.visible_columns" :key="column" :title="display(row[column])">{{ display(row[column]) }}</td><td v-if="primaryKeyColumn || selectedTableMeta?.can_update || selectedTableMeta?.can_delete" class="row-actions"><button v-if="primaryKeyColumn" class="detail-button" :data-testid="`database-row-detail-${index}`" @click.stop="openRowDetail(row)">詳細</button><button v-if="selectedTableMeta?.can_update" @click.stop="openRowEditor(row)">編輯</button><button v-if="selectedTableMeta?.can_delete" class="danger" @click.stop="deleteRow(row)">刪除</button></td></tr></tbody></table><p v-if="!preview.rows.length" class="empty">沒有符合條件的資料。</p></div>
           <div v-if="preview && totalPages > 1" class="pagination"><button :disabled="preview.page <= 1" @click="openTable(selectedTable, preview.page - 1)">上一頁</button><span>第 {{ preview.page }} / {{ totalPages }} 頁</span><button :disabled="preview.page >= totalPages" @click="openTable(selectedTable, preview.page + 1)">下一頁</button></div>
           <p v-if="!preview && !previewLoading" class="empty">請從左側選擇資料表，查看結構與分頁資料。</p>
         </main>
@@ -254,7 +325,9 @@ watch(view, next => {
 
   <div v-if="rowDialog" class="modal-overlay" @click.self="rowDialog = false" @keydown.esc="rowDialog = false"><form class="modal-card row-editor-modal" role="dialog" aria-modal="true" aria-labelledby="row-dialog-title" @submit.prevent="saveRow"><header><div><small>DATABASE EDITOR</small><h2 id="row-dialog-title">{{ rowMode === 'create' ? `新增${selectedTableMeta?.display_name || '資料'}` : `編輯資料 #${editingRowId}` }}</h2></div><button type="button" aria-label="關閉資料編輯視窗" @click="rowDialog = false">×</button></header><p class="row-editor-note">只顯示後端允許維護的欄位；關聯欄位請填寫現有資料的 ID，JSON 欄位請使用有效的 JSON 格式。</p><div class="row-editor-grid"><label v-for="column in editableColumns" :key="column.name" :class="{ wide: rowInputKind(column) === 'textarea' }"><span>{{ column.name }} <b v-if="!column.nullable">*</b></span><small>{{ column.type }}{{ column.nullable ? ' · 可留空' : '' }}</small><select v-if="rowInputKind(column) === 'boolean'" v-model="rowValues[column.name]"><option value="true">true</option><option value="false">false</option></select><textarea v-else-if="rowInputKind(column) === 'textarea'" v-model="rowValues[column.name]" :required="!column.nullable" rows="4"></textarea><input v-else v-model="rowValues[column.name]" :type="rowInputKind(column)" :required="!column.nullable" :step="rowInputKind(column) === 'number' ? 'any' : undefined"></label></div><footer><button type="button" class="button secondary" @click="rowDialog = false">取消</button><button class="button primary" :disabled="rowSaving">{{ rowSaving ? '儲存中…' : '確認儲存' }}</button></footer></form></div>
 
-  <div v-if="privacyDialog" class="modal-overlay" @click.self="privacyDialog = false" @keydown.esc="privacyDialog = false"><form class="modal-card privacy-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-dialog-title" @submit.prevent="confirmPiiReveal"><header><div><small>PRIVACY ACCESS</small><h2 id="privacy-dialog-title">暫時顯示人才個資</h2></div><button type="button" aria-label="關閉個資授權視窗" @click="privacyDialog = false">×</button></header><div class="privacy-form"><p>只會顯示人才主檔的姓名、聯絡方式與招募必要欄位。每次查閱都會記錄帳號、時間、IP、原因與顯示欄位。</p><label>查閱原因 *<textarea v-model="privacyReason" minlength="5" maxlength="200" rows="4" required placeholder="例如：協助 HR 排查人才資料同步問題"></textarea><small>{{ privacyReason.trim().length }} / 200</small></label></div><footer><button type="button" class="button secondary" @click="privacyDialog = false">保持遮罩</button><button class="button privacy-button" :disabled="privacyReason.trim().length < 5">確認並顯示</button></footer></form></div>
+  <div v-if="detailDialog" class="modal-overlay detail-overlay" @click.self="closeRowDetail" @keydown.esc="closeRowDetail"><section class="modal-card row-detail-modal" role="dialog" aria-modal="true" aria-labelledby="row-detail-title"><header><div><small>DATABASE RECORD</small><h2 id="row-detail-title">{{ rowDetail?.display_name || selectedTableMeta?.display_name }}詳細資料</h2><p v-if="rowDetail">資料列 #{{ rowDetail.row_id }} · {{ rowDetail.table_name }}</p></div><button type="button" aria-label="關閉資料詳細視窗" @click="closeRowDetail">×</button></header><div v-if="detailLoading" class="empty detail-loading">讀取完整資料中…</div><div v-else-if="rowDetail" class="row-detail-body"><div class="detail-toolbar"><p>{{ rowDetail.pii_revealed ? '已依查閱原因暫時顯示可授權個資，本次操作已留下稽核紀錄。' : `敏感欄位維持遮罩；共 ${rowDetail.redacted_columns.length} 欄未顯示。` }}</p><div><button v-if="revealableColumns.length && !rowDetail.pii_revealed" class="button privacy-button" @click="requestPiiReveal('detail')">填寫原因並顯示個資</button><button v-if="rowDetail.pii_revealed" class="button privacy-button active" @click="hideDetailPii">重新遮罩</button></div></div><section v-if="Object.keys(rowDetail.related).length" class="related-section"><h3>關聯資料</h3><div class="related-grid"><article v-for="(value, name) in rowDetail.related" :key="name"><small>{{ relatedLabels[name] || name }}</small><pre>{{ detailValue(value) }}</pre></article></div></section><section class="field-section"><h3>完整欄位</h3><div class="detail-grid"><article v-for="(value, name) in rowDetail.row" :key="name" :class="{ wide: isLongValue(value) }"><small>{{ fieldLabel(name) }}<code>{{ name }}</code></small><pre>{{ detailValue(value) }}</pre></article><article v-for="name in rowDetail.redacted_columns" :key="`redacted-${name}`" class="redacted-field"><small>{{ fieldLabel(name) }}<code>{{ name }}</code></small><strong>🔒 敏感欄位已遮罩</strong></article></div></section></div><footer><span>密碼雜湊、Token、Secret、儲存路徑與履歷原文永久不顯示。</span><button class="button primary" type="button" @click="closeRowDetail">關閉</button></footer></section></div>
+
+  <div v-if="privacyDialog" class="modal-overlay" @click.self="privacyDialog = false" @keydown.esc="privacyDialog = false"><form class="modal-card privacy-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-dialog-title" @submit.prevent="confirmPiiReveal"><header><div><small>PRIVACY ACCESS</small><h2 id="privacy-dialog-title">暫時顯示招募個資</h2></div><button type="button" aria-label="關閉個資授權視窗" @click="privacyDialog = false">×</button></header><div class="privacy-form"><p>依所選資料表顯示人才主檔，或履歷檔名、解析欄位及辨識依據。每次查閱都會記錄帳號、時間、IP、原因與顯示欄位；密碼、Token、Secret、儲存路徑與履歷原文仍永久遮罩。</p><label>查閱原因 *<textarea v-model="privacyReason" minlength="5" maxlength="200" rows="4" required placeholder="例如：協助 HR 排查履歷解析或人才同步問題"></textarea><small>{{ privacyReason.trim().length }} / 200</small></label></div><footer><button type="button" class="button secondary" @click="privacyDialog = false">保持遮罩</button><button class="button privacy-button" :disabled="privacyReason.trim().length < 5">確認並顯示</button></footer></form></div>
 </template>
 
 <style scoped>
@@ -264,4 +337,5 @@ watch(view, next => {
 .issue-dashboard{display:grid;grid-template-columns:repeat(3,minmax(110px,1fr)) minmax(220px,1.6fr);gap:9px;margin-bottom:14px}.issue-dashboard article{border:1px solid #dfeae7;border-radius:12px;padding:12px;background:linear-gradient(145deg,#fff,#f5faf8)}.issue-dashboard small,.issue-dashboard span{display:block;font-size:8px;color:var(--muted)}.issue-dashboard strong{display:block;font-size:21px;color:#194f49;margin:3px 0}.issue-dashboard .overall-progress{display:flex;flex-direction:column;justify-content:center}.overall-progress>div:first-child{display:flex;align-items:center;justify-content:space-between}.overall-progress>div:first-child strong{font-size:16px}.progress-track{height:7px;border-radius:99px;background:#e4eeeb;overflow:hidden}.progress-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#de9b40,#5aa095);transition:width .3s}.progress-track i.complete{background:#45a875}.overall-progress .overdue{color:#b44934}.issue-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.issue-heading>b{font-size:15px;color:#276b62}.issue-card>.progress-track{margin:10px 0 12px}.issue-dates{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.issue-dates span{font-size:8px;color:var(--muted);padding:7px 8px;border-radius:7px;background:#f5f8f7}.issue-dates strong{display:block;margin:3px 0 0;font-size:8px;color:#294f4a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.issue-modal input[type="range"]{padding:0;accent-color:#2d766d}@media(max-width:900px){.issue-dashboard{grid-template-columns:1fr 1fr}.issue-dates{grid-template-columns:1fr 1fr}}
 .preview-actions{display:flex;align-items:center;gap:7px}.preview-actions form{width:300px}.table-protection{margin:0 0 10px;padding:9px 11px;border-radius:8px;background:#fff7e8;color:#795d2f;font-size:9px}.row-actions-head{position:sticky!important;right:0;z-index:2}.row-actions{position:sticky;right:0;background:#fff!important;display:flex;gap:5px}.table-scroll tr:nth-child(even) .row-actions{background:#f8faf9!important}.row-actions button{border:1px solid #bad2cd;background:#fff;color:#24645c;border-radius:6px;padding:5px 8px;font-size:8px}.row-actions button.danger{border-color:#efc4ba;color:#a33d2c}.row-editor-modal{max-width:820px}.row-editor-note{margin:0;padding:10px 20px;background:#eef7f5;color:#466d66;font-size:9px}.row-editor-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:18px 20px;max-height:60vh;overflow:auto}.row-editor-grid label{display:flex;flex-direction:column;gap:4px;font-size:9px}.row-editor-grid label.wide{grid-column:1/-1}.row-editor-grid label>span{font-weight:700;color:#244a45}.row-editor-grid label>span b{color:#b44934}.row-editor-grid small{color:var(--muted);font-size:8px}.row-editor-grid input,.row-editor-grid select,.row-editor-grid textarea{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:8px;padding:9px;background:#fff;color:inherit;font:inherit}.row-editor-grid textarea{resize:vertical;line-height:1.5}@media(max-width:800px){.preview-actions{align-items:stretch;flex-direction:column;width:100%}.preview-actions form{width:100%}.row-editor-grid{grid-template-columns:1fr}.row-editor-grid label.wide{grid-column:auto}}
 .privacy-note.revealed{background:#fff4df;color:#7b5319;border:1px solid #ebc884}.privacy-button{border-color:#d79b38;background:#fff8ea;color:#7a4f0b}.privacy-button.active{background:#7a4f0b;color:#fff}.privacy-modal{max-width:560px}.privacy-form{padding:18px 20px}.privacy-form p{margin:0 0 14px;padding:11px;border-radius:8px;background:#fff7e8;color:#72562d;font-size:9px;line-height:1.7}.privacy-form label{display:block;font-size:9px;color:#45625d}.privacy-form textarea{width:100%;box-sizing:border-box;margin-top:6px;border:1px solid #d8e3e0;border-radius:8px;padding:10px;resize:vertical;font:inherit}.privacy-form small{display:block;margin-top:4px;text-align:right;color:var(--muted)}
+.table-scroll tr.detail-enabled{cursor:pointer}.table-scroll tr.detail-enabled:focus-visible{outline:3px solid rgba(39,107,98,.25);outline-offset:-3px}.row-actions button.detail-button{background:#e7f2ef;border-color:#8fbdb6;font-weight:700}.detail-overlay{padding:18px}.row-detail-modal{width:min(1080px,96vw);max-width:1080px;max-height:92vh}.row-detail-modal>header p{margin:4px 0 0;color:var(--muted);font-size:8px}.row-detail-body{padding:18px 20px;overflow:auto}.detail-loading{padding:60px}.detail-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 13px;margin-bottom:16px;border-radius:9px;background:#f0f7f5;color:#466a64}.detail-toolbar p{margin:0;font-size:9px}.detail-toolbar>div{flex:none}.related-section,.field-section{margin-top:16px}.related-section h3,.field-section h3{margin:0 0 8px;font-size:11px;color:#214f49}.related-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.related-grid article{padding:10px;border-radius:9px;background:#eaf4f1;border:1px solid #d3e6e1}.detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.detail-grid article{min-width:0;padding:10px;border:1px solid #dde8e5;border-radius:9px;background:#fff}.detail-grid article.wide{grid-column:1/-1}.detail-grid article.redacted-field{background:#fff7ed;border-color:#efd7b3}.related-grid small,.detail-grid small{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#4a6c66;font-size:8px;font-weight:700}.detail-grid code{font-size:7px;color:#8a9a96;font-weight:400}.related-grid pre,.detail-grid pre{margin:7px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:9px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;color:#1c443f}.detail-grid .redacted-field strong{display:block;margin-top:9px;font-size:8px;color:#906329}.row-detail-modal>footer{align-items:center;justify-content:space-between}.row-detail-modal>footer span{font-size:8px;color:var(--muted)}@media(max-width:800px){.related-grid,.detail-grid{grid-template-columns:1fr}.detail-grid article.wide{grid-column:auto}.detail-toolbar{align-items:flex-start;flex-direction:column}.row-detail-modal>footer{align-items:flex-start;flex-direction:column}}
 </style>

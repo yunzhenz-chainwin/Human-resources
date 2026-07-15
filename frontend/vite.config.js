@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import { hostname } from 'node:os'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
@@ -8,6 +9,17 @@ export default defineConfig(({ mode }) => {
   // read them explicitly with loadEnv, otherwise process.env is empty for them.
   const env = loadEnv(mode, process.cwd(), '')
   const proxyTarget = env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8010'
+  const extraAllowedHosts = (env.VITE_ALLOWED_HOSTS || '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+  const allowedHosts = [...new Set([
+    'localhost',
+    '127.0.0.1',
+    hostname().toLowerCase(),
+    '.trycloudflare.com',
+    ...extraAllowedHosts,
+  ])]
 
   return {
     plugins: [vue()],
@@ -18,7 +30,9 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       host: '0.0.0.0',
-      allowedHosts: ['localhost', '127.0.0.1', '.trycloudflare.com'],
+      port: 5173,
+      strictPort: true,
+      allowedHosts,
       proxy: {
         '/api': {
           target: proxyTarget,

@@ -49,6 +49,18 @@ class UserRead(BaseModel):
     role: str
     department_id: int | None
     is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: datetime | None = None
+    password_changed_at: datetime | None = None
+
+
+class TemporaryPasswordResetRead(BaseModel):
+    user_id: int
+    username: str
+    temporary_password: str
+    password_changed_at: datetime
+    sessions_revoked: int = 0
 
 
 class DepartmentCreate(BaseModel):
@@ -198,6 +210,16 @@ class DatabaseTablePreviewRead(BaseModel):
     redacted_columns: list[str]
     pii_revealed: bool = False
     rows: list[dict[str, Any]]
+
+
+class DatabaseRowDetailRead(BaseModel):
+    table_name: str
+    display_name: str
+    row_id: int | str
+    pii_revealed: bool = False
+    redacted_columns: list[str]
+    row: dict[str, Any]
+    related: dict[str, Any] = Field(default_factory=dict)
 
 
 class DatabaseRowWrite(BaseModel):

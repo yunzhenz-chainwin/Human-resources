@@ -153,6 +153,129 @@ def test_role_and_department_scope(auth_client) -> None:
     assert client.get("/scoped/999", headers=bearer(admin["access_token"])).status_code == 200
 
 
+def test_system_admin_resets_one_time_temporary_password_with_audit(auth_client) -> None:
+    client, testing_session = auth_client
+    manager_session = login(client, "manager", "Manager-Test-Password-123")
+    with testing_session() as db:
+        manager = db.scalar(select(User).where(User.username == "manager"))
+        assert manager is not None
+        manager_id = manager.id
+
+    admin = login(client, "rootadmin", "Bootstrap-Test-Password-123")
+    response = client.post(
+        f"/admin/users/{manager_id}/reset-password",
+        headers=bearer(admin["access_token"]),
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+    payload = response.json()
+    temporary_password = payload["temporary_password"]
+    assert payload["user_id"] == manager_id
+    assert payload["username"] == "manager"
+    assert payload["sessions_revoked"] >= 1
+    assert len(temporary_password) >= 24
+    assert any(character.isupper() for character in temporary_password)
+    assert any(character.islower() for character in temporary_password)
+    assert any(character.isdigit() for character in temporary_password)
+    assert any(not character.isalnum() for character in temporary_password)
+
+    assert client.post(
+        "/auth/login",
+        json={"username": "manager", "password": "Manager-Test-Password-123"},
+    ).status_code == 401
+    assert client.post(
+        "/auth/refresh",
+        json={"refresh_token": manager_session["refresh_token"]},
+    ).status_code == 401
+    assert login(client, "manager", temporary_password)["access_token"]
+
+    users = client.get(
+        "/admin/users", headers=bearer(admin["access_token"])
+    ).json()
+    reset_user = next(item for item in users if item["id"] == manager_id)
+    assert reset_user["created_at"]
+    assert reset_user["updated_at"]
+    assert reset_user["last_login_at"]
+    assert reset_user["password_changed_at"]
+    assert {item["role"] for item in users} == {"admin", "hr", "manager"}
+
+    with testing_session() as db:
+        manager = db.get(User, manager_id)
+        assert manager is not None
+        assert manager.password_hash != temporary_password
+        assert temporary_password not in manager.password_hash
+        assert verify_password(temporary_password, manager.password_hash)
+        audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "password.reset",
+                AuditLog.resource_id == str(manager_id),
+            )
+        )
+        assert audit is not None
+        assert audit.actor_user_id != manager_id
+        assert audit.ip_address == "testclient"
+        assert audit.details is not None
+        assert audit.details["target_username"] == "manager"
+        assert audit.details["temporary_password_issued"] is True
+        assert temporary_password not in str(audit.details)
+
+
+def test_password_reset_is_forbidden_to_hr_and_manager(auth_client) -> None:
+    client, testing_session = auth_client
+    with testing_session() as db:
+        manager = db.scalar(select(User).where(User.username == "manager"))
+        assert manager is not None
+        manager_id = manager.id
+
+    hr = login(client, "hruser", "HR-Test-Password-123")
+    manager_session = login(client, "manager", "Manager-Test-Password-123")
+    assert client.post(
+        f"/admin/users/{manager_id}/reset-password",
+        headers=bearer(hr["access_token"]),
+    ).status_code == 403
+    assert client.post(
+        f"/admin/users/{manager_id}/reset-password",
+        headers=bearer(manager_session["access_token"]),
+    ).status_code == 403
+    assert client.post(f"/admin/users/{manager_id}/reset-password").status_code == 401
+    assert client.patch(
+        f"/admin/users/{manager_id}",
+        json={"password": "HR-Must-Not-Reset-This-Password"},
+        headers=bearer(hr["access_token"]),
+    ).status_code == 403
+    assert login(client, "manager", "Manager-Test-Password-123")["access_token"]
+
+
+def test_it_role_can_reset_password(auth_client) -> None:
+    client, testing_session = auth_client
+    admin = login(client, "rootadmin", "Bootstrap-Test-Password-123")
+    created = client.post(
+        "/admin/users",
+        json={
+            "username": "itoperator",
+            "email": "itoperator@example.test",
+            "password": "IT-Operator-Password-123",
+            "display_name": "IT Operator",
+            "role": "it",
+            "department_id": None,
+        },
+        headers=bearer(admin["access_token"]),
+    )
+    assert created.status_code == 201
+    it_session = login(client, "itoperator", "IT-Operator-Password-123")
+    with testing_session() as db:
+        manager = db.scalar(select(User).where(User.username == "manager"))
+        assert manager is not None
+        manager_id = manager.id
+    reset = client.post(
+        f"/admin/users/{manager_id}/reset-password",
+        headers=bearer(it_session["access_token"]),
+    )
+    assert reset.status_code == 200
+    assert reset.json()["temporary_password"]
+
+
 def test_hr_creates_persisted_login_without_privilege_escalation(auth_client) -> None:
     client, testing_session = auth_client
     hr = login(client, "hruser", "HR-Test-Password-123")
@@ -313,18 +436,19 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
         )
         db.add(candidate)
         db.flush()
+        resume_file = ResumeFile(
+            candidate_id=candidate.id,
+            storage_key="resumes/private.pdf",
+            original_filename="private-name.pdf",
+            source_platform="direct",
+            parse_status="parsed",
+            parsed_payload={"name": "Private Candidate"},
+            source_evidence=[{"type": "private"}],
+            resume_text="full private resume text",
+        )
         db.add_all(
             [
-                ResumeFile(
-                    candidate_id=candidate.id,
-                    storage_key="resumes/private.pdf",
-                    original_filename="private-name.pdf",
-                    source_platform="direct",
-                    parse_status="parsed",
-                    parsed_payload={"name": "Private Candidate"},
-                    source_evidence=[{"type": "private"}],
-                    resume_text="full private resume text",
-                ),
+                resume_file,
                 SystemSetting(
                     key="integration.secret",
                     value="must-never-appear-in-database-preview",
@@ -332,6 +456,8 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
                 ),
             ]
         )
+        db.flush()
+        resume_id = resume_file.id
         db.commit()
 
     created_it = client.post(
@@ -392,6 +518,15 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
     assert preview["rows"][0]["username"] == "rootadmin"
     assert preview["display_name"] == "後台登入人員"
 
+    user_detail = client.get(
+        f"/admin/database/tables/users/rows/{preview['rows'][0]['id']}",
+        headers=it_headers,
+    )
+    assert user_detail.status_code == 200
+    assert user_detail.headers["cache-control"] == "no-store"
+    assert "password_hash" in user_detail.json()["redacted_columns"]
+    assert "password_hash" not in user_detail.json()["row"]
+
     for table_name, protected_columns in {
         "candidates": {"name", "email", "phone", "city", "photo_path"},
         "resume_files": {
@@ -411,6 +546,45 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
         assert protected_columns <= set(body["redacted_columns"])
         assert protected_columns.isdisjoint(body["visible_columns"])
         assert all(protected_columns.isdisjoint(row) for row in body["rows"])
+
+    resume_detail = client.get(
+        f"/admin/database/tables/resume_files/rows/{resume_id}",
+        headers=it_headers,
+    )
+    assert resume_detail.status_code == 200
+    resume_body = resume_detail.json()
+    assert resume_body["row"]["parse_status"] == "parsed"
+    assert resume_body["related"]["candidate"] == {
+        "id": resume_body["row"]["candidate_id"],
+        "code": "PRIVATE-001",
+    }
+    assert {
+        "storage_key",
+        "original_filename",
+        "parsed_payload",
+        "resume_text",
+    } <= set(resume_body["redacted_columns"])
+    assert "original_filename" not in resume_body["row"]
+    assert client.get(
+        f"/admin/database/tables/resume_files/rows/{resume_id}?reveal_pii=true",
+        headers=it_headers,
+    ).status_code == 422
+
+    resume_reason = "協助 HR 確認履歷檔名與解析結果"
+    revealed_resume = client.get(
+        f"/admin/database/tables/resume_files/rows/{resume_id}?reveal_pii=true",
+        headers={**it_headers, "X-PII-Access-Reason": quote(resume_reason)},
+    )
+    assert revealed_resume.status_code == 200
+    revealed_resume_body = revealed_resume.json()
+    assert revealed_resume_body["row"]["original_filename"] == "private-name.pdf"
+    assert revealed_resume_body["row"]["parsed_payload"] == {
+        "name": "Private Candidate"
+    }
+    assert revealed_resume_body["related"]["candidate"]["name"] == "Private Candidate"
+    assert "storage_key" in revealed_resume_body["redacted_columns"]
+    assert "storage_key" not in revealed_resume_body["row"]
+    assert "resume_text" not in revealed_resume_body["row"]
 
     candidate_preview = client.get(
         "/admin/database/tables/candidates/rows?search=PRIVATE-001",

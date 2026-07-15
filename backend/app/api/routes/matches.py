@@ -9,6 +9,7 @@ from app.dependencies.auth import (
     enforce_department_scope,
     get_current_user,
     require_recruiting_manager,
+    require_recruiting_user,
 )
 from app.models import Candidate, JobApplication, JobRequisition, MatchResult, User
 from app.schemas.matching import (
@@ -60,6 +61,22 @@ def _match(db: Session, match_id: int) -> MatchResult:
     if not result:
         raise HTTPException(status_code=404, detail="Match not found")
     return result
+
+
+def _enforce_match_action_scope(db: Session, result: MatchResult, user: User) -> None:
+    _requisition(db, result.requisition_id, user)
+    if user.role != "manager":
+        return
+    application_id = db.scalar(
+        select(JobApplication.id)
+        .where(
+            JobApplication.requisition_id == result.requisition_id,
+            JobApplication.candidate_id == result.candidate_id,
+        )
+        .limit(1)
+    )
+    if application_id is None:
+        raise HTTPException(status_code=403, detail="Candidate did not apply to this requisition")
 
 
 @router.get("/requisitions/{requisition_id}/matches", response_model=MatchList)
@@ -241,10 +258,10 @@ def match_feedback(
     match_id: int,
     payload: MatchFeedback,
     db: Session = Depends(get_db),
-    user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_user),
 ) -> MatchResult:
     result = _match(db, match_id)
-    _requisition(db, result.requisition_id, user)
+    _enforce_match_action_scope(db, result, user)
     result.status = payload.status
     result.feedback_reason = payload.reason.strip() if payload.reason else None
     result.feedback_at = datetime.now(UTC)
@@ -258,10 +275,10 @@ def update_match_status(
     match_id: int,
     payload: MatchStatusUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_recruiting_manager),
+    user: User = Depends(require_recruiting_user),
 ) -> MatchResult:
     result = _match(db, match_id)
-    _requisition(db, result.requisition_id, user)
+    _enforce_match_action_scope(db, result, user)
     result.status = payload.status
     db.commit()
     db.refresh(result)

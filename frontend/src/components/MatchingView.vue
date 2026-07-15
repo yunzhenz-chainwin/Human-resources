@@ -118,7 +118,7 @@ function nullableNumber(value: number | null | string) {
 }
 
 async function saveCriteria() {
-  if (!selectedJobId.value || !criteria.value) return
+  if (!props.canConfigure || !selectedJobId.value || !criteria.value) return
   savingCriteria.value = true
   error.value = ''
   try {
@@ -143,7 +143,7 @@ async function saveCriteria() {
 }
 
 async function rematch() {
-  if (!selectedJobId.value) return
+  if (!props.canConfigure || !selectedJobId.value) return
   recalculating.value = true
   error.value = ''
   try {
@@ -226,7 +226,7 @@ function gateReasons(match: MatchDto) {
       <button v-if="props.canConfigure" class="button secondary" @click="showCriteria = !showCriteria">{{ showCriteria ? '收合條件' : '設定 HR 媒合條件' }}</button>
     </div>
 
-    <form v-if="showCriteria && criteria" class="criteria-panel panel" @submit.prevent="saveCriteria">
+    <form v-if="props.canConfigure && showCriteria && criteria" class="criteria-panel panel" @submit.prevent="saveCriteria">
       <header><div><strong>HR 媒合條件</strong><span>儲存後系統會立即用新條件重新計算全部人才。</span></div></header>
       <div class="criteria-grid">
         <label class="wide">必要技能（逗號分隔）<input v-model="requiredSkillsText" placeholder="例如：Python、SQL"><small>少一項即標示為未通過；仍保留參考分數。</small></label>
@@ -249,7 +249,7 @@ function gateReasons(match: MatchDto) {
     <div class="match-toolbar panel">
       <label>選擇職缺<select v-model="selectedJobId"><option :value="null" disabled>請選擇</option><option v-for="job in jobs" :key="job.id" :value="job.id">{{ job.req_no }} · {{ job.title }}</option></select></label>
       <span>{{ selectedJob ? `${selectedJob.work_city} · ${selectedJob.skills?.join('、') || '尚未設定技能'}` : '尚未選擇職缺' }}</span>
-      <button class="button primary" :disabled="!selectedJobId || recalculating" @click="rematch">{{ recalculating ? '計算中…' : overview?.computed_count ? '重新計算全部人才' : '計算全部人才' }}</button>
+      <button v-if="props.canConfigure" class="button primary" :disabled="!selectedJobId || recalculating" @click="rematch">{{ recalculating ? '計算中…' : overview?.computed_count ? '重新計算全部人才' : '計算全部人才' }}</button>
     </div>
     <div class="result-filters panel">
       <label>搜尋人才<input v-model="talentSearch" placeholder="姓名、編號或職稱"></label>
