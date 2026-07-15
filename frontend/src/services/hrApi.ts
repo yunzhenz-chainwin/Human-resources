@@ -17,6 +17,27 @@ export type CandidateDto = {
   created_at: string
   updated_at: string
 }
+export type CandidateEducationDto = {
+  id: number
+  school: string
+  major: string | null
+  degree: string | null
+  start_ym: string | null
+  end_ym: string | null
+  is_graduated: boolean | null
+  sort_order: number
+}
+export type CandidateExperienceDto = {
+  id: number
+  company: string
+  title: string
+  industry: string | null
+  start_ym: string | null
+  end_ym: string | null
+  years: number | null
+  description: string | null
+  sort_order: number
+}
 export type CandidateWrite = {
   name?: string
   email?: string | null
@@ -104,6 +125,10 @@ export type ApplicationDto = {
   status: string
   source: string
   applied_at: string
+  resume_id: number | null
+  cover_letter: string | null
+  linkedin_url: string | null
+  portfolio_url: string | null
   interview_at: string | null
   interview_result: InterviewResult | null
   interview_notes: string | null
@@ -112,7 +137,48 @@ export type ApplicationDto = {
   candidate: CandidateDto
   requisition: RequisitionDto
 }
+export type CandidateResumeSummaryDto = {
+  id: number
+  target_requisition_id: number | null
+  target_requisition_title: string | null
+  original_filename: string | null
+  source_platform: string
+  parse_status: string
+  resume_url: string | null
+  has_file: boolean
+}
+export type CandidateApplicationDetailDto = {
+  id: number
+  requisition_id: number
+  status: string
+  source: string
+  applied_at: string
+  resume_id: number | null
+  cover_letter: string | null
+  linkedin_url: string | null
+  portfolio_url: string | null
+  requisition: RequisitionDto
+  resume: CandidateResumeSummaryDto | null
+}
+export type CandidateDetailDto = CandidateDto & {
+  current_company: string | null
+  highest_education: string | null
+  expected_title: string | null
+  expected_cities: string[] | null
+  expected_salary_min: number | null
+  expected_salary_max: number | null
+  salary_type: string | null
+  availability: string | null
+  job_type: string | null
+  summary: string | null
+  skills: string[]
+  educations: CandidateEducationDto[]
+  experiences: CandidateExperienceDto[]
+  applications: CandidateApplicationDetailDto[]
+  resumes: CandidateResumeSummaryDto[]
+}
 export type ApplicationWrite = { candidate_id: number; requisition_id: number }
+export type ApplicationAssignmentWrite = { requisition_id: number }
 export type InterviewResult = 'pending' | 'advance' | 'hold' | 'rejected' | 'offered' | 'hired' | 'no_show' | 'cancelled'
 export type InterviewStage = 'hr' | 'manager'
 export type InterviewStageDto = {
@@ -213,7 +279,7 @@ async function apiBlob(path: string, retry = true): Promise<Blob> {
     await authSession.refreshAccess(accessToken)
     return apiBlob(path, false)
   }
-  if (!response.ok) throw new Error(`無法讀取人才照片（${response.status}）`)
+  if (!response.ok) throw new Error(`無法讀取檔案（${response.status}）`)
   return response.blob()
 }
 
@@ -223,7 +289,7 @@ export const hrApi = {
     const query = new URLSearchParams({ page: String(params.page || 1), page_size: String(params.page_size || 100) })
     return apiRequest<CandidateDto[]>(`/candidates?${query}`)
   },
-  candidate: (id: number) => apiRequest<CandidateDto>(`/candidates/${id}`),
+  candidate: (id: number) => apiRequest<CandidateDetailDto>(`/candidates/${id}`),
   saveCandidate: (payload: CandidateWrite, id?: number) => apiRequest<CandidateDto>(`/candidates${id ? `/${id}` : ''}`, {
     method: id ? 'PATCH' : 'POST', body: JSON.stringify(payload),
   }),
@@ -258,6 +324,10 @@ export const hrApi = {
   createApplication: (payload: ApplicationWrite) => apiRequest<ApplicationDto>('/applications', {
     method: 'POST', body: JSON.stringify(payload),
   }),
+  reassignApplication: (id: number, payload: ApplicationAssignmentWrite) => apiRequest<ApplicationDto>(`/applications/${id}/assignment`, {
+    method: 'PATCH', body: JSON.stringify(payload),
+  }),
+  downloadResume: (id: number) => apiBlob(`/resumes/${id}/file`),
   updateApplicationInterview: (id: number, payload: InterviewWrite) => apiRequest<ApplicationDto>(`/applications/${id}/interview`, {
     method: 'PATCH', body: JSON.stringify(payload),
   }),

@@ -547,7 +547,7 @@ def _user_reads(db: Session, users: list[User]) -> list[UserRead]:
             select(AuditLog.resource_id, func.max(AuditLog.created_at))
             .where(
                 AuditLog.resource_type == "user",
-                AuditLog.action == "password.reset",
+                AuditLog.action.in_(("password.reset", "password.set")),
                 AuditLog.resource_id.in_([str(user_id) for user_id in user_ids]),
             )
             .group_by(AuditLog.resource_id)
@@ -608,6 +608,7 @@ def create_user(
 def update_user(
     user_id: int,
     payload: UserUpdate,
+    request: Request,
     actor: User = Depends(user_admin),
     db: Session = Depends(get_db),
 ) -> User:
@@ -616,16 +617,17 @@ def update_user(
         raise HTTPException(status_code=404, detail="User not found")
     values = payload.model_dump(exclude_unset=True)
     password = values.pop("password", None)
+    password_confirm = values.pop("password_confirm", None)
     if password:
         if actor.role not in {"admin", "it"}:
             raise HTTPException(
                 status_code=403,
-                detail="Only system administrators can reset passwords",
+                detail="Only system administrators can set passwords",
             )
-        raise HTTPException(
-            status_code=422,
-            detail="Use the secure temporary password reset endpoint",
-        )
+        if password_confirm is None or not secrets.compare_digest(password, password_confirm):
+            raise HTTPException(status_code=422, detail="Password confirmation does not match")
+    elif password_confirm is not None:
+        raise HTTPException(status_code=422, detail="Password is required with confirmation")
     _enforce_hr_user_scope(actor, values.get("role", user.role), user)
     _require_manager_department(
         values.get("role", user.role),
@@ -637,7 +639,37 @@ def update_user(
         setattr(user, key, value.strip() if isinstance(value, str) else value)
     if actor.id == user.id and not user.is_active:
         raise HTTPException(status_code=422, detail="Admin cannot deactivate own account")
-    _commit_audit(db, actor, "update", "user", user.id, {"fields": sorted(values)})
+
+    if values:
+        write_audit(db, actor, "update", "user", user.id, details={"fields": sorted(values)})
+    if password:
+        user.password_hash = hash_password(password)
+        revoked_at = datetime.now(UTC)
+        revoked = db.execute(
+            update(RefreshToken)
+            .where(
+                RefreshToken.user_id == user.id,
+                RefreshToken.revoked_at.is_(None),
+            )
+            .values(revoked_at=revoked_at)
+        )
+        sessions_revoked = max(int(revoked.rowcount or 0), 0)
+        write_audit(
+            db,
+            actor,
+            "password.set",
+            "user",
+            user.id,
+            department_id=user.department_id,
+            details={
+                "target_username": user.username,
+                "sessions_revoked": sessions_revoked,
+                "administrator_chosen_password": True,
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    db.commit()
     db.refresh(user)
     return user
 

@@ -13,10 +13,12 @@ export default defineConfig(({ mode }) => {
     .split(',')
     .map(value => value.trim())
     .filter(Boolean)
+  const machineHostname = hostname()
   const allowedHosts = [...new Set([
     'localhost',
     '127.0.0.1',
-    hostname().toLowerCase(),
+    machineHostname,
+    machineHostname.toLowerCase(),
     '.trycloudflare.com',
     ...extraAllowedHosts,
   ])]

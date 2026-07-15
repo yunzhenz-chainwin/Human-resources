@@ -3,9 +3,21 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
@@ -35,6 +47,7 @@ from app.schemas.hr import (
 )
 from app.services.applications import normalize_email, normalize_phone
 from app.services.resume_parser import PARSER_VERSION, parse_resume
+from app.services.security import write_audit
 from app.services.storage import (
     PreparedResumeUpload,
     get_storage_provider,
@@ -111,6 +124,27 @@ def _enforce_resume_scope(db: Session, user: User, resume: ResumeFile) -> None:
         enforce_candidate_scope(db, user, resume.candidate_id)
         return
     raise HTTPException(status_code=403, detail="Outside resume scope")
+
+
+def _enforce_targeted_resume_scope(db: Session, user: User, resume: ResumeFile) -> None:
+    """Downloads require an explicit requisition target for department managers."""
+
+    if user.role in GLOBAL_RECRUITING_ROLES:
+        return
+    if (
+        user.role != "manager"
+        or user.department_id is None
+        or resume.target_requisition_id is None
+        or resume.parse_status != "confirmed"
+    ):
+        raise HTTPException(status_code=403, detail="Outside resume scope")
+    department_id = db.scalar(
+        select(JobRequisition.department_id).where(
+            JobRequisition.id == resume.target_requisition_id
+        )
+    )
+    if department_id != user.department_id:
+        raise HTTPException(status_code=403, detail="Outside resume scope")
 
 
 def _resolve_target_requisition(
@@ -309,6 +343,52 @@ def list_resumes(
         )
     statement = statement.offset((page - 1) * page_size).limit(page_size)
     return list(db.scalars(statement).all())
+
+
+@router.get("/{resume_id}/file", response_class=StreamingResponse)
+def download_resume_file(
+    resume_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_user),
+) -> StreamingResponse:
+    resume = db.get(ResumeFile, resume_id)
+    if resume is None:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    _enforce_targeted_resume_scope(db, user, resume)
+    if not resume.storage_key:
+        raise HTTPException(status_code=404, detail="This resume has no downloadable file")
+    write_audit(
+        db,
+        user,
+        "resume.download",
+        "resume",
+        resume.id,
+        user.department_id,
+        details={
+            "candidate_id": resume.candidate_id,
+            "target_requisition_id": resume.target_requisition_id,
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    db.commit()
+
+    def chunks() -> Iterator[bytes]:
+        with _stored_path(resume) as path, path.open("rb") as stored_file:
+            while chunk := stored_file.read(1024 * 1024):
+                yield chunk
+
+    filename = resume.original_filename or f"resume-{resume.id}"
+    return StreamingResponse(
+        chunks(),
+        media_type=resume.mime or "application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 @router.get("/{resume_id}", response_model=ResumeRead)

@@ -63,6 +63,8 @@ export async function createApplication(
   if (form.current_title) body.append('current_title', form.current_title)
   if (form.total_years !== null) body.append('total_years', String(form.total_years))
   if (form.skills) body.append('skills', form.skills)
+  if (form.linkedin_url) body.append('linkedin_url', form.linkedin_url)
+  if (form.portfolio_url) body.append('portfolio_url', form.portfolio_url)
   if (form.cover_letter) body.append('cover_letter', form.cover_letter)
   body.append('consent', String(form.consent))
   body.append('source_platform', form.source_platform)

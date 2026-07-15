@@ -10,6 +10,7 @@ import {
   type IssueStatus,
   type SystemIssue,
 } from '../services/adminApi'
+import { formatApiDateTime, localDateKey, toLocalDateTimeInput } from '../utils/dateTime'
 
 const view = ref<'issues' | 'database'>('issues')
 const issues = ref<SystemIssue[]>([])
@@ -31,7 +32,7 @@ const unresolvedCount = computed(() => issues.value.filter(item => !['resolved',
 const resolvedCount = computed(() => issues.value.filter(item => ['resolved', 'closed'].includes(item.status)).length)
 const averageProgress = computed(() => issues.value.length ? Math.round(issues.value.reduce((sum, item) => sum + item.progress_percent, 0) / issues.value.length) : 0)
 const overdueCount = computed(() => {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDateKey()
   return issues.value.filter(item => item.expected_completion_date && item.expected_completion_date < today && item.progress_percent < 100).length
 })
 const filteredTables = computed(() => {
@@ -142,10 +143,16 @@ async function hideDetailPii() {
   privacyReason.value = ''
   await loadRowDetail(rowId)
 }
-function serializeRowValue(value: unknown) {
+function isDateTimeColumn(column: DatabaseColumn | undefined) {
+  return !!column && /DATETIME|TIMESTAMP/i.test(column.type)
+}
+function isApiDateTimeString(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(value)
+}
+function serializeRowValue(value: unknown, column: DatabaseColumn) {
   if (value === null || value === undefined) return ''
   if (typeof value === 'object') return JSON.stringify(value, null, 2)
-  if (typeof value === 'string' && /T\d{2}:\d{2}:\d{2}/.test(value)) return value.slice(0, 16)
+  if (isDateTimeColumn(column) && isApiDateTimeString(value)) return toLocalDateTimeInput(value)
   return String(value)
 }
 function defaultRowValue(column: DatabaseColumn) {
@@ -165,7 +172,7 @@ function openRowEditor(row?: Record<string, unknown>) {
   editingRowId.value = row && key ? row[key] as number | string : null
   rowValues.value = Object.fromEntries(editableColumns.value.map(column => [
     column.name,
-    row ? serializeRowValue(row[column.name]) : defaultRowValue(column),
+    row ? serializeRowValue(row[column.name], column) : defaultRowValue(column),
   ]))
   rowDialog.value = true
 }
@@ -187,6 +194,11 @@ function parseRowValue(column: DatabaseColumn) {
   if (/BOOL/i.test(column.type)) return raw === 'true'
   if (/INT/i.test(column.type)) return Number.parseInt(raw, 10)
   if (/NUMERIC|DECIMAL|FLOAT|REAL/i.test(column.type)) return Number(raw)
+  if (isDateTimeColumn(column)) {
+    const local = new Date(raw)
+    if (Number.isNaN(local.getTime())) throw new Error(`${column.name} 必須是有效日期時間`)
+    return local.toISOString()
+  }
   return raw
 }
 async function refreshSelectedTable(page = preview.value?.page || 1) {
@@ -236,11 +248,24 @@ async function save() {
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '儲存問題失敗' }
   finally { saving.value = false }
 }
-function date(value: string) { return new Intl.DateTimeFormat('zh-TW', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) }
+function date(value: string) { return formatApiDateTime(value, { dateStyle: 'short', timeStyle: 'short' }) }
 function dateOnly(value: string | null) { return value ? new Intl.DateTimeFormat('zh-TW', { dateStyle: 'medium' }).format(new Date(`${value}T00:00:00`)) : '未設定' }
-function display(value: unknown) {
+function databaseColumn(name: string) {
+  return selectedTableMeta.value?.columns.find(column => column.name === name)
+}
+function localizeNestedDateTimes(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(localizeNestedDateTimes)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, localizeNestedDateTimes(nested)]))
+  }
+  return isApiDateTimeString(value) ? formatApiDateTime(value) : value
+}
+function display(value: unknown, columnName?: string) {
   if (value === null || value === undefined) return '—'
-  if (typeof value === 'object') return JSON.stringify(value)
+  if (typeof value === 'object') return JSON.stringify(localizeNestedDateTimes(value))
+  if (isApiDateTimeString(value) && (!columnName || isDateTimeColumn(databaseColumn(columnName)))) {
+    return formatApiDateTime(value)
+  }
   return String(value)
 }
 const fieldLabels: Record<string, string> = {
@@ -256,9 +281,12 @@ const relatedLabels: Record<string, string> = {
   requester: '職缺申請人', approver: '職缺核准人',
 }
 function fieldLabel(name: string) { return fieldLabels[name] || name }
-function detailValue(value: unknown) {
+function detailValue(value: unknown, columnName?: string) {
   if (value === null || value === undefined || value === '') return '—'
-  if (typeof value === 'object') return JSON.stringify(value, null, 2)
+  if (typeof value === 'object') return JSON.stringify(localizeNestedDateTimes(value), null, 2)
+  if (isApiDateTimeString(value) && (!columnName || isDateTimeColumn(databaseColumn(columnName)))) {
+    return formatApiDateTime(value)
+  }
   return String(value)
 }
 function isLongValue(value: unknown) {
@@ -313,7 +341,7 @@ watch(view, next => {
           <details v-if="selectedTableMeta" class="schema-details"><summary>欄位結構（{{ selectedTableMeta.columns.length }}）</summary><div><span v-for="column in selectedTableMeta.columns" :key="column.name" :class="{ redacted: column.redacted, revealable: column.revealable }"><code>{{ column.name }}</code> {{ column.type }}<small>{{ column.primary_key ? ' PK' : '' }}{{ column.nullable ? ' 可空' : ' 必填' }}{{ column.revealable ? ' · 可授權顯示' : column.redacted ? ' · 永久遮蔽' : '' }}</small></span></div></details>
           <p v-if="selectedTableMeta?.protection_reason" class="table-protection">🔒 {{ selectedTableMeta.protection_reason }}</p>
           <div v-if="previewLoading" class="empty">讀取資料中…</div>
-          <div v-else-if="preview" class="table-scroll"><table><thead><tr><th v-for="column in preview.visible_columns" :key="column">{{ column }}</th><th v-if="primaryKeyColumn || selectedTableMeta?.can_update || selectedTableMeta?.can_delete" class="row-actions-head">操作</th></tr></thead><tbody><tr v-for="(row, index) in preview.rows" :key="index" :class="{ 'detail-enabled': primaryKeyColumn }" :tabindex="primaryKeyColumn ? 0 : undefined" @dblclick="openRowDetail(row)" @keydown.enter.prevent="openRowDetail(row)"><td v-for="column in preview.visible_columns" :key="column" :title="display(row[column])">{{ display(row[column]) }}</td><td v-if="primaryKeyColumn || selectedTableMeta?.can_update || selectedTableMeta?.can_delete" class="row-actions"><button v-if="primaryKeyColumn" class="detail-button" :data-testid="`database-row-detail-${index}`" @click.stop="openRowDetail(row)">詳細</button><button v-if="selectedTableMeta?.can_update" @click.stop="openRowEditor(row)">編輯</button><button v-if="selectedTableMeta?.can_delete" class="danger" @click.stop="deleteRow(row)">刪除</button></td></tr></tbody></table><p v-if="!preview.rows.length" class="empty">沒有符合條件的資料。</p></div>
+          <div v-else-if="preview" class="table-scroll"><table><thead><tr><th v-for="column in preview.visible_columns" :key="column">{{ column }}</th><th v-if="primaryKeyColumn || selectedTableMeta?.can_update || selectedTableMeta?.can_delete" class="row-actions-head">操作</th></tr></thead><tbody><tr v-for="(row, index) in preview.rows" :key="index" :class="{ 'detail-enabled': primaryKeyColumn }" :tabindex="primaryKeyColumn ? 0 : undefined" @dblclick="openRowDetail(row)" @keydown.enter.prevent="openRowDetail(row)"><td v-for="column in preview.visible_columns" :key="column" :title="display(row[column], column)">{{ display(row[column], column) }}</td><td v-if="primaryKeyColumn || selectedTableMeta?.can_update || selectedTableMeta?.can_delete" class="row-actions"><button v-if="primaryKeyColumn" class="detail-button" :data-testid="`database-row-detail-${index}`" @click.stop="openRowDetail(row)">詳細</button><button v-if="selectedTableMeta?.can_update" @click.stop="openRowEditor(row)">編輯</button><button v-if="selectedTableMeta?.can_delete" class="danger" @click.stop="deleteRow(row)">刪除</button></td></tr></tbody></table><p v-if="!preview.rows.length" class="empty">沒有符合條件的資料。</p></div>
           <div v-if="preview && totalPages > 1" class="pagination"><button :disabled="preview.page <= 1" @click="openTable(selectedTable, preview.page - 1)">上一頁</button><span>第 {{ preview.page }} / {{ totalPages }} 頁</span><button :disabled="preview.page >= totalPages" @click="openTable(selectedTable, preview.page + 1)">下一頁</button></div>
           <p v-if="!preview && !previewLoading" class="empty">請從左側選擇資料表，查看結構與分頁資料。</p>
         </main>
@@ -325,7 +353,7 @@ watch(view, next => {
 
   <div v-if="rowDialog" class="modal-overlay" @click.self="rowDialog = false" @keydown.esc="rowDialog = false"><form class="modal-card row-editor-modal" role="dialog" aria-modal="true" aria-labelledby="row-dialog-title" @submit.prevent="saveRow"><header><div><small>DATABASE EDITOR</small><h2 id="row-dialog-title">{{ rowMode === 'create' ? `新增${selectedTableMeta?.display_name || '資料'}` : `編輯資料 #${editingRowId}` }}</h2></div><button type="button" aria-label="關閉資料編輯視窗" @click="rowDialog = false">×</button></header><p class="row-editor-note">只顯示後端允許維護的欄位；關聯欄位請填寫現有資料的 ID，JSON 欄位請使用有效的 JSON 格式。</p><div class="row-editor-grid"><label v-for="column in editableColumns" :key="column.name" :class="{ wide: rowInputKind(column) === 'textarea' }"><span>{{ column.name }} <b v-if="!column.nullable">*</b></span><small>{{ column.type }}{{ column.nullable ? ' · 可留空' : '' }}</small><select v-if="rowInputKind(column) === 'boolean'" v-model="rowValues[column.name]"><option value="true">true</option><option value="false">false</option></select><textarea v-else-if="rowInputKind(column) === 'textarea'" v-model="rowValues[column.name]" :required="!column.nullable" rows="4"></textarea><input v-else v-model="rowValues[column.name]" :type="rowInputKind(column)" :required="!column.nullable" :step="rowInputKind(column) === 'number' ? 'any' : undefined"></label></div><footer><button type="button" class="button secondary" @click="rowDialog = false">取消</button><button class="button primary" :disabled="rowSaving">{{ rowSaving ? '儲存中…' : '確認儲存' }}</button></footer></form></div>
 
-  <div v-if="detailDialog" class="modal-overlay detail-overlay" @click.self="closeRowDetail" @keydown.esc="closeRowDetail"><section class="modal-card row-detail-modal" role="dialog" aria-modal="true" aria-labelledby="row-detail-title"><header><div><small>DATABASE RECORD</small><h2 id="row-detail-title">{{ rowDetail?.display_name || selectedTableMeta?.display_name }}詳細資料</h2><p v-if="rowDetail">資料列 #{{ rowDetail.row_id }} · {{ rowDetail.table_name }}</p></div><button type="button" aria-label="關閉資料詳細視窗" @click="closeRowDetail">×</button></header><div v-if="detailLoading" class="empty detail-loading">讀取完整資料中…</div><div v-else-if="rowDetail" class="row-detail-body"><div class="detail-toolbar"><p>{{ rowDetail.pii_revealed ? '已依查閱原因暫時顯示可授權個資，本次操作已留下稽核紀錄。' : `敏感欄位維持遮罩；共 ${rowDetail.redacted_columns.length} 欄未顯示。` }}</p><div><button v-if="revealableColumns.length && !rowDetail.pii_revealed" class="button privacy-button" @click="requestPiiReveal('detail')">填寫原因並顯示個資</button><button v-if="rowDetail.pii_revealed" class="button privacy-button active" @click="hideDetailPii">重新遮罩</button></div></div><section v-if="Object.keys(rowDetail.related).length" class="related-section"><h3>關聯資料</h3><div class="related-grid"><article v-for="(value, name) in rowDetail.related" :key="name"><small>{{ relatedLabels[name] || name }}</small><pre>{{ detailValue(value) }}</pre></article></div></section><section class="field-section"><h3>完整欄位</h3><div class="detail-grid"><article v-for="(value, name) in rowDetail.row" :key="name" :class="{ wide: isLongValue(value) }"><small>{{ fieldLabel(name) }}<code>{{ name }}</code></small><pre>{{ detailValue(value) }}</pre></article><article v-for="name in rowDetail.redacted_columns" :key="`redacted-${name}`" class="redacted-field"><small>{{ fieldLabel(name) }}<code>{{ name }}</code></small><strong>🔒 敏感欄位已遮罩</strong></article></div></section></div><footer><span>密碼雜湊、Token、Secret、儲存路徑與履歷原文永久不顯示。</span><button class="button primary" type="button" @click="closeRowDetail">關閉</button></footer></section></div>
+  <div v-if="detailDialog" class="modal-overlay detail-overlay" @click.self="closeRowDetail" @keydown.esc="closeRowDetail"><section class="modal-card row-detail-modal" role="dialog" aria-modal="true" aria-labelledby="row-detail-title"><header><div><small>DATABASE RECORD</small><h2 id="row-detail-title">{{ rowDetail?.display_name || selectedTableMeta?.display_name }}詳細資料</h2><p v-if="rowDetail">資料列 #{{ rowDetail.row_id }} · {{ rowDetail.table_name }}</p></div><button type="button" aria-label="關閉資料詳細視窗" @click="closeRowDetail">×</button></header><div v-if="detailLoading" class="empty detail-loading">讀取完整資料中…</div><div v-else-if="rowDetail" class="row-detail-body"><div class="detail-toolbar"><p>{{ rowDetail.pii_revealed ? '已依查閱原因暫時顯示可授權個資，本次操作已留下稽核紀錄。' : `敏感欄位維持遮罩；共 ${rowDetail.redacted_columns.length} 欄未顯示。` }}</p><div><button v-if="revealableColumns.length && !rowDetail.pii_revealed" class="button privacy-button" @click="requestPiiReveal('detail')">填寫原因並顯示個資</button><button v-if="rowDetail.pii_revealed" class="button privacy-button active" @click="hideDetailPii">重新遮罩</button></div></div><section v-if="Object.keys(rowDetail.related).length" class="related-section"><h3>關聯資料</h3><div class="related-grid"><article v-for="(value, name) in rowDetail.related" :key="name"><small>{{ relatedLabels[name] || name }}</small><pre>{{ detailValue(value) }}</pre></article></div></section><section class="field-section"><h3>完整欄位</h3><div class="detail-grid"><article v-for="(value, name) in rowDetail.row" :key="name" :class="{ wide: isLongValue(value) }"><small>{{ fieldLabel(name) }}<code>{{ name }}</code></small><pre>{{ detailValue(value, name) }}</pre></article><article v-for="name in rowDetail.redacted_columns" :key="`redacted-${name}`" class="redacted-field"><small>{{ fieldLabel(name) }}<code>{{ name }}</code></small><strong>🔒 敏感欄位已遮罩</strong></article></div></section></div><footer><span>密碼雜湊、Token、Secret、儲存路徑與履歷原文永久不顯示。</span><button class="button primary" type="button" @click="closeRowDetail">關閉</button></footer></section></div>
 
   <div v-if="privacyDialog" class="modal-overlay" @click.self="privacyDialog = false" @keydown.esc="privacyDialog = false"><form class="modal-card privacy-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-dialog-title" @submit.prevent="confirmPiiReveal"><header><div><small>PRIVACY ACCESS</small><h2 id="privacy-dialog-title">暫時顯示招募個資</h2></div><button type="button" aria-label="關閉個資授權視窗" @click="privacyDialog = false">×</button></header><div class="privacy-form"><p>依所選資料表顯示人才主檔，或履歷檔名、解析欄位及辨識依據。每次查閱都會記錄帳號、時間、IP、原因與顯示欄位；密碼、Token、Secret、儲存路徑與履歷原文仍永久遮罩。</p><label>查閱原因 *<textarea v-model="privacyReason" minlength="5" maxlength="200" rows="4" required placeholder="例如：協助 HR 排查履歷解析或人才同步問題"></textarea><small>{{ privacyReason.trim().length }} / 200</small></label></div><footer><button type="button" class="button secondary" @click="privacyDialog = false">保持遮罩</button><button class="button privacy-button" :disabled="privacyReason.trim().length < 5">確認並顯示</button></footer></form></div>
 </template>

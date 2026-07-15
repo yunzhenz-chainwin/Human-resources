@@ -46,6 +46,33 @@ class CandidateRead(BaseModel):
     updated_at: datetime
 
 
+class CandidateEducationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    school: str
+    major: str | None
+    degree: str | None
+    start_ym: str | None
+    end_ym: str | None
+    is_graduated: bool | None
+    sort_order: int
+
+
+class CandidateExperienceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    company: str
+    title: str
+    industry: str | None
+    start_ym: str | None
+    end_ym: str | None
+    years: float | None
+    description: str | None
+    sort_order: int
+
+
 class CandidateUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     email: str | None = Field(default=None, max_length=255)
@@ -53,6 +80,17 @@ class CandidateUpdate(BaseModel):
     city: str | None = Field(default=None, max_length=50)
     current_title: str | None = Field(default=None, max_length=100)
     total_years: float | None = Field(default=None, ge=0, le=80)
+    source: Literal[
+        "manual",
+        "p104",
+        "p1111",
+        "generic",
+        "direct",
+        "career_site",
+        "referral",
+        "walk_in",
+        "other",
+    ] | None = None
     status: str | None = Field(default=None, max_length=20)
 
 
@@ -118,6 +156,49 @@ class RequisitionRead(BaseModel):
     status: str
     published_at: datetime | None
     created_at: datetime
+
+
+class CandidateResumeSummaryRead(BaseModel):
+    id: int
+    target_requisition_id: int | None
+    target_requisition_title: str | None
+    original_filename: str | None
+    source_platform: str
+    parse_status: str
+    resume_url: str | None
+    has_file: bool
+
+
+class CandidateApplicationDetailRead(BaseModel):
+    id: int
+    requisition_id: int
+    status: str
+    source: str
+    applied_at: datetime
+    resume_id: int | None
+    cover_letter: str | None
+    linkedin_url: str | None
+    portfolio_url: str | None
+    requisition: RequisitionRead
+    resume: CandidateResumeSummaryRead | None
+
+
+class CandidateDetailRead(CandidateRead):
+    current_company: str | None
+    highest_education: str | None
+    expected_title: str | None
+    expected_cities: list[str] | None
+    expected_salary_min: int | None
+    expected_salary_max: int | None
+    salary_type: str | None
+    availability: str | None
+    job_type: str | None
+    summary: str | None
+    skills: list[str]
+    educations: list[CandidateEducationRead]
+    experiences: list[CandidateExperienceRead]
+    applications: list[CandidateApplicationDetailRead]
+    resumes: list[CandidateResumeSummaryRead]
 
 
 class RequisitionUpdate(BaseModel):
@@ -280,6 +361,14 @@ class ApplicationCreate(BaseModel):
     requisition_id: int = Field(gt=0)
 
 
+class ApplicationAssignmentUpdate(BaseModel):
+    """Move an existing application to the HR-selected target requisition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requisition_id: int = Field(gt=0)
+
+
 class ApplicationInterviewUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -317,6 +406,10 @@ class ApplicationRead(BaseModel):
     status: str
     source: str
     applied_at: datetime
+    resume_id: int | None
+    cover_letter: str | None
+    linkedin_url: str | None
+    portfolio_url: str | None
     interview_at: datetime | None
     interview_result: InterviewResult | None
     interview_notes: str | None

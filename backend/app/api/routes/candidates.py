@@ -1,12 +1,13 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import fitz
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import get_settings
 from app.db.session import get_db
@@ -18,13 +19,25 @@ from app.dependencies.auth import (
     require_recruiting_manager,
     require_recruiting_user,
 )
-from app.models import Candidate, CandidateActivity, Department, User
+from app.models import (
+    Candidate,
+    CandidateActivity,
+    Department,
+    JobApplication,
+    JobRequisition,
+    ResumeFile,
+    User,
+)
 from app.schemas.hr import (
     CandidateActivityCreate,
     CandidateActivityRead,
+    CandidateApplicationDetailRead,
     CandidateCreate,
+    CandidateDetailRead,
     CandidateRead,
+    CandidateResumeSummaryRead,
     CandidateUpdate,
+    RequisitionRead,
 )
 from app.services.applications import normalize_email, normalize_phone
 from app.services.security import write_audit
@@ -40,6 +53,15 @@ PHOTO_TYPES = {
         lambda data: len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP",
     ),
 }
+
+
+def _safe_external_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    return value
 
 
 def _photo_candidate(db: Session, user: User, candidate_id: int) -> Candidate:
@@ -160,16 +182,127 @@ def create_candidate(
     return candidate
 
 
-@router.get("/{candidate_id}", response_model=CandidateRead)
+@router.get("/{candidate_id}", response_model=CandidateDetailRead)
 def get_candidate(
     candidate_id: int,
     db: Session = Depends(get_db),
-    _audited_user: object = Depends(audit_pii_read),
-) -> Candidate:
-    candidate = db.get(Candidate, candidate_id)
+    audited_user: User = Depends(audit_pii_read),
+) -> CandidateDetailRead:
+    candidate = db.scalar(
+        select(Candidate)
+        .options(
+            selectinload(Candidate.educations),
+            selectinload(Candidate.experiences),
+            selectinload(Candidate.skills),
+        )
+        .where(Candidate.id == candidate_id)
+    )
     if not candidate or candidate.deleted_at:
         raise HTTPException(status_code=404, detail="人才不存在")
-    return candidate
+    manager_department_id = (
+        audited_user.department_id
+        if audited_user is not None and audited_user.role == "manager"
+        else None
+    )
+
+    application_statement = (
+        select(JobApplication, JobRequisition, ResumeFile)
+        .join(JobRequisition, JobRequisition.id == JobApplication.requisition_id)
+        .outerjoin(ResumeFile, ResumeFile.id == JobApplication.resume_id)
+        .options(selectinload(JobRequisition.department))
+        .where(JobApplication.candidate_id == candidate.id)
+        .order_by(JobApplication.created_at.desc(), JobApplication.id.desc())
+    )
+    if manager_department_id is not None:
+        application_statement = application_statement.where(
+            JobRequisition.department_id == manager_department_id
+        )
+
+    applications: list[CandidateApplicationDetailRead] = []
+    for application, requisition, resume in db.execute(application_statement).all():
+        scoped_resume = resume
+        if (
+            manager_department_id is not None
+            and resume is not None
+            and (
+                resume.target_requisition_id != requisition.id
+                or resume.parse_status != "confirmed"
+            )
+        ):
+            scoped_resume = None
+        applications.append(
+            CandidateApplicationDetailRead(
+                id=application.id,
+                requisition_id=application.requisition_id,
+                status=application.status,
+                source=application.source,
+                applied_at=application.created_at,
+                resume_id=scoped_resume.id if scoped_resume is not None else None,
+                cover_letter=application.cover_letter,
+                linkedin_url=_safe_external_url(application.linkedin_url),
+                portfolio_url=_safe_external_url(application.portfolio_url),
+                requisition=RequisitionRead.model_validate(requisition),
+                resume=(
+                    CandidateResumeSummaryRead(
+                        id=scoped_resume.id,
+                        target_requisition_id=scoped_resume.target_requisition_id,
+                        target_requisition_title=requisition.title,
+                        original_filename=scoped_resume.original_filename,
+                        source_platform=scoped_resume.source_platform,
+                        parse_status=scoped_resume.parse_status,
+                        resume_url=_safe_external_url(scoped_resume.resume_url),
+                        has_file=bool(scoped_resume.storage_key),
+                    )
+                    if scoped_resume is not None
+                    else None
+                ),
+            )
+        )
+
+    resume_statement = (
+        select(ResumeFile, JobRequisition)
+        .outerjoin(JobRequisition, JobRequisition.id == ResumeFile.target_requisition_id)
+        .where(ResumeFile.candidate_id == candidate.id)
+        .order_by(ResumeFile.uploaded_at.desc(), ResumeFile.id.desc())
+    )
+    if manager_department_id is not None:
+        resume_statement = resume_statement.where(
+            ResumeFile.parse_status == "confirmed",
+            JobRequisition.department_id == manager_department_id,
+        )
+    resumes = [
+        CandidateResumeSummaryRead(
+            id=resume.id,
+            target_requisition_id=resume.target_requisition_id,
+            target_requisition_title=requisition.title if requisition is not None else None,
+            original_filename=resume.original_filename,
+            source_platform=resume.source_platform,
+            parse_status=resume.parse_status,
+            resume_url=_safe_external_url(resume.resume_url),
+            has_file=bool(resume.storage_key),
+        )
+        for resume, requisition in db.execute(resume_statement).all()
+    ]
+
+    base = CandidateRead.model_validate(candidate).model_dump()
+    return CandidateDetailRead(
+        **base,
+        current_company=candidate.current_company,
+        highest_education=candidate.highest_education,
+        expected_title=candidate.expected_title,
+        expected_cities=candidate.expected_cities,
+        expected_salary_min=candidate.expected_salary_min,
+        expected_salary_max=candidate.expected_salary_max,
+        salary_type=candidate.salary_type,
+        availability=candidate.availability,
+        job_type=candidate.job_type,
+        summary=candidate.summary,
+        skills=[skill.skill for skill in candidate.skills],
+        educations=sorted(candidate.educations, key=lambda item: (item.sort_order, item.id)),
+        experiences=sorted(candidate.experiences, key=lambda item: (item.sort_order, item.id)),
+        applications=applications,
+        resumes=resumes,
+    )
 
 
 @router.patch("/{candidate_id}", response_model=CandidateRead)

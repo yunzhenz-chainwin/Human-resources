@@ -1,9 +1,25 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { createApplication, getJob, getJobs } from './api'
 import type { ApplicationForm, Job } from './types'
 
 type View = 'home' | 'jobs' | 'detail' | 'apply' | 'success'
+type JourneyAction = 'jobs' | 'talent'
+type JourneyStepId = 1 | 2 | 3 | 4
+
+interface JourneyStep {
+  id: JourneyStepId
+  eyebrow: string
+  title: string
+  description: string
+  cta: string
+  action: JourneyAction
+  x: number
+  y: number
+  compactX: number
+  compactY: number
+}
+
 const view = ref<View>('home')
 const jobs = ref<Job[]>([])
 const selectedJob = ref<Job | null>(null)
@@ -20,6 +36,61 @@ const resultId = ref<number | undefined>()
 const fileInput = ref<HTMLInputElement | null>(null)
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 const ALLOWED_EXTENSIONS = ['pdf', 'doc', 'docx']
+const compactJourney = ref(false)
+const journeyRoadPath = computed(() => compactJourney.value
+  ? 'M 68 70 C 215 32 324 75 282 170 C 240 265 115 225 78 320 C 43 410 185 478 282 430'
+  : 'M 92 288 C 160 288 176 112 270 112 C 365 112 372 258 486 258 C 584 258 584 92 680 92')
+const journeySteps: JourneyStep[] = [
+  {
+    id: 1,
+    eyebrow: '先找到方向',
+    title: '探索機會',
+    description: '從職缺、部門與地點開始，看看哪個機會貼近你的下一步。',
+    cta: '查看開放職缺',
+    action: 'jobs',
+    x: 92,
+    y: 288,
+    compactX: 68,
+    compactY: 70,
+  },
+  {
+    id: 2,
+    eyebrow: '讓我們認識你',
+    title: '留下資料',
+    description: '沒有完全吻合的職缺也沒關係，留下基本資料與履歷，加入人才庫。',
+    cta: '加入人才庫',
+    action: 'talent',
+    x: 270,
+    y: 112,
+    compactX: 282,
+    compactY: 170,
+  },
+  {
+    id: 3,
+    eyebrow: '由招募團隊接手',
+    title: 'HR媒合',
+    description: 'HR 會依經歷、技能與職涯期待比對職缺，找到合適機會再與你聯繫。',
+    cta: '建立人才資料',
+    action: 'talent',
+    x: 486,
+    y: 258,
+    compactX: 78,
+    compactY: 320,
+  },
+  {
+    id: 4,
+    eyebrow: '一起確認適合度',
+    title: '展開對話',
+    description: '與 HR 或用人團隊交流工作內容、團隊文化與下一步，雙向確認是否適合。',
+    cta: '看看目前機會',
+    action: 'jobs',
+    x: 680,
+    y: 92,
+    compactX: 282,
+    compactY: 430,
+  },
+]
+const activeJourneyStep = ref<JourneyStepId>(1)
 const cities = [
   '台北市', '新北市', '桃園市', '台中市', '台南市', '高雄市', '基隆市', '新竹市',
   '新竹縣', '苗栗縣', '彰化縣', '南投縣', '雲林縣', '嘉義市', '嘉義縣', '屏東縣',
@@ -51,6 +122,8 @@ const emptyForm = (jobId: string | number | null = null): ApplicationForm => ({
   current_title: '',
   total_years: null,
   skills: '',
+  linkedin_url: '',
+  portfolio_url: '',
   cover_letter: '',
   consent: false,
   source_platform: 'direct',
@@ -64,6 +137,9 @@ const filteredJobs = computed(() => {
     .some(value => value?.toLowerCase().includes(q)))
 })
 const applyTitle = computed(() => selectedJob.value ? `應徵「${selectedJob.value.title}」` : '加入人才庫')
+const activeJourney = computed(() => (
+  journeySteps.find(step => step.id === activeJourneyStep.value) ?? journeySteps[0]
+))
 
 async function loadJobs() {
   loading.value = true
@@ -96,6 +172,18 @@ function startApplication(job: Job | null = null) {
   contactError.value = ''
   if (fileInput.value) fileInput.value.value = ''
   go('apply')
+}
+
+function activateJourneyStep(step: JourneyStep) {
+  activeJourneyStep.value = step.id
+}
+
+function followJourneyAction(step: JourneyStep) {
+  if (step.action === 'jobs') {
+    go('jobs')
+    return
+  }
+  startApplication(null)
 }
 
 function textList(value?: string[] | string): string[] {
@@ -152,12 +240,20 @@ async function submit() {
 }
 
 onMounted(async () => {
+  compactJourney.value = window.matchMedia('(max-width: 600px)').matches
+  window.addEventListener('resize', syncJourneyLayout)
   await loadJobs()
   const jobId = new URLSearchParams(window.location.search).get('job_id')
   if (!jobId) return
   const job = jobs.value.find(item => String(item.id) === jobId)
   if (job) startApplication(job)
 })
+
+function syncJourneyLayout() {
+  compactJourney.value = window.matchMedia('(max-width: 600px)').matches
+}
+
+onBeforeUnmount(() => window.removeEventListener('resize', syncJourneyLayout))
 </script>
 
 <template>
@@ -174,25 +270,58 @@ onMounted(async () => {
 
   <main>
     <template v-if="view === 'home'">
-      <section class="hero">
-        <div>
-          <p class="eyebrow">TALENTBRIDGE CAREERS</p>
-          <h1>找到適合你的<br><em>下一個機會</em></h1>
-          <p class="lead">瀏覽目前職缺，或用幾分鐘留下履歷。沒有適合的職缺也沒關係，我們會將你加入人才庫。</p>
-          <div class="actions">
-            <button class="primary" @click="go('jobs')">查看職缺</button>
-            <button class="secondary" @click="startApplication(null)">加入人才庫</button>
-          </div>
+      <section class="career-journey" data-testid="career-journey">
+        <div class="journey-copy">
+          <p class="eyebrow">YOUR JOURNEY</p>
+          <h2>從看見機會，到展開對話</h2>
+          <p>求職不是一次送出履歷，而是一段逐步找到彼此適合位置的旅程。點選路標，看看每一步會發生什麼。</p>
         </div>
-        <div class="hero-card">
-          <span>簡單三步驟</span>
-          <ol><li>填寫基本資料</li><li>選擇工作偏好</li><li>履歷可選填</li></ol>
-          <small>不需註冊或登入</small>
+
+        <div class="journey-map-card">
+          <svg
+            class="journey-map"
+            :viewBox="compactJourney ? '0 0 360 500' : '0 0 760 380'"
+            role="img"
+            aria-labelledby="journey-map-title journey-map-description"
+          >
+            <title id="journey-map-title">TalentBridge 求職旅程</title>
+            <desc id="journey-map-description">依序經過探索機會、留下資料、HR 媒合與展開對話四個階段。</desc>
+            <path class="journey-road-halo" :d="journeyRoadPath" fill="none" />
+            <path class="journey-road" :d="journeyRoadPath" fill="none" />
+            <path class="journey-centerline" :d="journeyRoadPath" fill="none" />
+
+            <g
+              v-for="step in journeySteps"
+              :key="step.id"
+              class="journey-stop"
+              :class="[`stop-${step.id}`, { active: activeJourneyStep === step.id }]"
+              :data-testid="`career-journey-stop-${step.id}`"
+              :transform="`translate(${compactJourney ? step.compactX : step.x} ${compactJourney ? step.compactY : step.y})`"
+              role="button"
+              tabindex="0"
+              :aria-label="`第 ${step.id} 站：${step.title}`"
+              :aria-current="activeJourneyStep === step.id ? 'step' : undefined"
+              :aria-pressed="activeJourneyStep === step.id"
+              @click="activateJourneyStep(step)"
+              @keydown.enter.prevent="activateJourneyStep(step)"
+              @keydown.space.prevent="activateJourneyStep(step)"
+            >
+              <circle class="journey-stop-ring" r="34" />
+              <circle class="journey-stop-face" r="25" />
+              <text class="journey-stop-number" text-anchor="middle" dominant-baseline="central">{{ step.id }}</text>
+              <line class="journey-stop-post" x1="0" y1="34" x2="0" y2="48" />
+              <rect class="journey-stop-sign" x="-58" y="46" width="116" height="34" rx="17" />
+              <text class="journey-stop-label" y="63" text-anchor="middle" dominant-baseline="central">{{ step.title }}</text>
+            </g>
+          </svg>
+
+          <article class="journey-detail" aria-live="polite">
+            <p class="eyebrow">STEP {{ activeJourney.id }} · {{ activeJourney.eyebrow }}</p>
+            <h3>{{ activeJourney.title }}</h3>
+            <p>{{ activeJourney.description }}</p>
+            <button class="primary" type="button" @click="followJourneyAction(activeJourney)">{{ activeJourney.cta }}</button>
+          </article>
         </div>
-      </section>
-      <section class="home-jobs">
-        <div><p class="eyebrow">OPEN POSITIONS</p><h2>目前開放職缺</h2><p>從合適的職缺開始，讓我們更快認識你。</p></div>
-        <button class="primary" @click="go('jobs')">瀏覽全部職缺</button>
       </section>
     </template>
 
@@ -240,8 +369,11 @@ onMounted(async () => {
             <label>主要專長<select v-model="form.skills"><option value="">暫不提供</option><option v-for="skill in skillOptions" :key="skill" :value="skill">{{ skill }}</option></select></label>
             <p v-if="contactError" class="field-error form-wide" role="alert">{{ contactError }}</p>
           </div></section>
-          <section v-if="selectedJob" class="form-section"><h2>想補充的內容（選填）</h2>
-            <label>簡短自我介紹<textarea v-model.trim="form.cover_letter" maxlength="10000" rows="4" placeholder="可簡單說明相關經驗或應徵動機，也可以留白。"></textarea></label>
+          <section v-if="selectedJob" class="form-section"><h2>專業連結與補充內容（選填）</h2><div class="form-grid">
+            <label>LinkedIn<input v-model.trim="form.linkedin_url" type="url" inputmode="url" maxlength="1000" autocomplete="url" placeholder="https://www.linkedin.com/in/..."></label>
+            <label>作品集／個人網站<input v-model.trim="form.portfolio_url" type="url" inputmode="url" maxlength="1000" autocomplete="url" placeholder="https://portfolio.example.com"></label>
+            <label class="form-wide">簡短自我介紹<textarea v-model.trim="form.cover_letter" maxlength="10000" rows="4" placeholder="可簡單說明相關經驗或應徵動機，也可以留白。"></textarea></label>
+          </div>
           </section>
           <section class="form-section"><h2>履歷檔案（選填）</h2>
             <label class="upload" :class="{ chosen: resume }"><input ref="fileInput" aria-label="履歷檔案" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" @change="selectResume"><span class="upload-icon">↑</span><b>{{ resume ? resume.name : '有履歷再上傳即可' }}</b><small>可不提供；若上傳，支援 PDF、DOC、DOCX，最大 10 MB</small></label>
@@ -260,5 +392,5 @@ onMounted(async () => {
     </template>
   </main>
 
-  <footer><div><strong>TalentBridge Careers</strong><p>讓合適的人才，遇見合適的機會。</p></div><a href="mailto:careers@talentbridge.tw">careers@talentbridge.tw</a></footer>
+  <footer v-if="view !== 'home'"><div><strong>TalentBridge Careers</strong><p>讓合適的人才，遇見合適的機會。</p></div><a href="mailto:careers@talentbridge.tw">careers@talentbridge.tw</a></footer>
 </template>

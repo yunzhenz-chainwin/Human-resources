@@ -4,7 +4,6 @@ from decimal import Decimal
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -16,7 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
-from app.db.base import BIGINT_PK, Base, TimestampMixin
+from app.db.base import BIGINT_PK, Base, TimestampMixin, UTCDateTime
 
 MATCH_STATUSES = (
     "ineligible",
@@ -61,9 +60,9 @@ class MatchResult(TimestampMixin, Base):
     )
     feedback_reason: Mapped[str | None] = mapped_column(String(200))
     feedback_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-    feedback_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    feedback_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     computed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTCDateTime(), server_default=func.now(), nullable=False
     )
 
     candidate = relationship("Candidate")

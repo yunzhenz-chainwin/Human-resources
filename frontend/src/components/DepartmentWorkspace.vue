@@ -8,6 +8,7 @@ import {
   type DepartmentWorkspaceDto,
   type RequisitionDto,
 } from '../services/hrApi'
+import { formatApiDateTime } from '../utils/dateTime'
 
 const workspace = ref<DepartmentWorkspaceDto | null>(null)
 const selectedJobId = ref<number | null>(null)
@@ -228,7 +229,7 @@ function salary(job: RequisitionDto) {
 }
 
 function date(value: string) {
-  return new Intl.DateTimeFormat('zh-TW', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
+  return formatApiDateTime(value)
 }
 
 onMounted(load)

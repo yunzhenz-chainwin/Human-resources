@@ -32,6 +32,8 @@ export interface ApplicationForm {
   current_title: string
   total_years: number | null
   skills: string
+  linkedin_url: string
+  portfolio_url: string
   cover_letter: string
   consent: boolean
   source_platform: SourcePlatform

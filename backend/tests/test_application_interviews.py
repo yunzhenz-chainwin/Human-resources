@@ -1,5 +1,7 @@
 from collections.abc import Generator
+from contextlib import nullcontext
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +13,17 @@ import app.main as main_module
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_db
-from app.models import Candidate, Department, JobApplication, JobRequisition, User
+from app.models import (
+    Candidate,
+    CandidateEducation,
+    CandidateExperience,
+    CandidateSkill,
+    Department,
+    JobApplication,
+    JobRequisition,
+    ResumeFile,
+    User,
+)
 from app.models.security import AuditLog
 from app.services.security import hash_password
 
@@ -30,6 +42,10 @@ APPLICATION_KEYS = {
     "status",
     "source",
     "applied_at",
+    "resume_id",
+    "cover_letter",
+    "linkedin_url",
+    "portfolio_url",
     "interview_at",
     "interview_result",
     "interview_notes",
@@ -265,6 +281,162 @@ def test_application_listing_is_role_and_department_scoped(application_client) -
     assert [item["id"] for item in design_filter.json()] == [ids["design_application"]]
 
 
+def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_audited(
+    application_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, testing_session, ids = application_client
+    fixture_root = Path(__file__).parent / "fixtures" / "resumes"
+    stored_paths = {
+        "scoped/engineering.pdf": fixture_root / "generic_synthetic_v1.txt",
+        "scoped/design.pdf": fixture_root / "p104_synthetic_v1.txt",
+    }
+
+    class FixtureStorageProvider:
+        def materialize(self, key: str):
+            path = stored_paths.get(key)
+            if path is None:
+                raise FileNotFoundError(key)
+            return nullcontext(path)
+
+    monkeypatch.setattr(
+        "app.api.routes.resumes.get_storage_provider",
+        lambda: FixtureStorageProvider(),
+    )
+    engineering_bytes = stored_paths["scoped/engineering.pdf"].read_bytes()
+
+    with testing_session() as db:
+        candidate = db.get(Candidate, ids["alice"])
+        assert candidate is not None
+        candidate.summary = "Platform engineer with product delivery experience"
+        candidate.current_company = "Example Platform"
+        candidate.highest_education = "master"
+        db.add_all(
+            [
+                CandidateSkill(candidate_id=candidate.id, skill="Python", skill_norm="python"),
+                CandidateExperience(
+                    candidate_id=candidate.id,
+                    company="Example Platform",
+                    title="Senior Engineer",
+                    start_ym="2022-01",
+                    years=4,
+                    sort_order=0,
+                ),
+                CandidateEducation(
+                    candidate_id=candidate.id,
+                    school="Example University",
+                    major="Computer Science",
+                    degree="master",
+                    sort_order=0,
+                ),
+            ]
+        )
+        engineering_application = db.get(JobApplication, ids["engineering_application"])
+        assert engineering_application is not None
+        engineering_application.cover_letter = "Engineering-only cover letter"
+        engineering_application.linkedin_url = "javascript:alert('blocked')"
+        engineering_application.portfolio_url = "https://portfolio.example/engineering"
+        engineering_resume = ResumeFile(
+            candidate_id=candidate.id,
+            target_requisition_id=ids["engineering_job"],
+            original_filename="engineering.pdf",
+            storage_key="scoped/engineering.pdf",
+            mime="application/pdf",
+            source_platform="direct",
+            source_review_required=False,
+            parse_status="confirmed",
+            parsed_payload={"skills": ["Python", "SQL"], "experience": "Platform APIs"},
+        )
+        db.add(engineering_resume)
+        db.commit()
+        engineering_resume_id = engineering_resume.id
+
+    engineering_headers = _headers(client, "engineering-manager")
+    design_headers = _headers(client, "design-manager")
+    assert client.get(
+        f"/api/v1/candidates/{ids['alice']}", headers=design_headers
+    ).status_code == 403
+
+    with testing_session() as db:
+        design_application = JobApplication(
+            requisition_id=ids["design_job"],
+            candidate_id=ids["alice"],
+            status="submitted",
+            source="manual_hr",
+            cover_letter="Design-only private cover letter",
+            linkedin_url="https://linkedin.example/design-candidate",
+            portfolio_url="https://portfolio.example/design",
+        )
+        design_resume = ResumeFile(
+            candidate_id=ids["alice"],
+            target_requisition_id=ids["design_job"],
+            original_filename="design.pdf",
+            storage_key="scoped/design.pdf",
+            mime="application/pdf",
+            source_platform="direct",
+            source_review_required=False,
+            parse_status="confirmed",
+            resume_url="javascript:alert('blocked')",
+        )
+        db.add_all([design_application, design_resume])
+        db.commit()
+        design_resume_id = design_resume.id
+
+    engineering_detail = client.get(
+        f"/api/v1/candidates/{ids['alice']}", headers=engineering_headers
+    )
+    assert engineering_detail.status_code == 200
+    engineering_body = engineering_detail.json()
+    assert engineering_body["skills"] == ["Python"]
+    assert engineering_body["experiences"][0]["title"] == "Senior Engineer"
+    assert engineering_body["educations"][0]["school"] == "Example University"
+    assert len(engineering_body["applications"]) == 1
+    assert engineering_body["applications"][0]["requisition_id"] == ids["engineering_job"]
+    assert engineering_body["applications"][0]["cover_letter"] == (
+        "Engineering-only cover letter"
+    )
+    assert engineering_body["applications"][0]["linkedin_url"] is None
+    assert "Design-only private cover letter" not in engineering_detail.text
+    assert [item["id"] for item in engineering_body["resumes"]] == [engineering_resume_id]
+    assert engineering_body["resumes"][0]["has_file"] is True
+
+    design_detail = client.get(
+        f"/api/v1/candidates/{ids['alice']}", headers=design_headers
+    )
+    assert design_detail.status_code == 200
+    design_body = design_detail.json()
+    assert len(design_body["applications"]) == 1
+    assert design_body["applications"][0]["requisition_id"] == ids["design_job"]
+    assert "Engineering-only cover letter" not in design_detail.text
+    assert [item["id"] for item in design_body["resumes"]] == [design_resume_id]
+    assert design_body["resumes"][0]["resume_url"] is None
+
+    own_download = client.get(
+        f"/api/v1/resumes/{engineering_resume_id}/file",
+        headers={**engineering_headers, "User-Agent": "candidate-detail-test"},
+    )
+    assert own_download.status_code == 200
+    assert own_download.content == engineering_bytes
+    assert own_download.headers["cache-control"] == "private, no-store"
+    assert "engineering.pdf" in own_download.headers["content-disposition"]
+    assert client.get(
+        f"/api/v1/resumes/{design_resume_id}/file",
+        headers=engineering_headers,
+    ).status_code == 403
+
+    with testing_session() as db:
+        audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "resume.download",
+                AuditLog.resource_id == str(engineering_resume_id),
+            )
+        )
+        assert audit is not None
+        assert audit.department_id == ids["engineering"]
+        assert audit.details["candidate_id"] == ids["alice"]
+        assert audit.ip_address is not None
+
+
 def test_hr_assignment_returns_full_dto_and_rejects_duplicates(application_client) -> None:
     client, testing_session, ids = application_client
     payload = {
@@ -353,6 +525,220 @@ def test_hr_assignment_returns_full_dto_and_rejects_duplicates(application_clien
         )
         assert audit is not None
         assert audit.department_id == ids["design"]
+
+
+@pytest.mark.parametrize("requisition_status", ["draft", "submitted", "returned"])
+def test_hr_can_stage_candidates_on_preapproval_requisitions(
+    application_client,
+    requisition_status: str,
+) -> None:
+    client, testing_session, ids = application_client
+    with testing_session() as db:
+        candidate = Candidate(
+            code=f"APP-STAGE-{requisition_status.upper()}",
+            name=f"Staged {requisition_status.title()} Candidate",
+            source="manual",
+        )
+        requisition = JobRequisition(
+            req_no=f"APP-{requisition_status.upper()}-001",
+            title=f"{requisition_status.title()} staging target",
+            department_id=ids["design"],
+            employment_type="full_time",
+            work_city="Taipei",
+            jd="HR may stage a candidate before final requisition approval",
+            status=requisition_status,
+        )
+        db.add_all([candidate, requisition])
+        db.commit()
+        candidate_id = candidate.id
+        requisition_id = requisition.id
+
+    response = client.post(
+        "/api/v1/applications",
+        headers=_headers(client, "hr"),
+        json={"candidate_id": candidate_id, "requisition_id": requisition_id},
+    )
+    assert response.status_code == 201
+    assert response.json()["requisition"]["status"] == requisition_status
+
+
+def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    endpoint = f"/api/v1/applications/{ids['engineering_application']}/assignment"
+    payload = {"requisition_id": ids["design_job"]}
+
+    with testing_session() as db:
+        resume = ResumeFile(
+            candidate_id=ids["alice"],
+            target_requisition_id=ids["engineering_job"],
+            original_filename="alice-reassignment.pdf",
+            source_platform="generic",
+            source_review_required=False,
+            parse_status="confirmed",
+        )
+        unlinked_resume = ResumeFile(
+            candidate_id=ids["alice"],
+            target_requisition_id=ids["engineering_job"],
+            original_filename="alice-unlinked-history.pdf",
+            source_platform="generic",
+            source_review_required=False,
+            parse_status="confirmed",
+        )
+        db.add_all([resume, unlinked_resume])
+        db.flush()
+        application = db.get(JobApplication, ids["engineering_application"])
+        assert application is not None
+        application.resume_id = resume.id
+        db.commit()
+        resume_id = resume.id
+        unlinked_resume_id = unlinked_resume.id
+        reassigned_resume_ids = {resume_id, unlinked_resume_id}
+
+    assert client.patch(
+        endpoint,
+        headers=_headers(client, "engineering-manager"),
+        json=payload,
+    ).status_code == 403
+    assert client.patch(
+        endpoint,
+        headers=_headers(client, "it"),
+        json=payload,
+    ).status_code == 403
+
+    updated = client.patch(endpoint, headers=_headers(client, "hr"), json=payload)
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["id"] == ids["engineering_application"]
+    assert body["candidate_id"] == ids["alice"]
+    assert body["requisition_id"] == ids["design_job"]
+    assert body["requisition"]["department_id"] == ids["design"]
+
+    engineering_resumes = client.get(
+        "/api/v1/resumes?include_confirmed=true",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert engineering_resumes.status_code == 200
+    assert reassigned_resume_ids.isdisjoint(
+        {item["id"] for item in engineering_resumes.json()}
+    )
+    design_resumes = client.get(
+        "/api/v1/resumes?include_confirmed=true",
+        headers=_headers(client, "design-manager"),
+    )
+    assert design_resumes.status_code == 200
+    assert reassigned_resume_ids.issubset({item["id"] for item in design_resumes.json()})
+
+    engineering_candidates = client.get(
+        "/api/v1/candidates",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert engineering_candidates.status_code == 200
+    assert ids["alice"] not in {item["id"] for item in engineering_candidates.json()}
+    design_candidates = client.get(
+        "/api/v1/candidates",
+        headers=_headers(client, "design-manager"),
+    )
+    assert design_candidates.status_code == 200
+    assert ids["alice"] in {item["id"] for item in design_candidates.json()}
+
+    with testing_session() as db:
+        closed_job = JobRequisition(
+            req_no="APP-CLOSED-001",
+            title="Closed assignment target",
+            department_id=ids["engineering"],
+            employment_type="full_time",
+            work_city="Taipei",
+            jd="This requisition cannot receive new candidates",
+            status="closed",
+        )
+        db.add(closed_job)
+        db.commit()
+        closed_job_id = closed_job.id
+
+        audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "application.reassign",
+                AuditLog.resource_id == str(ids["engineering_application"]),
+            )
+        )
+        assert audit is not None
+        assert audit.department_id == ids["design"]
+        assert audit.details["previous_department_id"] == ids["engineering"]
+        assert audit.details["department_id"] == ids["design"]
+        assert audit.details["resume_id"] == resume_id
+        assert set(audit.details["resume_ids"]) == reassigned_resume_ids
+        assert db.get(ResumeFile, resume_id).target_requisition_id == ids["design_job"]
+        assert (
+            db.get(ResumeFile, unlinked_resume_id).target_requisition_id
+            == ids["design_job"]
+        )
+
+    unavailable = client.patch(
+        endpoint,
+        headers=_headers(client, "hr"),
+        json={"requisition_id": closed_job_id},
+    )
+    assert unavailable.status_code == 409
+    assert unavailable.json()["detail"] == (
+        "Requisition is no longer available for candidate assignment"
+    )
+    unchanged = client.get(
+        "/api/v1/applications?department_id=" + str(ids["design"]),
+        headers=_headers(client, "hr"),
+    )
+    assert ids["engineering_application"] in {item["id"] for item in unchanged.json()}
+
+    with testing_session() as db:
+        application = db.get(JobApplication, ids["engineering_application"])
+        assert application is not None
+        application.manager_interview_notes = "Design manager historical assessment"
+        db.commit()
+    history_preserved = client.patch(
+        endpoint,
+        headers=_headers(client, "hr"),
+        json={"requisition_id": ids["engineering_job"]},
+    )
+    assert history_preserved.status_code == 409
+    assert history_preserved.json()["detail"] == (
+        "Applications with interview or hiring history cannot be reassigned; "
+        "create a new assignment instead"
+    )
+    with testing_session() as db:
+        application = db.get(JobApplication, ids["engineering_application"])
+        assert application is not None
+        assert application.requisition_id == ids["design_job"]
+        assert application.manager_interview_notes == "Design manager historical assessment"
+        assert db.get(ResumeFile, resume_id).target_requisition_id == ids["design_job"]
+        assert (
+            db.get(ResumeFile, unlinked_resume_id).target_requisition_id
+            == ids["design_job"]
+        )
+
+    new_assignment = client.post(
+        "/api/v1/applications",
+        headers=_headers(client, "hr"),
+        json={
+            "candidate_id": ids["alice"],
+            "requisition_id": ids["engineering_job"],
+        },
+    )
+    assert new_assignment.status_code == 201
+    assert new_assignment.json()["id"] != ids["engineering_application"]
+    assert new_assignment.json()["source"] == "manual_hr"
+    engineering_candidates = client.get(
+        "/api/v1/candidates",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert ids["alice"] in {item["id"] for item in engineering_candidates.json()}
+    engineering_resumes = client.get(
+        "/api/v1/resumes?include_confirmed=true",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert reassigned_resume_ids.isdisjoint(
+        {item["id"] for item in engineering_resumes.json()}
+    )
 
 
 def test_department_manager_updates_interview_with_status_sync_and_audit(

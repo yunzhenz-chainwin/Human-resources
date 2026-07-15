@@ -12,6 +12,26 @@ const minimalPdf = Buffer.from('%PDF-1.4\n% synthetic E2E resume - no personal d
 test.describe.serial('public submission to HR review', () => {
   test('talent can join with selections and no resume file', async ({ page }) => {
     await page.goto('http://127.0.0.1:4174')
+
+    const careerJourney = page.getByTestId('career-journey')
+    await expect(careerJourney).toBeVisible()
+    const homeViewport = await page.evaluate(() => ({
+      height: window.innerHeight,
+      width: window.innerWidth,
+      scrollHeight: document.documentElement.scrollHeight,
+      scrollWidth: document.documentElement.scrollWidth,
+    }))
+    expect(homeViewport.scrollHeight).toBeLessThanOrEqual(homeViewport.height + 1)
+    expect(homeViewport.scrollWidth).toBeLessThanOrEqual(homeViewport.width + 1)
+    await expect(careerJourney.locator('[data-testid^="career-journey-stop-"]')).toHaveCount(4)
+    const matchingStop = page.getByTestId('career-journey-stop-3')
+    await matchingStop.click()
+    await expect(matchingStop).toHaveAttribute('aria-current', 'step')
+    await expect(careerJourney.getByText(
+      'HR 會依經歷、技能與職涯期待比對職缺，找到合適機會再與你聯繫。',
+      { exact: true },
+    )).toBeVisible()
+
     await page.getByRole('button', { name: '加入人才庫' }).first().click()
     await page.getByLabel('姓名 *').fill('無履歷測試人才')
     await page.getByLabel('手機（與 Email 擇一）').fill('0912-000-123')
@@ -27,7 +47,7 @@ test.describe.serial('public submission to HR review', () => {
 
   test('public career page submits a resume without authentication', async ({ page }) => {
     await page.goto('http://127.0.0.1:4174')
-    await expect(page.getByText('不需註冊或登入')).toBeVisible()
+    await expect(page.getByTestId('career-journey')).toBeVisible()
     await expect(page.getByText('登入 HR 工作台')).toHaveCount(0)
 
     await page.getByRole('button', { name: '加入人才庫' }).first().click()
@@ -55,12 +75,54 @@ test.describe.serial('public submission to HR review', () => {
     await page.getByLabel('密碼').fill('E2E-Admin-Password-123!')
     await page.getByRole('button', { name: '登入工作台' }).click()
 
-    await expect(page.getByRole('heading', { name: /今天想認識哪位人才/ })).toBeVisible()
+    await page.setViewportSize({ width: 1280, height: 620 })
+    const sidebarLayout = await page.locator('.sidebar').evaluate((sidebar) => {
+      const nav = sidebar.querySelector('nav')
+      const lastItem = sidebar.querySelector('.nav-item:last-of-type')
+      const footer = sidebar.querySelector('.sidebar-footer')
+      return {
+        sidebarClientHeight: sidebar.clientHeight,
+        sidebarScrollHeight: sidebar.scrollHeight,
+        navClientHeight: nav?.clientHeight ?? 0,
+        navScrollHeight: nav?.scrollHeight ?? 0,
+        lastItemBottom: lastItem?.getBoundingClientRect().bottom ?? 0,
+        footerTop: footer?.getBoundingClientRect().top ?? 0,
+      }
+    })
+    expect(sidebarLayout.sidebarScrollHeight).toBeLessThanOrEqual(sidebarLayout.sidebarClientHeight + 1)
+    expect(sidebarLayout.navScrollHeight).toBeLessThanOrEqual(sidebarLayout.navClientHeight + 1)
+    expect(sidebarLayout.lastItemBottom).toBeLessThanOrEqual(sidebarLayout.footerTop + 1)
+    await page.setViewportSize({ width: 1280, height: 720 })
+
+    const intakeRoute = page.getByTestId('intake-route-guide')
+    await expect(intakeRoute).toBeVisible()
+    await expect(intakeRoute.locator('[data-testid^="intake-route-stop-"]')).toHaveCount(4)
+    await page.getByTestId('intake-route-stop-3').click()
+    await expect(page.getByTestId('intake-route-stop-3')).toHaveAttribute('aria-current', 'step')
+    await expect(intakeRoute.getByText('指定應徵部門與職缺', { exact: true })).toBeVisible()
+    await expect(page.locator('.intake-workspace')).toHaveCount(0)
     for (const label of ['媒合程度', '招募分析', '帳號與權限']) {
       await expect(page.getByRole('button', { name: label })).toBeVisible()
     }
 
     await page.getByRole('button', { name: /履歷辨識中心/ }).click()
+    await expect(page.getByTestId('resume-center-flow')).toBeVisible()
+    await expect(page.locator('[data-testid^="resume-center-step-"]')).toHaveCount(3)
+    const resumeUploadInput = page.getByTestId('resume-upload-input')
+    await resumeUploadInput.setInputFiles({
+      name: 'unsupported-e2e.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('not a supported resume'),
+    })
+    await expect(page.getByTestId('resume-upload-validation-error')).toContainText('僅支援 PDF、DOC、DOCX')
+    await resumeUploadInput.setInputFiles({
+      name: 'removable-e2e.pdf',
+      mimeType: 'application/pdf',
+      buffer: minimalPdf,
+    })
+    await expect(page.getByTestId('resume-upload-filename-0')).toHaveText('removable-e2e.pdf')
+    await page.getByTestId('resume-upload-remove-0').click()
+    await expect(page.getByTestId('resume-upload-progress')).toHaveCount(0)
     await page.getByRole('button', { name: new RegExp(resumeName) }).click()
     await expect(page.getByLabel('姓名 *')).toHaveValue(candidateName)
     // A synthetic PDF has no verifiable platform signature, so HR must explicitly
@@ -137,26 +199,27 @@ test.describe.serial('public submission to HR review', () => {
     await page.getByLabel('帳號或 Email').fill('e2e-hr')
     await page.getByLabel('密碼').fill('E2E-HR-Password-123!')
     await page.getByRole('button', { name: '登入工作台' }).click()
-    await expect(page.getByRole('heading', { name: /今天想認識哪位人才/ })).toBeVisible()
+    await expect(page.getByTestId('intake-route-guide')).toBeVisible()
 
+    await page.getByTestId('nav-candidates').click()
+    await page.getByRole('button', { name: /手動新增人才/ }).click()
+    await expect(page.getByRole('heading', { name: '新增人才' })).toBeVisible()
     await page.getByLabel('姓名 *').fill(interviewCandidateName)
     await page.getByLabel('Email').fill('e2e-interview-candidate@example.test')
     await page.getByLabel('目前職稱').fill('平台工程師')
-    const departmentSelect = page.getByTestId('intake-department-select')
-    const jobSelect = page.getByTestId('intake-job-select')
+    const departmentSelect = page.getByTestId('candidate-department-select')
+    const jobSelect = page.getByTestId('candidate-job-select')
     await expect(jobSelect).toBeDisabled()
     await departmentSelect.selectOption({ label: '資訊技術部' })
     await expect(jobSelect).toBeEnabled()
     const targetJobId = await jobSelect.locator('option', { hasText: '資深後端工程師' }).getAttribute('value')
     expect(targetJobId).toBeTruthy()
     await jobSelect.selectOption(targetJobId!)
-    await page.getByLabel('招募備註').fill('E2E 建檔後安排技術面試')
-
     const applicationCreated = page.waitForResponse(response =>
       response.url().endsWith('/api/v1/applications')
       && response.request().method() === 'POST',
     )
-    await page.getByTestId('intake-submit').click()
+    await page.getByRole('button', { name: '儲存至資料庫' }).click()
     const createApplicationResponse = await applicationCreated
     expect(createApplicationResponse.status()).toBe(201)
     const application = await createApplicationResponse.json() as {
@@ -219,6 +282,7 @@ test.describe.serial('public submission to HR review', () => {
     const managerCandidate = page.getByRole('button', { name: new RegExp(interviewCandidateName) })
     await expect(managerCandidate).toBeVisible()
     await managerCandidate.click()
+    await expect(page.getByTestId('candidate-application-details')).toContainText('資深後端工程師')
     await expect(page.getByTestId('shared-activity-timeline')).toContainText('HR 留言：已完成初談')
     await page.getByTestId('add-shared-activity').click()
     await page.getByTestId('activity-content').fill('主管留言：技術面試將加強系統設計與協作能力確認。')

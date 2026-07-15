@@ -12,6 +12,7 @@ import {
   type UserRole,
 } from '../services/adminApi'
 import type { CurrentUser } from '../services/auth'
+import { formatApiDateTime } from '../utils/dateTime'
 import ItOperationsPanel from './ItOperationsPanel.vue'
 
 const props = defineProps<{ currentUser: CurrentUser }>()
@@ -32,7 +33,7 @@ const editingUser = ref<AdminUser | null>(null)
 const editingDepartment = ref<Department | null>(null)
 const temporaryPassword = ref<TemporaryPasswordReset | null>(null)
 const temporaryPasswordCopied = ref(false)
-const userForm = reactive({ username: '', email: '', password: '', display_name: '', role: 'hr' as UserRole, department_id: null as number | null, is_active: true })
+const userForm = reactive({ username: '', email: '', password: '', password_confirm: '', display_name: '', role: 'hr' as UserRole, department_id: null as number | null, is_active: true })
 const departmentForm = reactive({ name: '', parent_id: null as number | null, is_active: true })
 
 const roleLabels: Record<UserRole, string> = { it: 'IT 管理員', admin: '相容管理員', hr: 'HR', manager: '部門主管' }
@@ -73,9 +74,9 @@ async function load() {
 function openUser(user?: AdminUser) {
   editingUser.value = user || null
   Object.assign(userForm, user ? {
-    username: user.username, email: user.email, password: '', display_name: user.display_name,
+    username: user.username, email: user.email, password: '', password_confirm: '', display_name: user.display_name,
     role: user.role, department_id: user.department_id, is_active: user.is_active,
-  } : { username: '', email: '', password: '', display_name: '', role: props.currentUser.role === 'hr' ? 'manager' : 'hr', department_id: null, is_active: true })
+  } : { username: '', email: '', password: '', password_confirm: '', display_name: '', role: props.currentUser.role === 'hr' ? 'manager' : 'hr', department_id: null, is_active: true })
   userDialog.value = true
 }
 
@@ -85,22 +86,44 @@ async function saveUser() {
     error.value = '新帳號必須填寫帳號及至少 5 字元密碼'
     return
   }
+  const minimumPasswordLength = editingUser.value ? 12 : 5
+  if (userForm.password && userForm.password.length < minimumPasswordLength) {
+    error.value = `密碼至少需要 ${minimumPasswordLength} 個字元`
+    return
+  }
+  if ((!editingUser.value || userForm.password) && userForm.password !== userForm.password_confirm) {
+    error.value = '兩次輸入的密碼不一致'
+    return
+  }
   if (userForm.role === 'manager' && !userForm.department_id) {
     error.value = '部門主管帳號必須指定所屬部門'
     return
   }
   saving.value = true
   error.value = ''
+  const passwordChanged = !!userForm.password
   try {
     const common = {
       email: userForm.email.trim(), display_name: userForm.display_name.trim(), role: userForm.role,
       department_id: userForm.department_id, is_active: userForm.is_active,
     }
-    if (editingUser.value) await adminApi.updateUser(editingUser.value.id, common)
+    if (editingUser.value) {
+      await adminApi.updateUser(editingUser.value.id, {
+        ...common,
+        ...(isSystemAdmin.value && userForm.password ? {
+          password: userForm.password,
+          password_confirm: userForm.password_confirm,
+        } : {}),
+      })
+    }
     else await adminApi.createUser({ ...common, username: userForm.username.trim(), password: userForm.password })
+    userForm.password = ''
+    userForm.password_confirm = ''
     userDialog.value = false
     await load()
-    showNotice(editingUser.value ? '帳號已更新' : '帳號已建立')
+    showNotice(editingUser.value
+      ? (passwordChanged ? '帳號與新密碼已安全更新' : '帳號已更新')
+      : '帳號已建立')
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '帳號儲存失敗'
   } finally {
@@ -188,7 +211,7 @@ function departmentName(id: number | null) {
 
 function date(value: string | null) {
   if (!value) return '尚無紀錄'
-  return new Intl.DateTimeFormat('zh-TW', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value))
+  return formatApiDateTime(value, { dateStyle: 'short', timeStyle: 'short' })
 }
 
 onMounted(load)
@@ -209,9 +232,9 @@ onMounted(load)
 
     <div v-if="tab === 'users'" class="panel admin-section">
       <header><div><h2>使用者帳號</h2><p>{{ isSystemAdmin ? `共 ${users.length} 個內部帳號，包含所有角色與啟用狀態。` : `${users.length} 個可管理的 HR／部門主管帳號。` }}</p></div><button class="button primary" @click="openUser()">＋ 新增帳號</button></header>
-      <div v-if="isSystemAdmin" class="password-policy" data-testid="password-security-notice"><span>🔐</span><div><strong>系統不保存可還原的原始密碼</strong><p>密碼只會儲存為不可逆雜湊，因此 IT 也無法查看既有密碼。需要協助登入時，請產生一次性臨時密碼；密碼只在產生當下顯示一次，關閉後不可再次查詢。</p></div></div>
+      <div v-if="isSystemAdmin" class="password-policy" data-testid="password-security-notice"><span>🔐</span><div><strong>IT 可設定新密碼，但系統不保存可還原的原始密碼</strong><p>在「編輯」中可輸入指定的新密碼；儲存後只保留不可逆雜湊並撤銷該帳號既有登入更新權杖。舊密碼無法查看，也可繼續使用一次性臨時密碼。</p></div></div>
       <div class="admin-table user-account-table"><table><thead><tr><th>使用者</th><th>角色</th><th>部門</th><th>狀態</th><th>最近登入</th><th>密碼狀態</th><th>帳號時間</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="user in users" :key="user.id" :data-testid="`admin-user-${user.id}`"><td><strong>{{ user.display_name }}</strong><small>{{ user.username }} · {{ user.email }}</small><small>使用者 ID #{{ user.id }}</small></td><td>{{ roleLabels[user.role] }}</td><td>{{ departmentName(user.department_id) }}</td><td><span class="status" :data-status="user.is_active ? 'approved' : 'archived'">{{ user.is_active ? '啟用' : '停用' }}</span></td><td><strong>{{ date(user.last_login_at) }}</strong></td><td><strong>已安全雜湊</strong><small>建立／重設：{{ date(user.password_changed_at) }}</small><small>原密碼不可查看</small></td><td><strong>{{ date(user.created_at) }}</strong><small>更新 {{ date(user.updated_at) }}</small></td><td class="user-actions"><button v-if="isSystemAdmin || ['hr','manager'].includes(user.role)" class="text-button" @click="openUser(user)">編輯</button><button v-if="isSystemAdmin" class="text-button reset-password-button" :data-testid="`reset-password-${user.id}`" :disabled="saving" @click="resetPassword(user)">產生一次性臨時密碼</button></td></tr>
+        <tr v-for="user in users" :key="user.id" :data-testid="`admin-user-${user.id}`"><td><strong>{{ user.display_name }}</strong><small>{{ user.username }} · {{ user.email }}</small><small>使用者 ID #{{ user.id }}</small></td><td>{{ roleLabels[user.role] }}</td><td>{{ departmentName(user.department_id) }}</td><td><span class="status" :data-status="user.is_active ? 'approved' : 'archived'">{{ user.is_active ? '啟用' : '停用' }}</span></td><td><strong>{{ date(user.last_login_at) }}</strong></td><td><strong>已安全雜湊</strong><small>建立／設定／重設：{{ date(user.password_changed_at) }}</small><small>原密碼不可查看</small></td><td><strong>{{ date(user.created_at) }}</strong><small>更新 {{ date(user.updated_at) }}</small></td><td class="user-actions"><button v-if="isSystemAdmin || ['hr','manager'].includes(user.role)" class="text-button" @click="openUser(user)">編輯</button><button v-if="isSystemAdmin" class="text-button reset-password-button" :data-testid="`reset-password-${user.id}`" :disabled="saving" @click="resetPassword(user)">產生一次性臨時密碼</button></td></tr>
       </tbody></table></div>
     </div>
 
@@ -234,7 +257,7 @@ onMounted(load)
 
   <div v-if="temporaryPassword" class="modal-overlay" data-testid="temporary-password-dialog" @keydown.esc="closeTemporaryPassword"><section class="modal-card compact-modal temporary-password-modal" role="dialog" aria-modal="true" aria-labelledby="temporary-password-title"><header><div><small>ONE-TIME CREDENTIAL</small><h2 id="temporary-password-title">臨時密碼已產生</h2></div><button type="button" aria-label="關閉臨時密碼視窗" @click="closeTemporaryPassword">×</button></header><div class="temporary-password-body"><div class="credential-warning"><strong>只顯示這一次</strong><p>關閉視窗後無法再次查看。請透過安全管道交給 {{ temporaryPassword.username }}，並請使用者登入後妥善保管。</p></div><label>臨時密碼<div class="credential-copy"><input :value="temporaryPassword.temporary_password" data-testid="temporary-password-value" readonly autocomplete="off" @focus="($event.target as HTMLInputElement).select()"><button class="button primary" data-testid="copy-temp-password" type="button" @click="copyTemporaryPassword">{{ temporaryPasswordCopied ? '已複製' : '複製密碼' }}</button></div></label><div class="credential-meta"><span>密碼重設：{{ date(temporaryPassword.password_changed_at) }}</span><span>已撤銷 {{ temporaryPassword.sessions_revoked }} 個登入更新權杖</span><span>明文不會寫入資料庫或稽核紀錄</span></div></div><footer><button class="button primary" data-testid="close-temp-password" type="button" @click="closeTemporaryPassword">我已安全保存，關閉</button></footer></section></div>
 
-  <div v-if="userDialog" class="modal-overlay" @click.self="userDialog = false" @keydown.esc="userDialog = false"><form class="modal-card compact-modal" role="dialog" aria-modal="true" aria-labelledby="user-dialog-title" @submit.prevent="saveUser"><header><div><small>ADMIN</small><h2 id="user-dialog-title">{{ editingUser ? '編輯使用者' : '新增使用者' }}</h2></div><button type="button" aria-label="關閉使用者視窗" @click="userDialog = false">×</button></header><div class="form-grid"><label>帳號 *<input v-model="userForm.username" :disabled="!!editingUser" required></label><label>顯示名稱 *<input v-model="userForm.display_name" required></label><label>Email *<input v-model="userForm.email" type="email" required></label><label v-if="!editingUser">初始密碼（至少 5 字元）*<input v-model="userForm.password" type="password" required minlength="5"></label><label>角色<select v-model="userForm.role"><option v-if="isSystemAdmin" value="it">IT 管理員</option><option v-if="isSystemAdmin" value="admin">相容管理員</option><option value="hr">HR</option><option value="manager">部門主管</option></select></label><label>部門 {{ userForm.role === 'manager' ? '*' : '' }}<select v-model="userForm.department_id" :required="userForm.role === 'manager'"><option v-if="userForm.role !== 'manager'" :value="null">不限部門</option><option v-for="item in departments.filter(item => item.is_active)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label v-if="editingUser"><input v-model="userForm.is_active" class="inline-check" type="checkbox"> 啟用帳號</label></div><footer><button type="button" class="button secondary" @click="userDialog = false">取消</button><button class="button primary" :disabled="saving">{{ saving ? '儲存中…' : '儲存' }}</button></footer></form></div>
+  <div v-if="userDialog" class="modal-overlay" @click.self="userDialog = false" @keydown.esc="userDialog = false"><form class="modal-card compact-modal" role="dialog" aria-modal="true" aria-labelledby="user-dialog-title" @submit.prevent="saveUser"><header><div><small>ADMIN</small><h2 id="user-dialog-title">{{ editingUser ? '編輯使用者' : '新增使用者' }}</h2></div><button type="button" aria-label="關閉使用者視窗" @click="userDialog = false">×</button></header><div class="form-grid"><label>帳號 *<input v-model="userForm.username" :disabled="!!editingUser" required></label><label>顯示名稱 *<input v-model="userForm.display_name" required></label><label>Email *<input v-model="userForm.email" type="email" required></label><label v-if="!editingUser || isSystemAdmin">{{ editingUser ? '設定新密碼（至少 12 字元，留白則不變更）' : '初始密碼（至少 5 字元）*' }}<input v-model="userForm.password" data-testid="user-password" type="password" autocomplete="new-password" :required="!editingUser" :minlength="editingUser ? 12 : 5"></label><label v-if="!editingUser || isSystemAdmin">{{ editingUser ? '確認新密碼' : '確認初始密碼 *' }}<input v-model="userForm.password_confirm" data-testid="user-password-confirm" type="password" autocomplete="new-password" :required="!editingUser || !!userForm.password" :minlength="editingUser ? 12 : 5"><small v-if="editingUser">設定後會撤銷此帳號現有的登入更新權杖；原始密碼不會寫入資料庫。</small></label><label>角色<select v-model="userForm.role"><option v-if="isSystemAdmin" value="it">IT 管理員</option><option v-if="isSystemAdmin" value="admin">相容管理員</option><option value="hr">HR</option><option value="manager">部門主管</option></select></label><label>部門 {{ userForm.role === 'manager' ? '*' : '' }}<select v-model="userForm.department_id" :required="userForm.role === 'manager'"><option v-if="userForm.role !== 'manager'" :value="null">不限部門</option><option v-for="item in departments.filter(item => item.is_active)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label v-if="editingUser"><input v-model="userForm.is_active" class="inline-check" type="checkbox"> 啟用帳號</label></div><footer><button type="button" class="button secondary" @click="userDialog = false">取消</button><button class="button primary" :disabled="saving">{{ saving ? '儲存中…' : '儲存' }}</button></footer></form></div>
 
   <div v-if="departmentDialog" class="modal-overlay" @click.self="departmentDialog = false" @keydown.esc="departmentDialog = false"><form class="modal-card compact-modal" role="dialog" aria-modal="true" aria-labelledby="department-dialog-title" @submit.prevent="saveDepartment"><header><div><small>ORGANIZATION</small><h2 id="department-dialog-title">{{ editingDepartment ? '編輯部門' : '新增部門' }}</h2></div><button type="button" aria-label="關閉部門視窗" @click="departmentDialog = false">×</button></header><div class="form-grid"><label>部門名稱 *<input v-model="departmentForm.name" required></label><label>上層部門<select v-model="departmentForm.parent_id"><option :value="null">無</option><option v-for="item in departments.filter(item => item.id !== editingDepartment?.id)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label><label v-if="editingDepartment"><input v-model="departmentForm.is_active" class="inline-check" type="checkbox"> 啟用部門</label></div><footer><button type="button" class="button secondary" @click="departmentDialog = false">取消</button><button class="button primary" :disabled="saving">{{ saving ? '儲存中…' : '儲存' }}</button></footer></form></div>
   <Transition name="toast"><div v-if="notice" class="toast" role="status" aria-live="polite"><span>✓</span>{{ notice }}</div></Transition>

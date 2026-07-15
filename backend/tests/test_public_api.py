@@ -235,10 +235,15 @@ def test_hr_candidate_requisition_and_activity_updates_persist(client: TestClien
     candidate_id = created.json()["id"]
     updated = client.patch(
         f"/api/v1/candidates/{candidate_id}",
-        json={"current_title": "Senior Engineer", "status": "contacted"},
+        json={"current_title": "Senior Engineer", "source": "generic", "status": "contacted"},
     )
     assert updated.status_code == 200
     assert updated.json()["current_title"] == "Senior Engineer"
+    assert updated.json()["source"] == "generic"
+    assert client.patch(
+        f"/api/v1/candidates/{candidate_id}",
+        json={"source": "untrusted-source"},
+    ).status_code == 422
 
     activity = client.post(
         f"/api/v1/candidates/{candidate_id}/activities",

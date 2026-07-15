@@ -5,7 +5,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Date,
-    DateTime,
     ForeignKey,
     Numeric,
     SmallInteger,
@@ -17,7 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
-from app.db.base import BIGINT_PK, Base, TimestampMixin
+from app.db.base import BIGINT_PK, Base, TimestampMixin, UTCDateTime
 
 
 class Candidate(TimestampMixin, Base):
@@ -64,17 +63,17 @@ class Candidate(TimestampMixin, Base):
     source_note: Mapped[str | None] = mapped_column(String(200))
     photo_path: Mapped[str | None] = mapped_column(String(500))
     photo_content_type: Mapped[str | None] = mapped_column(String(50))
-    photo_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    photo_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     status: Mapped[str] = mapped_column(String(20), default="new", server_default="new", index=True)
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     summary: Mapped[str | None] = mapped_column(Text)
     consent_status: Mapped[str | None] = mapped_column(String(20))
-    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     retention_until: Mapped[date | None] = mapped_column(Date, index=True)
     is_blacklisted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     blacklist_reason: Mapped[str | None] = mapped_column(String(200))
     dedup_hash: Mapped[str | None] = mapped_column(String(64), index=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
     educations: Mapped[list["CandidateEducation"]] = relationship(cascade="all, delete-orphan")
     experiences: Mapped[list["CandidateExperience"]] = relationship(cascade="all, delete-orphan")
@@ -146,7 +145,7 @@ class CandidateActivity(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     type: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    happened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    happened_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        UTCDateTime(), server_default=func.now(), nullable=False
     )

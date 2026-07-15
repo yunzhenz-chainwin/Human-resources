@@ -5,7 +5,6 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     Date,
-    DateTime,
     ForeignKey,
     Numeric,
     String,
@@ -16,7 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
-from app.db.base import BIGINT_PK, Base, TimestampMixin
+from app.db.base import BIGINT_PK, Base, TimestampMixin, UTCDateTime
 
 
 class JobRequisition(TimestampMixin, Base):
@@ -56,10 +55,10 @@ class JobRequisition(TimestampMixin, Base):
     return_reason: Mapped[str | None] = mapped_column(String(500))
     match_weights: Mapped[dict | None] = mapped_column(JSON)
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    filled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
     department = relationship("Department")
     applications: Mapped[list["JobApplication"]] = relationship(cascade="all, delete-orphan")
@@ -118,7 +117,7 @@ class ResumeFile(Base):
     source_reviewed_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
-    source_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_reviewed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     platform_code: Mapped[str | None] = mapped_column(String(50))
     parse_status: Mapped[str] = mapped_column(
         String(20), default="pending", server_default="pending", index=True
@@ -131,12 +130,12 @@ class ResumeFile(Base):
     resume_url: Mapped[str | None] = mapped_column(String(1000))
     resume_text: Mapped[str | None] = mapped_column(Text)
     uploaded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UTCDateTime(), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
     )
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class JobApplication(TimestampMixin, Base):
@@ -166,25 +165,25 @@ class JobApplication(TimestampMixin, Base):
     source: Mapped[str] = mapped_column(
         String(20), default="career_site", server_default="career_site"
     )
-    interview_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    interview_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     interview_result: Mapped[str | None] = mapped_column(String(30))
     interview_notes: Mapped[str | None] = mapped_column(Text)
     interview_updated_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
-    hr_interview_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hr_interview_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     hr_interview_result: Mapped[str | None] = mapped_column(String(30))
     hr_interview_notes: Mapped[str | None] = mapped_column(Text)
     hr_interview_updated_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
-    hr_interview_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    manager_interview_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hr_interview_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    manager_interview_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     manager_interview_result: Mapped[str | None] = mapped_column(String(30))
     manager_interview_notes: Mapped[str | None] = mapped_column(Text)
     manager_interview_updated_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
     manager_interview_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
+        UTCDateTime()
     )

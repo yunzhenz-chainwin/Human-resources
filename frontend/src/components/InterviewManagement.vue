@@ -9,6 +9,7 @@ import {
   type InterviewStageDto,
 } from '../services/hrApi'
 import { authSession } from '../services/auth'
+import { formatApiDateTime, parseApiDateTime } from '../utils/dateTime'
 
 const applications = ref<ApplicationDto[]>([])
 const loading = ref(false)
@@ -62,7 +63,7 @@ function canEditStage(stage: InterviewStage) {
 function firstScheduledAt(application: ApplicationDto) {
   const values = [application.hr_interview.interview_at, application.manager_interview.interview_at]
     .filter((value): value is string => Boolean(value))
-    .map(value => new Date(value).getTime())
+    .map(value => parseApiDateTime(value).getTime())
   return values.length ? Math.min(...values) : null
 }
 
@@ -95,7 +96,7 @@ const filteredApplications = computed(() => applications.value
     if (leftAt !== null && rightAt !== null) return leftAt - rightAt
     if (leftAt !== null) return -1
     if (rightAt !== null) return 1
-    return new Date(right.applied_at).getTime() - new Date(left.applied_at).getTime()
+    return parseApiDateTime(right.applied_at).getTime() - parseApiDateTime(left.applied_at).getTime()
   }))
 
 const scheduledCount = computed(() => applications.value.filter(application => (
@@ -104,7 +105,7 @@ const scheduledCount = computed(() => applications.value.filter(application => (
 const upcomingCount = computed(() => applications.value.filter(application =>
   [application.hr_interview, application.manager_interview].some(stage => (
     stage.interview_at
-    && new Date(stage.interview_at).getTime() >= Date.now()
+    && parseApiDateTime(stage.interview_at).getTime() >= Date.now()
     && !['cancelled', 'no_show'].includes(stage.interview_result || '')
   )),
 ).length)
@@ -134,7 +135,7 @@ async function load() {
 
 function toLocalDateTime(value: string | null) {
   if (!value) return ''
-  const date = new Date(value)
+  const date = parseApiDateTime(value)
   if (Number.isNaN(date.getTime())) return ''
   const pad = (part: number) => String(part).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
@@ -199,7 +200,7 @@ async function saveInterview(application: ApplicationDto) {
 
 function formatDate(value: string | null) {
   if (!value) return '尚未安排'
-  return new Intl.DateTimeFormat('zh-TW', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
+  return formatApiDateTime(value)
 }
 
 watch(departmentId, () => {

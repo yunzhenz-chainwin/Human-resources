@@ -23,7 +23,8 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     email: str | None = Field(default=None, min_length=3, max_length=255)
-    password: str | None = Field(default=None, min_length=5, max_length=1024)
+    password: str | None = Field(default=None, min_length=12, max_length=1024)
+    password_confirm: str | None = Field(default=None, min_length=12, max_length=1024)
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
     role: Literal["admin", "it", "hr", "manager"] | None = None
     department_id: int | None = None

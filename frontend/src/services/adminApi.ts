@@ -93,6 +93,7 @@ export type UserWrite = {
   username?: string
   email: string
   password?: string
+  password_confirm?: string
   display_name: string
   role: UserRole
   department_id: number | null

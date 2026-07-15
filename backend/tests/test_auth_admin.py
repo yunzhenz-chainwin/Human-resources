@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 import pytest
@@ -153,6 +154,22 @@ def test_role_and_department_scope(auth_client) -> None:
     assert client.get("/scoped/999", headers=bearer(admin["access_token"])).status_code == 200
 
 
+def test_login_timestamp_uses_system_clock_and_has_utc_offset(auth_client) -> None:
+    client, _ = auth_client
+    before = datetime.now(UTC) - timedelta(seconds=1)
+    admin = login(client, "rootadmin", "Bootstrap-Test-Password-123")
+    users = client.get(
+        "/admin/users", headers=bearer(admin["access_token"])
+    )
+    after = datetime.now(UTC) + timedelta(seconds=1)
+    assert users.status_code == 200
+    root = next(item for item in users.json() if item["username"] == "rootadmin")
+    timestamp = root["last_login_at"]
+    assert timestamp.endswith(("Z", "+00:00"))
+    recorded = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    assert before <= recorded <= after
+
+
 def test_system_admin_resets_one_time_temporary_password_with_audit(auth_client) -> None:
     client, testing_session = auth_client
     manager_session = login(client, "manager", "Manager-Test-Password-123")
@@ -219,6 +236,59 @@ def test_system_admin_resets_one_time_temporary_password_with_audit(auth_client)
         assert audit.details["target_username"] == "manager"
         assert audit.details["temporary_password_issued"] is True
         assert temporary_password not in str(audit.details)
+
+
+def test_system_admin_sets_chosen_password_as_hash_and_revokes_sessions(auth_client) -> None:
+    client, testing_session = auth_client
+    manager_session = login(client, "manager", "Manager-Test-Password-123")
+    with testing_session() as db:
+        manager = db.scalar(select(User).where(User.username == "manager"))
+        assert manager is not None
+        manager_id = manager.id
+
+    admin = login(client, "rootadmin", "Bootstrap-Test-Password-123")
+    chosen_password = "Chosen-Manager-Password-456"
+    mismatch = client.patch(
+        f"/admin/users/{manager_id}",
+        json={"password": chosen_password, "password_confirm": "Different-Password-789"},
+        headers=bearer(admin["access_token"]),
+    )
+    assert mismatch.status_code == 422
+    response = client.patch(
+        f"/admin/users/{manager_id}",
+        json={"password": chosen_password, "password_confirm": chosen_password},
+        headers=bearer(admin["access_token"]),
+    )
+    assert response.status_code == 200
+    assert "password" not in response.json()
+    assert client.post(
+        "/auth/login",
+        json={"username": "manager", "password": "Manager-Test-Password-123"},
+    ).status_code == 401
+    assert client.post(
+        "/auth/refresh",
+        json={"refresh_token": manager_session["refresh_token"]},
+    ).status_code == 401
+    assert login(client, "manager", chosen_password)["access_token"]
+
+    with testing_session() as db:
+        manager = db.get(User, manager_id)
+        assert manager is not None
+        assert manager.password_hash != chosen_password
+        assert chosen_password not in manager.password_hash
+        assert verify_password(chosen_password, manager.password_hash)
+        audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "password.set",
+                AuditLog.resource_id == str(manager_id),
+            )
+        )
+        assert audit is not None
+        assert audit.ip_address == "testclient"
+        assert audit.details is not None
+        assert audit.details["target_username"] == "manager"
+        assert audit.details["sessions_revoked"] >= 1
+        assert chosen_password not in str(audit.details)
 
 
 def test_password_reset_is_forbidden_to_hr_and_manager(auth_client) -> None:

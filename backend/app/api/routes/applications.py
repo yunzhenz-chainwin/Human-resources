@@ -11,8 +11,9 @@ from app.dependencies.auth import (
     require_recruiting_manager,
     require_recruiting_user,
 )
-from app.models import Candidate, JobApplication, JobRequisition, User
+from app.models import Candidate, Department, JobApplication, JobRequisition, ResumeFile, User
 from app.schemas.hr import (
+    ApplicationAssignmentUpdate,
     ApplicationCreate,
     ApplicationInterviewStageRead,
     ApplicationInterviewUpdate,
@@ -30,6 +31,9 @@ RESULT_APPLICATION_STATUSES = {
     "offered": "offered",
     "hired": "hired",
 }
+ASSIGNABLE_REQUISITION_STATUSES = frozenset(
+    {"draft", "submitted", "returned", "approved", "sourcing", "interviewing"}
+)
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -52,6 +56,10 @@ def _application_read(
         status=application.status,
         source=application.source,
         applied_at=_aware(application.created_at),
+        resume_id=application.resume_id,
+        cover_letter=application.cover_letter,
+        linkedin_url=application.linkedin_url,
+        portfolio_url=application.portfolio_url,
         interview_at=_aware(application.interview_at),
         interview_result=application.interview_result,
         interview_notes=application.interview_notes,
@@ -89,6 +97,46 @@ def _application_row(
     if row is None:
         raise HTTPException(status_code=404, detail="Application not found")
     return row
+
+
+def _assignment_requisition(db: Session, requisition_id: int) -> JobRequisition:
+    requisition = db.get(JobRequisition, requisition_id)
+    if requisition is None:
+        raise HTTPException(status_code=404, detail="Requisition not found")
+    if requisition.department_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Requisition must belong to an active department before assignment",
+        )
+    department = db.get(Department, requisition.department_id)
+    if department is None or not department.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Requisition department is unavailable",
+        )
+    if requisition.status not in ASSIGNABLE_REQUISITION_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Requisition is no longer available for candidate assignment",
+        )
+    return requisition
+
+
+def _application_has_process_history(application: JobApplication) -> bool:
+    interview_fields = (
+        "interview_at",
+        "interview_result",
+        "interview_notes",
+        "hr_interview_at",
+        "hr_interview_result",
+        "hr_interview_notes",
+        "manager_interview_at",
+        "manager_interview_result",
+        "manager_interview_notes",
+    )
+    return application.status != "submitted" or any(
+        getattr(application, field) is not None for field in interview_fields
+    )
 
 
 def _enforce_application_scope(user: User, requisition: JobRequisition) -> None:
@@ -210,9 +258,7 @@ def create_application(
         raise HTTPException(status_code=404, detail="Candidate not found")
     if candidate.deleted_at is not None:
         raise HTTPException(status_code=409, detail="Deleted candidate cannot be assigned")
-    requisition = db.get(JobRequisition, payload.requisition_id)
-    if requisition is None:
-        raise HTTPException(status_code=404, detail="Requisition not found")
+    requisition = _assignment_requisition(db, payload.requisition_id)
     existing_id = db.scalar(
         select(JobApplication.id).where(
             JobApplication.requisition_id == requisition.id,
@@ -255,6 +301,91 @@ def create_application(
         ) from exc
     db.refresh(application)
     return _application_read(application, candidate, requisition)
+
+
+@router.patch("/{application_id}/assignment", response_model=ApplicationRead)
+def update_application_assignment(
+    application_id: int,
+    payload: ApplicationAssignmentUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_manager),
+) -> ApplicationRead:
+    """Correct the job/department routing for an existing candidate application."""
+
+    application, candidate, current_requisition = _application_row(db, application_id)
+    target_requisition = _assignment_requisition(db, payload.requisition_id)
+    if application.requisition_id == target_requisition.id:
+        return _application_read(application, candidate, current_requisition)
+    if _application_has_process_history(application):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Applications with interview or hiring history cannot be reassigned; "
+                "create a new assignment instead"
+            ),
+        )
+
+    duplicate_id = db.scalar(
+        select(JobApplication.id).where(
+            JobApplication.id != application.id,
+            JobApplication.candidate_id == candidate.id,
+            JobApplication.requisition_id == target_requisition.id,
+        )
+    )
+    if duplicate_id is not None:
+        raise HTTPException(status_code=409, detail="Candidate is already assigned to this job")
+
+    previous_requisition_id = application.requisition_id
+    previous_department_id = current_requisition.department_id
+    reassigned_resumes = {
+        resume.id: resume
+        for resume in db.scalars(
+            select(ResumeFile).where(
+                ResumeFile.candidate_id == candidate.id,
+                ResumeFile.target_requisition_id == current_requisition.id,
+            )
+        )
+    }
+    linked_resume = db.get(ResumeFile, application.resume_id) if application.resume_id else None
+    if linked_resume is not None and linked_resume.candidate_id not in (None, candidate.id):
+        raise HTTPException(status_code=409, detail="Application resume linkage is inconsistent")
+    if linked_resume is not None:
+        reassigned_resumes[linked_resume.id] = linked_resume
+    application.requisition_id = target_requisition.id
+    for resume in reassigned_resumes.values():
+        resume.target_requisition_id = target_requisition.id
+    reassigned_resume_ids = sorted(reassigned_resumes)
+    try:
+        db.flush()
+        write_audit(
+            db,
+            user,
+            "application.reassign",
+            "job_application",
+            application.id,
+            target_requisition.department_id,
+            details={
+                "candidate_id": candidate.id,
+                "previous_requisition_id": previous_requisition_id,
+                "requisition_id": target_requisition.id,
+                "previous_department_id": previous_department_id,
+                "department_id": target_requisition.department_id,
+                "resume_id": linked_resume.id if linked_resume is not None else None,
+                "resume_ids": reassigned_resume_ids,
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Candidate is already assigned to this job",
+        ) from exc
+    db.refresh(application)
+    return _application_read(application, candidate, target_requisition)
 
 
 def _update_interview_stage(

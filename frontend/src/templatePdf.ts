@@ -1,6 +1,8 @@
 import html2canvas from 'html2canvas'
 import { jsPDF } from 'jspdf'
 
+import { localDateKey } from './utils/dateTime'
+
 declare global {
   interface Window {
     downloadEditedResumePdf: () => Promise<void>
@@ -60,7 +62,7 @@ window.downloadEditedResumePdf = async () => {
       if (index > 0) pdf.addPage('a4', 'portrait')
       pdf.addImage(image, 'JPEG', 0, -(index * pageHeight), pageWidth, imageHeight)
     }
-    pdf.save(`TalentHub-履歷-${new Date().toISOString().slice(0, 10)}.pdf`)
+    pdf.save(`TalentHub-履歷-${localDateKey()}.pdf`)
   } catch (error) {
     console.error(error)
     window.alert('PDF 產生失敗，請重新整理後再試一次。')
