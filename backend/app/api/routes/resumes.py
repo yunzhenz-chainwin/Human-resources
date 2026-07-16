@@ -418,10 +418,16 @@ def update_parsed_resume(
     if resume.parse_status == "confirmed":
         raise HTTPException(status_code=409, detail="Confirmed resume cannot be edited")
     parsed = ResumeParsedUpdate.model_validate(payload.get("parsed_payload", payload))
-    resume.parsed_payload = parsed.model_dump()
-    resume.field_confidence = {key: 1.0 for key in parsed.model_fields_set}
+    resume.parsed_payload = {
+        **(resume.parsed_payload or {}),
+        **parsed.model_dump(exclude_unset=True),
+    }
+    resume.field_confidence = {
+        **(resume.field_confidence or {}),
+        **{key: 1.0 for key in parsed.model_fields_set},
+    }
     resume.overall_confidence = 1.0
-    resume.parse_status = "parsed" if parsed.name else "needs_review"
+    resume.parse_status = "parsed" if resume.parsed_payload.get("name") else "needs_review"
     resume.error_message = None
     db.commit()
     db.refresh(resume)
@@ -559,6 +565,8 @@ def confirm_resume(
             .where(Candidate.deleted_at.is_(None), or_(*clauses))
             .limit(1)
         )
+        if candidate is not None and user.role == "manager":
+            enforce_candidate_scope(db, user, candidate.id)
     created = candidate is None
     if candidate is None:
         candidate = Candidate(
@@ -571,24 +579,67 @@ def confirm_resume(
         db.flush()
 
     candidate.name = name
-    candidate.email = payload.get("email")
-    candidate.email_norm = email_norm
-    candidate.phone = payload.get("phone")
-    candidate.phone_norm = phone_norm
-    candidate.city = payload.get("city")
-    candidate.current_title = payload.get("current_title")
-    candidate.total_years = payload.get("total_years")
-    candidate.current_company = payload.get("current_company")
-    candidate.highest_education = payload.get("highest_education")
-    candidate.expected_title = payload.get("expected_title")
-    candidate.expected_cities = payload.get("expected_cities") or None
-    db.execute(delete(CandidateSkill).where(CandidateSkill.candidate_id == candidate.id))
-    for skill in payload.get("skills") or []:
-        clean = str(skill).strip()[:100]
-        if clean:
-            db.add(
-                CandidateSkill(candidate_id=candidate.id, skill=clean, skill_norm=clean.casefold())
-            )
+    if created:
+        candidate.email = payload.get("email")
+        candidate.email_norm = email_norm
+        candidate.phone = payload.get("phone")
+        candidate.phone_norm = phone_norm
+        candidate.city = payload.get("city")
+        candidate.current_title = payload.get("current_title")
+        candidate.total_years = payload.get("total_years")
+        candidate.current_company = payload.get("current_company")
+        candidate.highest_education = payload.get("highest_education")
+        candidate.expected_title = payload.get("expected_title")
+        candidate.expected_cities = payload.get("expected_cities") or None
+        db.execute(delete(CandidateSkill).where(CandidateSkill.candidate_id == candidate.id))
+        for skill in payload.get("skills") or []:
+            clean = str(skill).strip()[:100]
+            if clean:
+                db.add(
+                    CandidateSkill(
+                        candidate_id=candidate.id, skill=clean, skill_norm=clean.casefold()
+                    )
+                )
+    else:
+        # Dedup-matched existing candidate: only fill fields the parsed payload actually
+        # provides so a partial resume never wipes curated data, and merge skills instead
+        # of deleting the curated set.
+        if payload.get("email"):
+            candidate.email = payload.get("email")
+            candidate.email_norm = email_norm
+        if payload.get("phone"):
+            candidate.phone = payload.get("phone")
+            candidate.phone_norm = phone_norm
+        if payload.get("city"):
+            candidate.city = payload.get("city")
+        if payload.get("current_title"):
+            candidate.current_title = payload.get("current_title")
+        if payload.get("total_years") is not None:
+            candidate.total_years = payload.get("total_years")
+        if payload.get("current_company"):
+            candidate.current_company = payload.get("current_company")
+        if payload.get("highest_education"):
+            candidate.highest_education = payload.get("highest_education")
+        if payload.get("expected_title"):
+            candidate.expected_title = payload.get("expected_title")
+        if payload.get("expected_cities"):
+            candidate.expected_cities = payload.get("expected_cities")
+        existing_skill_norms = set(
+            db.scalars(
+                select(CandidateSkill.skill_norm).where(
+                    CandidateSkill.candidate_id == candidate.id
+                )
+            ).all()
+        )
+        for skill in payload.get("skills") or []:
+            clean = str(skill).strip()[:100]
+            if clean and clean.casefold() not in existing_skill_norms:
+                db.add(
+                    CandidateSkill(
+                        candidate_id=candidate.id, skill=clean, skill_norm=clean.casefold()
+                    )
+                )
+                existing_skill_norms.add(clean.casefold())
 
     resume.candidate_id = candidate.id
     resume.parse_status = "confirmed"

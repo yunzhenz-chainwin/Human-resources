@@ -4,19 +4,28 @@ services:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-change-me-now}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    # Bind to loopback only.  The backend reaches MinIO as minio:9000 over the
+    # compose network; the host ports are for local admin/console access.
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio_data:/data
+    mem_limit: 1g
+    cpus: "1.0"
 
   clamav:
     image: clamav/clamav:stable
+    # Loopback only; the backend reaches it as clamav:3310 over the network.
     ports:
-      - "3310:3310"
+      - "127.0.0.1:3310:3310"
     volumes:
       - clamav_data:/var/lib/clamav
+    # ClamAV loads its signature database into memory; keep this generous or
+    # clamd will be OOM-killed on startup.
+    mem_limit: 2g
+    cpus: "2.0"
 
 volumes:
   minio_data:

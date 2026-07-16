@@ -270,10 +270,13 @@ def test_manager_match_overview_only_exposes_actual_applicants(
                 ),
             ]
         )
+        # The requisition belongs to a department; the viewing manager must own that
+        # same department (a null-department manager is now correctly rejected).
+        db.get(JobRequisition, 1).department_id = 5
         db.commit()
 
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
-        id=10, role="manager", department_id=None, is_active=True
+        id=10, role="manager", department_id=5, is_active=True
     )
     manager_response = client.get("/api/v1/requisitions/1/candidate-match-overview")
     assert manager_response.status_code == 200

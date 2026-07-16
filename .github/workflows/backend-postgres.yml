@@ -4,11 +4,17 @@ on:
   pull_request:
     paths:
       - "backend/**"
+      - "deploy/**"
+      - "*.ps1"
+      - "*.bat"
       - ".github/workflows/backend-postgres.yml"
   push:
     branches: [main]
     paths:
       - "backend/**"
+      - "deploy/**"
+      - "*.ps1"
+      - "*.bat"
       - ".github/workflows/backend-postgres.yml"
 
 jobs:
@@ -55,3 +61,18 @@ jobs:
         run: python -m pytest -q
       - name: Lint backend
         run: python -m ruff check app tests scripts
+
+  compose-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate deploy compose files
+        # Provide the now-required secrets and an empty env file so `config` can
+        # resolve interpolation without starting anything.
+        env:
+          POSTGRES_PASSWORD: ci-only
+          S3_SECRET_KEY: ci-only
+        run: |
+          touch .env
+          docker compose -f deploy/docker-compose.yml config -q
+          docker compose -f deploy/compose.storage.yml config -q

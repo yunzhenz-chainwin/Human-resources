@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class UserCreate(BaseModel):
     username: str = Field(min_length=2, max_length=100)
     email: str = Field(min_length=3, max_length=255)
-    password: str = Field(min_length=5, max_length=1024)
+    password: str = Field(min_length=12, max_length=1024)
     display_name: str = Field(min_length=1, max_length=100)
     role: Literal["admin", "it", "hr", "manager"]
     department_id: int | None = None

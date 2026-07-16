@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
 from app.dependencies.auth import (
@@ -12,7 +12,12 @@ from app.dependencies.auth import (
     require_recruiting_manager,
 )
 from app.models import JobRequisition, User
-from app.schemas.hr import RequisitionCreate, RequisitionRead, RequisitionUpdate
+from app.schemas.hr import (
+    REQUISITION_STATUSES,
+    RequisitionCreate,
+    RequisitionRead,
+    RequisitionUpdate,
+)
 
 router = APIRouter(prefix="/requisitions")
 
@@ -23,7 +28,11 @@ def list_requisitions(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[JobRequisition]:
-    query = select(JobRequisition).order_by(JobRequisition.updated_at.desc())
+    query = (
+        select(JobRequisition)
+        .options(joinedload(JobRequisition.department))
+        .order_by(JobRequisition.updated_at.desc())
+    )
     if user.role == "manager":
         query = query.where(JobRequisition.department_id == user.department_id)
     if requisition_status:
@@ -39,14 +48,19 @@ def create_requisition(
 ) -> JobRequisition:
     enforce_department_scope(user, payload.department_id)
     data = payload.model_dump()
+    if data["status"] not in REQUISITION_STATUSES:
+        raise HTTPException(status_code=422, detail="未知的需求單狀態")
+    if data["status"] not in {"draft", "submitted"}:
+        raise HTTPException(
+            status_code=422,
+            detail="新需求單僅能以草稿或待審核狀態建立，發佈請改用核准流程",
+        )
     if (
         data["salary_min"] is not None
         and data["salary_max"] is not None
         and data["salary_max"] < data["salary_min"]
     ):
         raise HTTPException(status_code=422, detail="salary_max 不可小於 salary_min")
-    if data["status"] in {"approved", "sourcing", "interviewing"}:
-        data["published_at"] = datetime.now(UTC)
     requisition = JobRequisition(**data)
     db.add(requisition)
     try:
@@ -83,6 +97,8 @@ def update_requisition(
         raise HTTPException(status_code=404, detail="職缺不存在")
     enforce_department_scope(user, requisition.department_id)
     updates = payload.model_dump(exclude_unset=True)
+    if "status" in updates and updates["status"] not in REQUISITION_STATUSES:
+        raise HTTPException(status_code=422, detail="未知的需求單狀態")
     salary_min = updates.get("salary_min", requisition.salary_min)
     salary_max = updates.get("salary_max", requisition.salary_max)
     if salary_min is not None and salary_max is not None and salary_max < salary_min:

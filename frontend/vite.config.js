@@ -19,7 +19,6 @@ export default defineConfig(({ mode }) => {
     '127.0.0.1',
     machineHostname,
     machineHostname.toLowerCase(),
-    '.trycloudflare.com',
     ...extraAllowedHosts,
   ])]
 
@@ -31,6 +30,20 @@ export default defineConfig(({ mode }) => {
       preserveSymlinks: true,
     },
     server: {
+      host: '0.0.0.0',
+      port: 5173,
+      strictPort: true,
+      allowedHosts,
+      proxy: {
+        '/api': {
+          target: proxyTarget,
+          changeOrigin: true,
+        },
+      },
+    },
+    // Mirror the dev server so `vite preview` (built static assets served as the
+    // LAN "production") keeps hostname access and /api proxying working.
+    preview: {
       host: '0.0.0.0',
       port: 5173,
       strictPort: true,

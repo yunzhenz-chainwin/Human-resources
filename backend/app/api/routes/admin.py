@@ -598,8 +598,14 @@ def create_user(
         is_active=True,
     )
     db.add(user)
-    db.flush()
-    _commit_audit(db, actor, "create", "user", user.id, {"role": user.role})
+    try:
+        db.flush()
+        _commit_audit(db, actor, "create", "user", user.id, {"role": user.role})
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409, detail="Username or email already exists"
+        ) from exc
     db.refresh(user)
     return user
 
@@ -645,6 +651,8 @@ def update_user(
     if password:
         user.password_hash = hash_password(password)
         revoked_at = datetime.now(UTC)
+        # Invalidate already-issued access tokens immediately, not just refresh tokens.
+        user.tokens_valid_after = revoked_at
         revoked = db.execute(
             update(RefreshToken)
             .where(
@@ -692,6 +700,8 @@ def reset_user_password(
     temporary_password = _generate_temporary_password()
     user.password_hash = hash_password(temporary_password)
     revoked_at = datetime.now(UTC)
+    # Invalidate already-issued access tokens immediately, not just refresh tokens.
+    user.tokens_valid_after = revoked_at
     revoked = db.execute(
         update(RefreshToken)
         .where(
@@ -747,8 +757,12 @@ def create_department(
     _department(db, payload.parent_id)
     item = Department(name=payload.name.strip(), parent_id=payload.parent_id, is_active=True)
     db.add(item)
-    db.flush()
-    _commit_audit(db, actor, "create", "department", item.id)
+    try:
+        db.flush()
+        _commit_audit(db, actor, "create", "department", item.id)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Department already exists") from exc
     db.refresh(item)
     return item
 
@@ -791,8 +805,12 @@ def create_skill(
         raise HTTPException(status_code=409, detail="Skill already exists")
     item = SkillCatalog(name=payload.name.strip(), name_norm=normalized, is_active=True)
     db.add(item)
-    db.flush()
-    _commit_audit(db, actor, "create", "skill", item.id)
+    try:
+        db.flush()
+        _commit_audit(db, actor, "create", "skill", item.id)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Skill already exists") from exc
     db.refresh(item)
     return item
 
@@ -828,8 +846,12 @@ def create_tag(
         raise HTTPException(status_code=409, detail="Tag already exists")
     item = Tag(name=name, category=category, is_active=True)
     db.add(item)
-    db.flush()
-    _commit_audit(db, actor, "create", "tag", item.id)
+    try:
+        db.flush()
+        _commit_audit(db, actor, "create", "tag", item.id)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Tag already exists") from exc
     db.refresh(item)
     return item
 

@@ -1,5 +1,7 @@
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass
@@ -9,6 +11,7 @@ from docx import Document
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+from app.core.config import get_settings
 from app.parsers import select_adapter
 from app.services.ocr import extract_pdf_with_ocr
 
@@ -56,14 +59,43 @@ class ParserResult:
     error_message: str | None = None
 
 
-def _structured_pdf_payload(path: Path) -> dict | None:
-    """Read trusted-shape TalentHub fields embedded by the local PDF template."""
+def _verify_structured_signature(payload_b64: str, signature_b64: str) -> bool:
+    """Verify an HMAC-SHA256 signature over the base64 payload body.
+
+    The signing key is the server ``auth_secret_key``.  A missing/short secret
+    or any decode error fails closed so unsigned or tampered blobs are never
+    trusted.
+    """
+    secret = get_settings().auth_secret_key.encode()
+    if len(secret) < 32:
+        return False
+    try:
+        provided = base64.urlsafe_b64decode(signature_b64 + "=" * (-len(signature_b64) % 4))
+    except (binascii.Error, ValueError):
+        return False
+    expected = hmac.new(secret, payload_b64.encode("ascii"), hashlib.sha256).digest()
+    return hmac.compare_digest(expected, provided)
+
+
+def _structured_pdf_payload(path: Path) -> tuple[dict, bool] | None:
+    """Read TalentHub fields embedded by the local PDF template.
+
+    Returns the extracted payload together with ``verified`` — whether the blob
+    carried a valid HMAC signature over its base64 body.  The ``THR1:`` prefix
+    alone proves nothing about origin, so callers MUST treat ``verified=False``
+    as untrusted and force manual review; an unsigned or forged blob is never
+    granted the trusted fast-path.
+    """
     try:
         metadata = PdfReader(str(path)).metadata
         subject = str(metadata.get("/Subject", "")) if metadata else ""
         if not subject.startswith("THR1:") or len(subject) > 20_000:
             return None
-        decoded = base64.b64decode(subject[5:], validate=True)
+        payload_b64, _, signature_b64 = subject[5:].partition(".")
+        verified = bool(signature_b64) and _verify_structured_signature(
+            payload_b64, signature_b64
+        )
+        decoded = base64.b64decode(payload_b64, validate=True)
         source = json.loads(decoded.decode("utf-8"))
         if not isinstance(source, dict) or source.get("schema") != "talenthub.resume.v1":
             return None
@@ -94,7 +126,7 @@ def _structured_pdf_payload(path: Path) -> dict | None:
                     for value in values[:max_items]
                     if isinstance(value, str) and value.strip()
                 ]
-        return payload if payload.get("name") else None
+        return (payload, verified) if payload.get("name") else None
     except (ValueError, TypeError, json.JSONDecodeError, binascii.Error, PdfReadError):
         return None
 
@@ -189,28 +221,40 @@ def parse_text(text: str, requested_platform: str = "generic") -> ParserResult:
 def parse_resume(path: Path, requested_platform: str) -> ParserResult:
     if path.suffix.lower() == ".pdf":
         structured = _structured_pdf_payload(path)
-        if structured:
-            confidence = {field: 1.0 for field, value in structured.items() if value is not None}
+        if structured is not None:
+            payload, verified = structured
+            # A forged THR1 prefix must not bypass review: only a cryptographically
+            # verified blob is granted full trust; otherwise the fields are still
+            # surfaced but flagged for manual review at reduced confidence.
+            confidence = {
+                field: (1.0 if verified else 0.75)
+                for field, value in payload.items()
+                if value is not None
+            }
             has_identity = bool(
-                structured.get("name")
-                and (structured.get("email") or structured.get("phone"))
+                payload.get("name")
+                and (payload.get("email") or payload.get("phone"))
             )
             return ParserResult(
                 "direct",
-                "parsed" if has_identity else "needs_review",
-                _structured_text(structured),
-                structured,
+                "parsed" if (verified and has_identity) else "needs_review",
+                _structured_text(payload),
+                payload,
                 confidence,
-                1.0,
-                1.0,
+                1.0 if verified else 0.75,
+                1.0 if verified else 0.0,
                 [
                     {
-                        "type": "structured_pdf_metadata",
+                        "type": (
+                            "structured_pdf_metadata"
+                            if verified
+                            else "unverified_structured_pdf_metadata"
+                        ),
                         "marker": "talenthub.resume.v1",
-                        "weight": 1.0,
+                        "weight": 1.0 if verified else 0.0,
                     }
                 ],
-                False,
+                not verified,
                 None,
             )
         ocr_result = extract_pdf_with_ocr(path)

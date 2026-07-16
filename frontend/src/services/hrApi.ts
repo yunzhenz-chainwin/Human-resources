@@ -285,9 +285,23 @@ async function apiBlob(path: string, retry = true): Promise<Blob> {
 
 export const hrApi = {
   health: () => apiRequest<{ status: string }>('/health'),
-  candidates: (params: { page?: number; page_size?: number } = {}) => {
-    const query = new URLSearchParams({ page: String(params.page || 1), page_size: String(params.page_size || 100) })
-    return apiRequest<CandidateDto[]>(`/candidates?${query}`)
+  candidates: async (params: { page?: number; page_size?: number } = {}): Promise<ApiResult<CandidateDto[]>> => {
+    const pageSize = params.page_size || 100
+    // An explicit page returns just that page; the default (no page) walks every page so counts stay accurate.
+    if (params.page !== undefined) {
+      const query = new URLSearchParams({ page: String(params.page), page_size: String(pageSize) })
+      return apiRequest<CandidateDto[]>(`/candidates?${query}`)
+    }
+    const all: CandidateDto[] = []
+    let batch: CandidateDto[]
+    let page = 1
+    do {
+      const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+      batch = (await apiRequest<CandidateDto[]>(`/candidates?${query}`)).data
+      all.push(...batch)
+      page += 1
+    } while (batch.length === pageSize)
+    return { data: all }
   },
   candidate: (id: number) => apiRequest<CandidateDetailDto>(`/candidates/${id}`),
   saveCandidate: (payload: CandidateWrite, id?: number) => apiRequest<CandidateDto>(`/candidates${id ? `/${id}` : ''}`, {
@@ -335,13 +349,23 @@ export const hrApi = {
     method: 'PATCH', body: JSON.stringify(payload),
   }),
 
-  resumes: (status?: string, includeConfirmed = false) => {
-    const query = new URLSearchParams({
-      page_size: '100',
-      include_confirmed: String(includeConfirmed),
-    })
-    if (status) query.set('parse_status', status)
-    return apiRequest<ResumeDto[]>(`/resumes?${query}`)
+  resumes: async (status?: string, includeConfirmed = false): Promise<ApiResult<ResumeDto[]>> => {
+    const pageSize = 100
+    const all: ResumeDto[] = []
+    let batch: ResumeDto[]
+    let page = 1
+    do {
+      const query = new URLSearchParams({
+        page: String(page),
+        page_size: String(pageSize),
+        include_confirmed: String(includeConfirmed),
+      })
+      if (status) query.set('parse_status', status)
+      batch = (await apiRequest<ResumeDto[]>(`/resumes?${query}`)).data
+      all.push(...batch)
+      page += 1
+    } while (batch.length === pageSize)
+    return { data: all }
   },
   resume: (id: number) => apiRequest<ResumeDto>(`/resumes/${id}`),
   uploadResumes: (files: File[], source: ResumeSource, candidateId?: number, requisitionId?: number) => {

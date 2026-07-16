@@ -43,7 +43,7 @@ def test_vite_lan_access_uses_fixed_ports_and_explicit_host_allowlist() -> None:
         assert "host: '0.0.0.0'" in config
         assert f"port: {port}" in config
         assert "strictPort: true" in config
-        assert "hostname().toLowerCase()" in config
+        assert "machineHostname.toLowerCase()" in config
         assert "VITE_ALLOWED_HOSTS" in config
         assert "target: proxyTarget" in config
 

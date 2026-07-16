@@ -319,29 +319,45 @@ async function refreshAll(silent = false) {
       return
     }
     const canEditCandidates = ['admin', 'hr'].includes(authState.user?.role || '')
-    const [[candidateResult, resumeResult, jobResult], [applicationResult, departmentResult]] = await Promise.all([
-      Promise.all([hrApi.candidates(), hrApi.resumes(), hrApi.requisitions()]),
-      Promise.allSettled([
-        canEditCandidates ? hrApi.applications() : Promise.resolve({ data: [] as ApplicationDto[] }),
-        canEditCandidates ? adminApi.departments() : Promise.resolve({ data: [] as Department[] }),
-      ]),
+    const [candidateResult, resumeResult, jobResult, applicationResult, departmentResult] = await Promise.allSettled([
+      hrApi.candidates(),
+      hrApi.resumes(),
+      hrApi.requisitions(),
+      canEditCandidates ? hrApi.applications() : Promise.resolve({ data: [] as ApplicationDto[] }),
+      canEditCandidates ? adminApi.departments() : Promise.resolve({ data: [] as Department[] }),
     ])
-    candidates.value = candidateResult.data
+    // Apply whichever core datasets loaded; a single endpoint failure must not discard the others or fake a full outage.
+    const failures: unknown[] = []
+    if (candidateResult.status === 'fulfilled') {
+      candidates.value = candidateResult.value.data
+      await loadCandidatePhotos(candidates.value)
+    } else failures.push(candidateResult.reason)
+    if (resumeResult.status === 'fulfilled') {
+      resumes.value = resumeResult.value.data
+      if (selectedResume.value && !resumes.value.some(resume => resume.id === selectedResume.value?.id)) {
+        selectedResume.value = null
+      }
+    } else failures.push(resumeResult.reason)
+    if (jobResult.status === 'fulfilled') {
+      jobs.value = jobResult.value.data
+      if (uploadRequisitionId.value !== null && !jobs.value.some(job => job.id === uploadRequisitionId.value)) {
+        uploadRequisitionId.value = null
+      }
+    } else failures.push(jobResult.reason)
     applications.value = applicationResult.status === 'fulfilled' ? applicationResult.value.data : []
     applicationsLoaded.value = applicationResult.status === 'fulfilled'
-    const loadedDepartments = departmentResult.status === 'fulfilled' ? departmentResult.value.data : []
-    departments.value = loadedDepartments.length ? loadedDepartments : departmentsFromJobs(jobResult.data)
-    await loadCandidatePhotos(candidates.value)
-    resumes.value = resumeResult.data
-    if (selectedResume.value && !resumes.value.some(resume => resume.id === selectedResume.value?.id)) {
-      selectedResume.value = null
-    }
-    jobs.value = jobResult.data
-    if (uploadRequisitionId.value !== null && !jobs.value.some(job => job.id === uploadRequisitionId.value)) {
-      uploadRequisitionId.value = null
+    if (departmentResult.status === 'fulfilled' && departmentResult.value.data.length) {
+      departments.value = departmentResult.value.data
+    } else if (jobResult.status === 'fulfilled') {
+      departments.value = departmentsFromJobs(jobResult.value.data)
     }
     lastSync.value = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })
-    if (!silent) setNotice('資料已同步')
+    if (failures.length) {
+      showError(failures[0])
+      if (failures.length === 3) apiOnline.value = false
+    } else if (!silent) {
+      setNotice('資料已同步')
+    }
   } catch (cause) {
     apiOnline.value = false
     showError(cause)
@@ -745,6 +761,8 @@ async function syncResumeQueue(notify = true) {
       selectedResume.value = null
     }
     if (notify) setNotice('履歷辨識進度已更新')
+  } catch (cause) {
+    showError(cause)
   } finally {
     syncingResumes.value = false
   }
@@ -893,6 +911,7 @@ async function authenticated() {
 function logout() {
   authSession.logout()
   candidates.value = []
+  Object.keys(candidatePhotoPreviews).forEach(id => clearCandidatePhotoPreview(Number(id)))
   applications.value = []
   applicationsLoaded.value = false
   departments.value = []

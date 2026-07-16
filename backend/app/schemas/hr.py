@@ -10,6 +10,27 @@ from pydantic import (
     model_validator,
 )
 
+REQUISITION_STATUSES = (
+    "draft",
+    "submitted",
+    "returned",
+    "approved",
+    "sourcing",
+    "interviewing",
+    "filled",
+    "closed",
+)
+CANDIDATE_STATUSES = (
+    "new",
+    "contacted",
+    "priority",
+    "interviewing",
+    "hired",
+    "declined",
+    "withdrawn",
+    "archived",
+)
+
 
 class CandidateCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
@@ -104,6 +125,13 @@ class CandidateActivityCreate(BaseModel):
     happened_at: datetime | None = None
     next_status: str | None = Field(default=None, max_length=20)
 
+    @field_validator("next_status")
+    @classmethod
+    def validate_next_status(cls, value: str | None) -> str | None:
+        if value is not None and value not in CANDIDATE_STATUSES:
+            raise ValueError("未知的人才狀態")
+        return value
+
 
 class CandidateActivityRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -134,6 +162,13 @@ class RequisitionCreate(BaseModel):
     salary_type: str | None = None
     headcount: int = Field(default=1, ge=1)
     status: str = "draft"
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        if value not in REQUISITION_STATUSES:
+            raise ValueError("未知的需求單狀態")
+        return value
 
 
 class RequisitionRead(BaseModel):
@@ -214,6 +249,13 @@ class RequisitionUpdate(BaseModel):
     salary_type: str | None = None
     headcount: int | None = Field(default=None, ge=1)
     status: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str | None) -> str | None:
+        if value is not None and value not in REQUISITION_STATUSES:
+            raise ValueError("未知的需求單狀態")
+        return value
 
 
 class DepartmentRequisitionCreate(BaseModel):

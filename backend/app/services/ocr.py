@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import os
 import shutil
 import subprocess
 import time
@@ -20,6 +21,8 @@ from typing import Protocol
 from uuid import uuid4
 
 from pypdf import PdfReader
+
+from app.core.config import get_settings
 
 
 @dataclass(frozen=True)
@@ -88,13 +91,34 @@ class LocalTesseractProvider:
             return discovered
         if command != "tesseract":
             return None
-        for candidate in (
+        candidates: list[Path] = []
+        # Allow the binary directory to be pinned via env for non-default
+        # installs (other users, drives, or non-Windows hosts).
+        configured_dir = os.environ.get("TESSERACT_DIR")
+        if configured_dir:
+            candidates += [
+                Path(configured_dir) / name for name in ("tesseract.exe", "tesseract")
+            ]
+        # Keep the known Windows install locations as the default fallback.
+        candidates += [
             Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
             Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
-        ):
+        ]
+        for candidate in candidates:
             if candidate.is_file():
                 return str(candidate)
         return None
+
+    @staticmethod
+    def _temporary_root() -> Path:
+        # Resolve to an absolute path from configuration rather than the process
+        # working directory, which is unstable across launch contexts. An
+        # explicit override wins; otherwise anchor to the configured storage area.
+        override = os.environ.get("OCR_TEMP_DIR")
+        if override:
+            return Path(override).expanduser().resolve()
+        storage_root = Path(get_settings().resume_storage_path).expanduser().resolve().parent
+        return storage_root / "ocr-temp"
 
     def recognize(self, pdf_path: Path, page_count: int, limits: OCRLimits) -> str:
         if not self.available():
@@ -110,7 +134,7 @@ class LocalTesseractProvider:
         chunks: list[str] = []
         # Use the application's writable storage instead of the Windows service
         # account temp directory, which may deny child OCR processes access.
-        temporary_root = Path.cwd() / "storage" / "ocr-temp"
+        temporary_root = self._temporary_root()
         temporary_root.mkdir(parents=True, exist_ok=True)
         temporary_files: list[Path] = []
         try:

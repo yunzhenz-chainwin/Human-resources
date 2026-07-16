@@ -66,6 +66,20 @@ def _parse_into(resume: ResumeFile, path: Path, source_platform: str) -> None:
     resume.error_message = parsed.error_message
 
 
+def _validate_public_phone(phone: str | None) -> None:
+    """Reject anonymous phone input that normalizes to an unusable dedup key.
+
+    Multipart submissions bypass the JSON schema, so guard the normalized phone
+    here: it must not be empty (a false dedup key) nor exceed the
+    ``Candidate.phone_norm`` column limit (``String(20)``).
+    """
+    if phone is None:
+        return
+    phone_norm = normalize_phone(phone)
+    if not phone_norm or len(phone_norm) > 20:
+        raise HTTPException(status_code=422, detail="Invalid phone number")
+
+
 def _save_talent_profile(
     db: Session,
     *,
@@ -103,18 +117,16 @@ def _save_talent_profile(
         db.add(candidate)
         db.flush()
     else:
-        candidate.name = name or candidate.name
+        candidate.name = candidate.name or name
         candidate.email = candidate.email or (email.strip() if email else None)
         candidate.email_norm = candidate.email_norm or email_norm
         candidate.phone = candidate.phone or phone
         candidate.phone_norm = candidate.phone_norm or phone_norm
-        candidate.city = city or candidate.city
-        candidate.current_title = current_title or candidate.current_title
+        candidate.city = candidate.city or city
+        candidate.current_title = candidate.current_title or current_title
         candidate.total_years = (
-            total_years if total_years is not None else candidate.total_years
+            candidate.total_years if candidate.total_years is not None else total_years
         )
-        candidate.consent_status = "consented"
-        candidate.consent_at = now
     sync_candidate_skills(db, candidate, skills)
     if commit:
         db.commit()
@@ -197,6 +209,8 @@ async def create_application(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
+    _validate_public_phone(payload.phone)
+
     if resume is None:
         return submit_application(db, payload)
 
@@ -243,6 +257,8 @@ async def join_talent_pool(
     resume: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ) -> PublicTalentPoolResult:
+    email = (email or "").strip() or None
+    phone = (phone or "").strip() or None
     if not consent:
         raise HTTPException(status_code=422, detail="Consent is required")
     if not email and not phone:
@@ -250,6 +266,20 @@ async def join_talent_pool(
     submitted_skills = [
         item.strip() for item in re.split(r"[,，、;|]", skills or "") if item.strip()
     ]
+    try:
+        profile = PublicTalentProfileCreate(
+            name=name,
+            email=email,
+            phone=phone,
+            city=city,
+            current_title=current_title,
+            total_years=total_years,
+            skills=submitted_skills,
+            consent=consent,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    _validate_public_phone(profile.phone)
     if resume is None:
         candidate, created = _save_talent_profile(
             db,
@@ -286,9 +316,16 @@ async def join_talent_pool(
         )
         if existing:
             if existing.candidate_id not in (None, candidate.id):
-                raise HTTPException(
-                    status_code=409,
-                    detail="履歷檔案已屬於其他人才，請聯絡 HR",
+                # The file hash is already stored under a different candidate.
+                # Do not reveal content-existence/ownership to anonymous
+                # submitters: persist the profile, drop the duplicate upload,
+                # and return the same generic result as a no-resume submission.
+                db.commit()
+                prepared.discard()
+                return PublicTalentPoolResult(
+                    candidate_id=candidate.id,
+                    status="created" if created else "updated",
+                    duplicate=not created,
                 )
             existing.candidate_id = candidate.id
             db.commit()

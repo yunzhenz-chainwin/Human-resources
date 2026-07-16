@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import Boolean, CheckConstraint, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import BIGINT_PK, Base, TimestampMixin
+from app.db.base import BIGINT_PK, Base, TimestampMixin, UTCDateTime
 
 
 class Department(TimestampMixin, Base):
@@ -33,5 +35,8 @@ class User(TimestampMixin, Base):
         ForeignKey("departments.id", ondelete="SET NULL")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Access tokens whose iat predates this instant are rejected, so a password
+    # reset/change immediately invalidates already-issued access tokens.
+    tokens_valid_after: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
     department: Mapped[Department | None] = relationship()

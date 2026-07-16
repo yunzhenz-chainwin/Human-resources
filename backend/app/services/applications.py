@@ -77,9 +77,12 @@ def submit_application(
         candidate.phone_norm = candidate.phone_norm or phone_norm
         candidate.city = candidate.city or payload.city
         candidate.current_title = candidate.current_title or payload.current_title
-        candidate.total_years = candidate.total_years or payload.total_years
-        candidate.consent_status = "consented"
-        candidate.consent_at = datetime.now(UTC)
+        candidate.total_years = (
+            candidate.total_years if candidate.total_years is not None else payload.total_years
+        )
+        # Do NOT (re)set consent from an anonymous public submission on an existing
+        # candidate — someone who knows another person's email/phone could otherwise
+        # flip their consent flag. Consent is recorded only when creating a new candidate.
     else:
         candidate = Candidate(
             code=f"T{datetime.now(UTC).year}-{datetime.now(UTC).strftime('%m%d%H%M%S%f')[-10:]}",

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -113,6 +113,12 @@ def decode_token(token: str, expected_type: str) -> dict:
         raise unauthorized from exc
 
 
+# Constant, precomputed hash used to keep authenticate() timing uniform: even when
+# the username is unknown we still run one scrypt verification, so response time does
+# not reveal whether an account exists and an attacker cannot cheaply skip the KDF.
+_DUMMY_PASSWORD_HASH = hash_password("authenticate-timing-uniformity-placeholder")
+
+
 def authenticate(db: Session, username: str, password: str) -> User | None:
     normalized = username.strip().lower()
     user = db.scalar(
@@ -120,7 +126,12 @@ def authenticate(db: Session, username: str, password: str) -> User | None:
             or_(User.username == normalized, User.email == normalized), User.is_active.is_(True)
         )
     )
-    return user if user and verify_password(password, user.password_hash) else None
+    if user is None:
+        # Unknown account: still perform a dummy verification so the request takes a
+        # comparable amount of time to a real (failed) password check.
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        return None
+    return user if verify_password(password, user.password_hash) else None
 
 
 def issue_token_pair(db: Session, user: User) -> tuple[str, str, int]:
@@ -149,16 +160,32 @@ def rotate_refresh_token(db: Session, token: str) -> tuple[str, str, int]:
         )
     )
     now = datetime.now(UTC)
-    expires_at = token_row.expires_at if token_row else now
+    if token_row is None:
+        raise HTTPException(status_code=401, detail="Refresh token is revoked or expired")
+    expires_at = token_row.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
-    if not token_row or token_row.revoked_at or expires_at <= now:
+    if expires_at <= now:
         raise HTTPException(status_code=401, detail="Refresh token is revoked or expired")
     user = db.get(User, int(payload["sub"]))
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User is inactive")
-    token_row.revoked_at = now
-    db.flush()
+    # Atomically claim this token so only one rotation can ever succeed. A zero
+    # rowcount means it was already revoked, i.e. a rotated token is being replayed;
+    # treat that as compromise and revoke the account's entire refresh-token family.
+    claimed = db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.id == token_row.id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    if not claimed.rowcount:
+        db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=now)
+        )
+        db.commit()
+        raise HTTPException(status_code=401, detail="Refresh token reuse detected")
     return issue_token_pair(db, user)
 
 

@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
 from app.dependencies.auth import (
@@ -202,8 +202,12 @@ def _sync_legacy_interview(application: JobApplication) -> None:
 
 
 def _sync_application_status(application: JobApplication) -> None:
-    final_result = application.manager_interview_result or application.hr_interview_result
-    result_status = RESULT_APPLICATION_STATUSES.get(final_result or "")
+    # A terminal decision (offered/hired/rejected) from EITHER stage wins so a
+    # non-terminal result in one stage never downgrades a finalized application
+    # back to "interview". Manager keeps precedence when both stages are terminal.
+    result_status = RESULT_APPLICATION_STATUSES.get(
+        application.manager_interview_result or ""
+    ) or RESULT_APPLICATION_STATUSES.get(application.hr_interview_result or "")
     if result_status is not None:
         application.status = result_status
     elif _stage_has_data(application, "hr") or _stage_has_data(application, "manager"):
@@ -214,6 +218,8 @@ def _sync_application_status(application: JobApplication) -> None:
 def list_applications(
     department_id: int | None = Query(default=None, gt=0),
     requisition_id: int | None = Query(default=None, gt=0),
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
 ) -> list[ApplicationRead]:
@@ -232,6 +238,8 @@ def list_applications(
         select(JobApplication, Candidate, JobRequisition)
         .join(Candidate, Candidate.id == JobApplication.candidate_id)
         .join(JobRequisition, JobRequisition.id == JobApplication.requisition_id)
+        .options(joinedload(JobRequisition.department))
+        .where(Candidate.deleted_at.is_(None))
         .order_by(JobApplication.created_at.desc(), JobApplication.id.desc())
     )
     if user.role == "manager":
@@ -240,6 +248,10 @@ def list_applications(
         statement = statement.where(JobRequisition.department_id == department_id)
     if requisition_id is not None:
         statement = statement.where(JobApplication.requisition_id == requisition_id)
+    if offset:
+        statement = statement.offset(offset)
+    if limit is not None:
+        statement = statement.limit(limit)
     return [
         _application_read(application, candidate, requisition)
         for application, candidate, requisition in db.execute(statement).all()

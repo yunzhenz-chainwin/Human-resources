@@ -22,7 +22,11 @@ from app.schemas.matching import (
     MatchRead,
     MatchStatusUpdate,
 )
-from app.services.matching import assess_matching_readiness, rematch_requisition
+from app.services.matching import (
+    POSITIVE_OUTCOME_STATUSES,
+    assess_matching_readiness,
+    rematch_requisition,
+)
 
 router = APIRouter()
 
@@ -85,16 +89,20 @@ def list_matches(
     min_score: float = Query(0, ge=0, le=100),
     status: str | None = None,
     include_ineligible: bool = False,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> MatchList:
     _requisition(db, requisition_id, user)
     statement = (
         select(MatchResult)
+        .join(Candidate, Candidate.id == MatchResult.candidate_id)
         .options(joinedload(MatchResult.candidate))
         .where(
             MatchResult.requisition_id == requisition_id,
             MatchResult.total_score >= min_score,
+            Candidate.deleted_at.is_(None),
         )
         .order_by(
             MatchResult.rank.is_(None),
@@ -115,6 +123,10 @@ def list_matches(
         )
     if status:
         statement = statement.where(MatchResult.status == status)
+    if offset:
+        statement = statement.offset(offset)
+    if limit is not None:
+        statement = statement.limit(limit)
     items = list(db.scalars(statement).all())
     return MatchList(items=[MatchRead.model_validate(item) for item in items], total=len(items))
 
@@ -125,6 +137,8 @@ def list_matches(
 )
 def candidate_match_overview(
     requisition_id: int,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> CandidateMatchOverview:
@@ -154,6 +168,10 @@ def candidate_match_overview(
             )
         )
         statement = statement.where(applied_to_this_job)
+    if offset:
+        statement = statement.offset(offset)
+    if limit is not None:
+        statement = statement.limit(limit)
     rows = db.execute(statement).all()
     items = [
         CandidateMatchOverviewItem(
@@ -227,6 +245,8 @@ def rematch(
         min_score=0,
         status=None,
         include_ineligible=False,
+        limit=None,
+        offset=0,
         db=db,
         user=user,
     )
@@ -263,6 +283,7 @@ def match_feedback(
     result = _match(db, match_id)
     _enforce_match_action_scope(db, result, user)
     result.status = payload.status
+    result.feedback_by = user.id
     result.feedback_reason = payload.reason.strip() if payload.reason else None
     result.feedback_at = datetime.now(UTC)
     db.commit()
@@ -279,6 +300,16 @@ def update_match_status(
 ) -> MatchResult:
     result = _match(db, match_id)
     _enforce_match_action_scope(db, result, user)
+    if not result.gate_passed and payload.status in POSITIVE_OUTCOME_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="An ineligible match cannot advance to a positive outcome",
+        )
+    if result.status == "hired" and payload.status != "hired":
+        raise HTTPException(
+            status_code=409,
+            detail="A hired match is final and cannot be moved to another status",
+        )
     result.status = payload.status
     db.commit()
     db.refresh(result)

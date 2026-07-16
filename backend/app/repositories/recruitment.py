@@ -1,4 +1,4 @@
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import Candidate, JobApplication, JobRequisition
@@ -33,18 +33,23 @@ class RecruitmentRepository:
         return self.db.scalar(query)
 
     def find_candidate(self, email_norm: str | None, phone_norm: str | None) -> Candidate | None:
-        matches = []
+        # Prefer an email match; only fall back to phone when no email match exists
+        # so a shared phone number cannot bind an applicant to the wrong person.
         if email_norm:
-            matches.append(Candidate.email_norm == email_norm)
+            candidate = self.db.scalar(
+                select(Candidate)
+                .where(Candidate.deleted_at.is_(None), Candidate.email_norm == email_norm)
+                .order_by(Candidate.id)
+            )
+            if candidate is not None:
+                return candidate
         if phone_norm:
-            matches.append(Candidate.phone_norm == phone_norm)
-        if not matches:
-            return None
-        return self.db.scalar(
-            select(Candidate)
-            .where(Candidate.deleted_at.is_(None), or_(*matches))
-            .order_by(Candidate.id)
-        )
+            return self.db.scalar(
+                select(Candidate)
+                .where(Candidate.deleted_at.is_(None), Candidate.phone_norm == phone_norm)
+                .order_by(Candidate.id)
+            )
+        return None
 
     def existing_application(self, requisition_id: int, candidate_id: int) -> JobApplication | None:
         return self.db.scalar(

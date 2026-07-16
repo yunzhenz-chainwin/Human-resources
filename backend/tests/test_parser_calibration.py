@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -6,6 +8,7 @@ from uuid import uuid4
 import pytest
 from pypdf import PdfWriter
 
+from app.core.config import get_settings
 from app.parsers import select_adapter
 from app.parsers.registry import detect_source
 from app.services.resume_parser import parse_resume, parse_text
@@ -154,11 +157,18 @@ def test_talenthub_pdf_metadata_restores_exact_fields() -> None:
     encoded = base64.b64encode(
         json.dumps(expected, ensure_ascii=False).encode("utf-8")
     ).decode("ascii")
+    # Sign the payload the way a genuine TalentHub export must: only an HMAC over the
+    # base64 body (keyed by auth_secret_key) earns the trusted, no-review fast path.
+    signature = base64.urlsafe_b64encode(
+        hmac.new(
+            get_settings().auth_secret_key.encode(), encoded.encode("ascii"), hashlib.sha256
+        ).digest()
+    ).decode("ascii")
     path = Path("storage") / f"metadata-test-{uuid4().hex}.pdf"
     path.parent.mkdir(exist_ok=True)
     writer = PdfWriter()
     writer.add_blank_page(width=612, height=792)
-    writer.add_metadata({"/Subject": f"THR1:{encoded}"})
+    writer.add_metadata({"/Subject": f"THR1:{encoded}.{signature}"})
     with path.open("wb") as stream:
         writer.write(stream)
 

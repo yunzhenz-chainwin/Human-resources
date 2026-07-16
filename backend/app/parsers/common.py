@@ -55,6 +55,37 @@ TAIWAN_CITIES = (
     "連江縣",
 )
 
+# Common Traditional-Chinese job-title tokens. Used only to stop the last-resort
+# name heuristic from emitting a leading job-title line as a personal name; they
+# are never treated as names themselves.
+TITLE_KEYWORDS = (
+    "工程師",
+    "設計師",
+    "分析師",
+    "建築師",
+    "技師",
+    "研究員",
+    "經理",
+    "副理",
+    "協理",
+    "總監",
+    "主管",
+    "主任",
+    "課長",
+    "組長",
+    "專員",
+    "助理",
+    "顧問",
+    "實習",
+    "業務",
+    "企劃",
+    "專案",
+    "研發",
+    "開發",
+    "執行長",
+    "總經理",
+)
+
 
 @dataclass(frozen=True)
 class FieldRules:
@@ -108,6 +139,12 @@ def _name(text: str, aliases: tuple[str, ...]) -> tuple[str | None, float]:
     excluded = {"履歷", "自傳", "工作經歷", "技能專長", "學歷", "基本資料"}
     for line in (item.strip() for item in text.splitlines()[:12]):
         if re.fullmatch(r"[\u4e00-\u9fff·]{2,8}", line) and line not in excluded:
+            # A leading line is often a city or job title rather than a name;
+            # those must not be emitted as a name by this low-confidence path.
+            if any(city in line for city in TAIWAN_CITIES):
+                continue
+            if any(keyword in line for keyword in TITLE_KEYWORDS):
+                continue
             return line, 0.62
     return None, 0.0
 
@@ -137,10 +174,28 @@ def extract_fields(text: str, rules: FieldRules) -> tuple[dict, dict[str, float]
         r"(?<!\d)(?:\+?886[-\s]?)?0?9\d{2}[-\s]?\d{3}[-\s]?\d{3}(?!\d)", text
     )
     city_value = label(text, rules.city, 100)
-    city_source = city_value or text
-    city = next(
-        (item.replace("臺", "台") for item in TAIWAN_CITIES if item in city_source), None
+    if city_value:
+        city_source = city_value
+    else:
+        # Without a residence label, only trust a city that begins a line (an
+        # address-shaped signal). Scanning the whole document previously
+        # surfaced an employer or school location instead of the residence.
+        city_source = next(
+            (
+                stripped
+                for stripped in (line.strip() for line in text.splitlines())
+                if any(stripped.startswith(name) for name in TAIWAN_CITIES)
+            ),
+            "",
+        )
+    # Choose the city appearing earliest in the source, not the one that comes
+    # first in the TAIWAN_CITIES ordering.
+    city = min(
+        (name for name in TAIWAN_CITIES if name in city_source),
+        key=city_source.find,
+        default=None,
     )
+    city = city.replace("臺", "台") if city else None
     title = label(text, rules.title)
     company = label(text, rules.company)
     education_value = label(text, rules.education)

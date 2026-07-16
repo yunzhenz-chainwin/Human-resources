@@ -368,7 +368,7 @@ def test_hr_creates_persisted_login_without_privilege_escalation(auth_client) ->
         json={
             "username": "manager2",
             "email": "manager2@example.test",
-            "password": "hr123",
+            "password": "manager2-strong-pw",
             "display_name": "Manager Two",
             "role": "manager",
             "department_id": 1,
@@ -376,7 +376,7 @@ def test_hr_creates_persisted_login_without_privilege_escalation(auth_client) ->
         headers=headers,
     )
     assert created.status_code == 201
-    assert login(client, "manager2", "hr123")["access_token"]
+    assert login(client, "manager2", "manager2-strong-pw")["access_token"]
     with testing_session() as db:
         assert db.scalar(select(User).where(User.username == "manager2")) is not None
     denied = client.post(
@@ -384,7 +384,7 @@ def test_hr_creates_persisted_login_without_privilege_escalation(auth_client) ->
         json={
             "username": "shadowit",
             "email": "shadowit@example.test",
-            "password": "it123",
+            "password": "shadowit-strong-pw",
             "display_name": "Shadow IT",
             "role": "it",
         },

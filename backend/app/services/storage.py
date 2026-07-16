@@ -168,7 +168,15 @@ def validate_file_signature(path: Path, suffix: str) -> None:
     if suffix == ".pdf":
         valid = header.startswith(b"%PDF-")
     elif suffix == ".doc":
-        valid = header.startswith(bytes.fromhex("D0CF11E0A1B11AE1"))
+        # Legacy Word files are OLE2 compound documents. The 8-byte OLE2 magic alone is a
+        # weak signal -- xls/ppt/msi share it -- so also require the "WordDocument" stream
+        # (stored UTF-16LE in the compound-file directory) that every genuine .doc carries.
+        # This is only a last line of defense; the malware scanner (enforce_scan_policy) is
+        # the real guarantee for uploaded content.
+        if header.startswith(bytes.fromhex("D0CF11E0A1B11AE1")):
+            with path.open("rb") as ole_document:
+                body = ole_document.read()
+            valid = "WordDocument".encode("utf-16-le") in body
     elif suffix == ".docx" and header.startswith(b"PK"):
         try:
             with ZipFile(path) as archive:
@@ -211,14 +219,18 @@ def enforce_scan_policy(scan_status: ScanStatus, detail: str | None, settings: S
         return
     if scan_status == ScanStatus.INFECTED:
         raise HTTPException(status_code=422, detail="Malware detected; upload rejected")
-    fail_closed = settings.app_env.lower() in {"production", "staging"}
-    if fail_closed or settings.resume_scan_policy == "fail":
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Malware scan unavailable; upload rejected ({detail or scan_status})",
-        )
-    if settings.resume_scan_policy != "allow_unavailable":
-        raise RuntimeError(f"Unsupported scan policy: {settings.resume_scan_policy}")
+    # The scanner could not vet this file (UNAVAILABLE/ERROR). Fail closed by default:
+    # accept an un-scanned upload only when an operator has explicitly opted in via
+    # RESUME_SCAN_POLICY=allow_unavailable AND the environment is not production/staging.
+    # A forgotten APP_ENV, an unset/unknown policy, or any other state rejects rather than
+    # silently accepting unscanned files on the unauthenticated public upload routes.
+    fail_closed_env = settings.app_env.lower() in {"production", "staging"}
+    if settings.resume_scan_policy == "allow_unavailable" and not fail_closed_env:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=f"Malware scan unavailable; upload rejected ({detail or scan_status})",
+    )
 
 
 async def prepare_resume_upload(

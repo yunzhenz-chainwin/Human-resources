@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from datetime import UTC
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -27,6 +28,20 @@ def get_current_user(
     user = db.get(User, int(payload["sub"]))
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User is inactive")
+    # Reject access tokens issued before the account's password was last changed or
+    # reset. tokens_valid_after is NULL for accounts that never rotated, so existing
+    # sessions are left untouched.
+    tokens_valid_after = user.tokens_valid_after
+    if tokens_valid_after is not None:
+        if tokens_valid_after.tzinfo is None:
+            tokens_valid_after = tokens_valid_after.replace(tzinfo=UTC)
+        issued_at = payload.get("iat")
+        if issued_at is None or int(issued_at) < tokens_valid_after.timestamp():
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session expired, please sign in again",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     return user
 
 
@@ -78,7 +93,11 @@ def require_department_manager(user: User = Depends(get_current_user)) -> User:
 def enforce_department_scope(user: User, department_id: int | None) -> None:
     if user.role in GLOBAL_RECRUITING_ROLES:
         return
-    if user.role != "manager" or user.department_id != department_id:
+    # A non-global user without a department must never match NULL-department rows,
+    # so reject before the comparison (mirrors require_department_manager).
+    if user.role != "manager" or user.department_id is None:
+        raise HTTPException(status_code=403, detail="Outside department scope")
+    if user.department_id != department_id:
         raise HTTPException(status_code=403, detail="Outside department scope")
 
 

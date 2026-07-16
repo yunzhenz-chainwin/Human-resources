@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     app_name: str = "TalentHub API"
     app_env: str = "development"
     api_v1_prefix: str = "/api/v1"
+    # Local-dev fallback only. Production MUST override DATABASE_URL (env / .env) with real
+    # credentials: this default embeds a well-known dev password and must never reach prod.
     database_url: str = "postgresql+psycopg://talenthub:talenthub_dev_only@localhost:5432/talenthub"
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
     resume_storage_path: str = "./storage/resumes"

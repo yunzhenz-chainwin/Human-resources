@@ -30,13 +30,21 @@ try {
         "hr" {
             Set-Location (Join-Path $root "frontend")
             $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
-            & $npm run dev
+            & $npm run build
+            if ($LASTEXITCODE -ne 0) {
+                throw "Frontend build failed with exit code $LASTEXITCODE."
+            }
+            & $npm exec -- vite preview --configLoader native --host 0.0.0.0 --port 5173 --strictPort
             $exitCode = $LASTEXITCODE
         }
         "career" {
             Set-Location (Join-Path $root "career-frontend")
             $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
-            & $npm run dev
+            & $npm run build
+            if ($LASTEXITCODE -ne 0) {
+                throw "Career frontend build failed with exit code $LASTEXITCODE."
+            }
+            & $npm exec -- vite preview --configLoader native --host 0.0.0.0 --port 5174 --strictPort
             $exitCode = $LASTEXITCODE
         }
     }

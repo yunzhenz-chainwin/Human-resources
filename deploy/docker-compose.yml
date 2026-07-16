@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-talenthub}
       POSTGRES_USER: ${POSTGRES_USER:-talenthub}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-talenthub_dev_only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -13,6 +13,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    mem_limit: 512m
+    cpus: "1.0"
 
   redis:
     image: redis:7-alpine
@@ -20,13 +22,18 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
+    mem_limit: 256m
+    cpus: "0.5"
 
   backend:
     build: ../backend
     restart: unless-stopped
     env_file: ../.env
+    # Bind to loopback only: the raw API (and /docs) must not be reachable on
+    # the LAN.  Browsers hit the frontends, which proxy to backend:8000 over the
+    # compose network.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -39,6 +46,8 @@ services:
       # Keep profile photos outside the container writable layer.  This is a
       # separate volume so existing resume_data layouts remain compatible.
       - candidate_photo_data:/app/storage/candidate-photos
+    mem_limit: 1g
+    cpus: "2.0"
 
   migrate:
     build: ../backend
@@ -48,6 +57,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 512m
+    cpus: "1.0"
 
   frontend:
     build: ../frontend
@@ -55,7 +66,10 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    mem_limit: 128m
+    cpus: "0.5"
 
   career-frontend:
     build: ../career-frontend
@@ -63,7 +77,10 @@ services:
     ports:
       - "8081:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    mem_limit: 128m
+    cpus: "0.5"
 
 volumes:
   postgres_data:
