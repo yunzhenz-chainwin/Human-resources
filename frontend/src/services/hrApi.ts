@@ -283,6 +283,9 @@ async function apiBlob(path: string, retry = true): Promise<Blob> {
   return response.blob()
 }
 
+// Hard cap so a backend that ignores the `page` param cannot spin the fetch-all loops into an infinite loop / OOM.
+const MAX_FETCH_PAGES = 100
+
 export const hrApi = {
   health: () => apiRequest<{ status: string }>('/health'),
   candidates: async (params: { page?: number; page_size?: number } = {}): Promise<ApiResult<CandidateDto[]>> => {
@@ -300,7 +303,10 @@ export const hrApi = {
       batch = (await apiRequest<CandidateDto[]>(`/candidates?${query}`)).data
       all.push(...batch)
       page += 1
-    } while (batch.length === pageSize)
+    } while (batch.length === pageSize && page <= MAX_FETCH_PAGES)
+    if (batch.length === pageSize && page > MAX_FETCH_PAGES) {
+      console.warn(`hrApi.candidates: stopped after ${MAX_FETCH_PAGES} pages (${all.length} records); results may be truncated if the backend ignores the page param`)
+    }
     return { data: all }
   },
   candidate: (id: number) => apiRequest<CandidateDetailDto>(`/candidates/${id}`),
@@ -364,7 +370,10 @@ export const hrApi = {
       batch = (await apiRequest<ResumeDto[]>(`/resumes?${query}`)).data
       all.push(...batch)
       page += 1
-    } while (batch.length === pageSize)
+    } while (batch.length === pageSize && page <= MAX_FETCH_PAGES)
+    if (batch.length === pageSize && page > MAX_FETCH_PAGES) {
+      console.warn(`hrApi.resumes: stopped after ${MAX_FETCH_PAGES} pages (${all.length} records); results may be truncated if the backend ignores the page param`)
+    }
     return { data: all }
   },
   resume: (id: number) => apiRequest<ResumeDto>(`/resumes/${id}`),

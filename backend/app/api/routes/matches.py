@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
@@ -83,6 +83,24 @@ def _enforce_match_action_scope(db: Session, result: MatchResult, user: User) ->
         raise HTTPException(status_code=403, detail="Candidate did not apply to this requisition")
 
 
+def _guard_status_transition(result: MatchResult, new_status: str) -> None:
+    """Refuse status changes that bypass the eligibility gate or reopen a hire.
+
+    Shared by the feedback and status endpoints so neither path can advance an
+    ineligible candidate to a positive outcome nor move a finalized hire.
+    """
+    if not result.gate_passed and new_status in POSITIVE_OUTCOME_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="An ineligible match cannot advance to a positive outcome",
+        )
+    if result.status == "hired" and new_status != "hired":
+        raise HTTPException(
+            status_code=409,
+            detail="A hired match is final and cannot be moved to another status",
+        )
+
+
 @router.get("/requisitions/{requisition_id}/matches", response_model=MatchList)
 def list_matches(
     requisition_id: int,
@@ -95,25 +113,15 @@ def list_matches(
     user: User = Depends(get_current_user),
 ) -> MatchList:
     _requisition(db, requisition_id, user)
-    statement = (
-        select(MatchResult)
-        .join(Candidate, Candidate.id == MatchResult.candidate_id)
-        .options(joinedload(MatchResult.candidate))
-        .where(
-            MatchResult.requisition_id == requisition_id,
-            MatchResult.total_score >= min_score,
-            Candidate.deleted_at.is_(None),
-        )
-        .order_by(
-            MatchResult.rank.is_(None),
-            MatchResult.rank.asc(),
-            MatchResult.candidate_id.asc(),
-        )
-    )
+    conditions = [
+        MatchResult.requisition_id == requisition_id,
+        MatchResult.total_score >= min_score,
+        Candidate.deleted_at.is_(None),
+    ]
     if not include_ineligible:
-        statement = statement.where(MatchResult.gate_passed.is_(True))
+        conditions.append(MatchResult.gate_passed.is_(True))
     if user.role == "manager":
-        statement = statement.where(
+        conditions.append(
             exists(
                 select(JobApplication.id).where(
                     JobApplication.requisition_id == requisition_id,
@@ -122,13 +130,33 @@ def list_matches(
             )
         )
     if status:
-        statement = statement.where(MatchResult.status == status)
+        conditions.append(MatchResult.status == status)
+    # True total over the filtered set, independent of the limit/offset page below.
+    total = int(
+        db.scalar(
+            select(func.count(MatchResult.id))
+            .join(Candidate, Candidate.id == MatchResult.candidate_id)
+            .where(*conditions)
+        )
+        or 0
+    )
+    statement = (
+        select(MatchResult)
+        .join(Candidate, Candidate.id == MatchResult.candidate_id)
+        .options(joinedload(MatchResult.candidate))
+        .where(*conditions)
+        .order_by(
+            MatchResult.rank.is_(None),
+            MatchResult.rank.asc(),
+            MatchResult.candidate_id.asc(),
+        )
+    )
     if offset:
         statement = statement.offset(offset)
     if limit is not None:
         statement = statement.limit(limit)
     items = list(db.scalars(statement).all())
-    return MatchList(items=[MatchRead.model_validate(item) for item in items], total=len(items))
+    return MatchList(items=[MatchRead.model_validate(item) for item in items], total=total)
 
 
 @router.get(
@@ -145,29 +173,40 @@ def candidate_match_overview(
     """Return every active candidate, including people not scored for this job yet."""
 
     _requisition(db, requisition_id, user)
+    match_join = (MatchResult.candidate_id == Candidate.id) & (
+        MatchResult.requisition_id == requisition_id
+    )
+    conditions = [Candidate.deleted_at.is_(None)]
+    if user.role == "manager":
+        conditions.append(
+            exists(
+                select(JobApplication.id).where(
+                    JobApplication.requisition_id == requisition_id,
+                    JobApplication.candidate_id == Candidate.id,
+                )
+            )
+        )
+    # Totals span the whole filtered set (ignoring limit/offset): every candidate
+    # plus the subset that already has a computed match row.
+    totals = db.execute(
+        select(func.count(Candidate.id), func.count(MatchResult.id))
+        .select_from(Candidate)
+        .outerjoin(MatchResult, match_join)
+        .where(*conditions)
+    ).one()
+    total_candidates = int(totals[0] or 0)
+    computed_count = int(totals[1] or 0)
     statement = (
         select(Candidate, MatchResult)
-        .outerjoin(
-            MatchResult,
-            (MatchResult.candidate_id == Candidate.id)
-            & (MatchResult.requisition_id == requisition_id),
-        )
+        .outerjoin(MatchResult, match_join)
         .options(joinedload(MatchResult.candidate))
-        .where(Candidate.deleted_at.is_(None))
+        .where(*conditions)
         .order_by(
             MatchResult.total_score.desc().nulls_last(),
             Candidate.name.asc(),
             Candidate.id.asc(),
         )
     )
-    if user.role == "manager":
-        applied_to_this_job = exists(
-            select(JobApplication.id).where(
-                JobApplication.requisition_id == requisition_id,
-                JobApplication.candidate_id == Candidate.id,
-            )
-        )
-        statement = statement.where(applied_to_this_job)
     if offset:
         statement = statement.offset(offset)
     if limit is not None:
@@ -180,12 +219,11 @@ def candidate_match_overview(
         )
         for candidate, result in rows
     ]
-    computed_count = sum(item.match is not None for item in items)
     return CandidateMatchOverview(
         items=items,
-        total_candidates=len(items),
+        total_candidates=total_candidates,
         computed_count=computed_count,
-        uncomputed_count=len(items) - computed_count,
+        uncomputed_count=total_candidates - computed_count,
     )
 
 
@@ -259,7 +297,14 @@ def match_readiness(
     user: User = Depends(get_current_user),
 ) -> dict:
     _requisition(db, requisition_id, user)
-    statement = select(MatchResult).where(MatchResult.requisition_id == requisition_id)
+    statement = (
+        select(MatchResult)
+        .join(Candidate, Candidate.id == MatchResult.candidate_id)
+        .where(
+            MatchResult.requisition_id == requisition_id,
+            Candidate.deleted_at.is_(None),
+        )
+    )
     if user.role == "manager":
         statement = statement.where(
             exists(
@@ -282,6 +327,7 @@ def match_feedback(
 ) -> MatchResult:
     result = _match(db, match_id)
     _enforce_match_action_scope(db, result, user)
+    _guard_status_transition(result, payload.status)
     result.status = payload.status
     result.feedback_by = user.id
     result.feedback_reason = payload.reason.strip() if payload.reason else None
@@ -300,16 +346,7 @@ def update_match_status(
 ) -> MatchResult:
     result = _match(db, match_id)
     _enforce_match_action_scope(db, result, user)
-    if not result.gate_passed and payload.status in POSITIVE_OUTCOME_STATUSES:
-        raise HTTPException(
-            status_code=409,
-            detail="An ineligible match cannot advance to a positive outcome",
-        )
-    if result.status == "hired" and payload.status != "hired":
-        raise HTTPException(
-            status_code=409,
-            detail="A hired match is final and cannot be moved to another status",
-        )
+    _guard_status_transition(result, payload.status)
     result.status = payload.status
     db.commit()
     db.refresh(result)

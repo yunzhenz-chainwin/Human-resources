@@ -9,12 +9,30 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.organization import User
 from app.models.recruitment import JobApplication, JobRequisition
-from app.services.security import decode_token, write_audit
+from app.services.security import client_ip, decode_token, write_audit
 
 bearer = HTTPBearer(auto_error=False)
 
+# Endpoints a user under a forced password change may still reach: the change-password
+# flow itself, logout, and reading their own profile (so the client can detect the
+# forced-change state). Matched as path suffixes so they work regardless of the mount
+# prefix (e.g. "/api/v1/auth/me").
+_PASSWORD_CHANGE_EXEMPT_SUFFIXES = (
+    "/auth/change-password",
+    "/auth/logout",
+    "/auth/me",
+)
+
+
+def _password_change_exempt(request: Request | None) -> bool:
+    if request is None:
+        return False
+    path = request.url.path.rstrip("/")
+    return any(path.endswith(suffix) for suffix in _PASSWORD_CHANGE_EXEMPT_SUFFIXES)
+
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: Session = Depends(get_db),
 ) -> User:
@@ -36,12 +54,23 @@ def get_current_user(
         if tokens_valid_after.tzinfo is None:
             tokens_valid_after = tokens_valid_after.replace(tzinfo=UTC)
         issued_at = payload.get("iat")
-        if issued_at is None or int(issued_at) < tokens_valid_after.timestamp():
+        # Floor BOTH sides to whole seconds. iat is already second-resolution, so a
+        # token minted in the same wall-clock second as the reset must not be falsely
+        # rejected on sub-second drift.
+        if issued_at is None or int(issued_at) < int(tokens_valid_after.timestamp()):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Session expired, please sign in again",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+    # A forced credential change blocks normal endpoints until the user actually changes
+    # the password; only the exempt endpoints above stay reachable. must_change_password
+    # defaults to False, so existing accounts and sessions are unaffected.
+    if user.must_change_password and not _password_change_exempt(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password change required",
+        )
     return user
 
 
@@ -155,7 +184,7 @@ def audit_pii_read(
         "candidate",
         candidate_id,
         user.department_id,
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()

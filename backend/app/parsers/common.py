@@ -93,7 +93,17 @@ class FieldRules:
     title: tuple[str, ...]
     years: tuple[str, ...]
     skills: tuple[str, ...]
-    city: tuple[str, ...] = ("居住地", "居住地區", "所在地", "通訊地址")
+    city: tuple[str, ...] = (
+        "現居住地",
+        "現居地",
+        "居住地區",
+        "居住地",
+        "現居",
+        "所在地",
+        "通訊地址",
+        "聯絡地址",
+        "地址",
+    )
     company: tuple[str, ...] = ("目前公司", "現職公司", "最近公司", "任職公司")
     education: tuple[str, ...] = ("最高學歷", "學歷", "教育程度")
     expected_title: tuple[str, ...] = ("希望職稱", "希望職務", "期望職務", "應徵職務")
@@ -175,6 +185,9 @@ def extract_fields(text: str, rules: FieldRules) -> tuple[dict, dict[str, float]
     )
     city_value = label(text, rules.city, 100)
     if city_value:
+        # A residence label (地址／現居住地／聯絡地址／…) is authoritative: look for a
+        # known city anywhere in its value, not just at the start, so shapes like
+        # "地址：台北市中正區…" still resolve to a city.
         city_source = city_value
     else:
         # Without a residence label, only trust a city that begins a line (an

@@ -12,6 +12,28 @@ New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $logPath = Join-Path $logDirectory "$Service.log"
 $exitCode = 1
 
+# Cap transcript growth under the SYSTEM autostart, which relaunches this script
+# on every crash.  When the active log passes the size cap, archive it with a
+# timestamp; then prune archives beyond the retention window so the logs folder
+# cannot grow without bound across repeated restarts.  Best-effort: a rotation
+# failure must never stop the service from starting.
+$logSizeCapBytes = 10MB
+$logRetentionCount = 10
+try {
+    if ((Test-Path $logPath) -and ((Get-Item $logPath).Length -ge $logSizeCapBytes)) {
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+        Rename-Item -Path $logPath -NewName "$Service.$stamp.log"
+    }
+    Get-ChildItem -Path $logDirectory -Filter "$Service.*.log" |
+        Where-Object { $_.Name -ne "$Service.log" } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip $logRetentionCount |
+        Remove-Item -Force
+}
+catch {
+    Write-Warning "Log rotation skipped: $_"
+}
+
 try {
     Start-Transcript -Path $logPath -Append | Out-Null
     Write-Host "[$(Get-Date -Format o)] Starting TalentHub service: $Service"

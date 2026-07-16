@@ -220,12 +220,15 @@ def enforce_scan_policy(scan_status: ScanStatus, detail: str | None, settings: S
     if scan_status == ScanStatus.INFECTED:
         raise HTTPException(status_code=422, detail="Malware detected; upload rejected")
     # The scanner could not vet this file (UNAVAILABLE/ERROR). Fail closed by default:
-    # accept an un-scanned upload only when an operator has explicitly opted in via
-    # RESUME_SCAN_POLICY=allow_unavailable AND the environment is not production/staging.
-    # A forgotten APP_ENV, an unset/unknown policy, or any other state rejects rather than
-    # silently accepting unscanned files on the unauthenticated public upload routes.
-    fail_closed_env = settings.app_env.lower() in {"production", "staging"}
-    if settings.resume_scan_policy == "allow_unavailable" and not fail_closed_env:
+    # accept an un-scanned upload ONLY when an operator has explicitly opted in via
+    # RESUME_SCAN_POLICY=allow_unavailable AND app_env names a recognized development
+    # context. Operators must opt IN to this lax behaviour: anything else -- a
+    # forgotten or misspelled APP_ENV (e.g. "prod"), an unknown environment, or an
+    # unset/unknown policy -- rejects rather than silently accepting unscanned files on
+    # the unauthenticated public upload routes, so a production deploy can never fall
+    # open by omission.
+    dev_env = settings.app_env.lower() in {"development", "test", "local"}
+    if settings.resume_scan_policy == "allow_unavailable" and dev_env:
         return
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -17,6 +17,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
@@ -291,7 +292,7 @@ async def upload_resumes(
                 parse_status="pending",
             )
             db.add(resume)
-            _apply_parse(resume, path, source_platform)
+            await run_in_threadpool(_apply_parse, resume, path, source_platform)
             db.flush()
             results.append(
                 ResumeUploadResult(

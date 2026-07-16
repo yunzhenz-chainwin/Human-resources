@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -216,6 +216,7 @@ def _sync_application_status(application: JobApplication) -> None:
 
 @router.get("", response_model=list[ApplicationRead])
 def list_applications(
+    response: Response,
     department_id: int | None = Query(default=None, gt=0),
     requisition_id: int | None = Query(default=None, gt=0),
     limit: int | None = Query(default=None, ge=1, le=500),
@@ -234,20 +235,35 @@ def list_applications(
                 raise HTTPException(status_code=404, detail="Requisition not found")
             _enforce_application_scope(user, filtered_requisition)
 
+    conditions = [Candidate.deleted_at.is_(None)]
+    if user.role == "manager":
+        conditions.append(JobRequisition.department_id == user.department_id)
+    if department_id is not None:
+        conditions.append(JobRequisition.department_id == department_id)
+    if requisition_id is not None:
+        conditions.append(JobApplication.requisition_id == requisition_id)
+
+    # Expose the full filtered size via a header so the bare-list body stays
+    # backward compatible while clients can still page with limit/offset.
+    total = int(
+        db.scalar(
+            select(func.count(JobApplication.id))
+            .join(Candidate, Candidate.id == JobApplication.candidate_id)
+            .join(JobRequisition, JobRequisition.id == JobApplication.requisition_id)
+            .where(*conditions)
+        )
+        or 0
+    )
+    response.headers["X-Total-Count"] = str(total)
+
     statement = (
         select(JobApplication, Candidate, JobRequisition)
         .join(Candidate, Candidate.id == JobApplication.candidate_id)
         .join(JobRequisition, JobRequisition.id == JobApplication.requisition_id)
         .options(joinedload(JobRequisition.department))
-        .where(Candidate.deleted_at.is_(None))
+        .where(*conditions)
         .order_by(JobApplication.created_at.desc(), JobApplication.id.desc())
     )
-    if user.role == "manager":
-        statement = statement.where(JobRequisition.department_id == user.department_id)
-    if department_id is not None:
-        statement = statement.where(JobRequisition.department_id == department_id)
-    if requisition_id is not None:
-        statement = statement.where(JobApplication.requisition_id == requisition_id)
     if offset:
         statement = statement.offset(offset)
     if limit is not None:

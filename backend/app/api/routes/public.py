@@ -1,9 +1,13 @@
 import re
+import threading
+from collections import deque
 from datetime import UTC, date, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -29,6 +33,55 @@ from app.services.storage import prepare_resume_upload
 
 router = APIRouter(prefix="/public")
 SourcePlatform = Literal["direct", "p104", "p1111", "generic"]
+
+# --- Anonymous upload throttle (per-process) ---
+# Dependency-free, per-process sliding-window limiter for the public upload
+# endpoints. Each scanned PDF can hold a worker for up to ~45s of OCR, so an
+# unthrottled anonymous route is an easy resource-exhaustion vector. The parse
+# itself now runs in a threadpool (see run_in_threadpool below), so this is
+# defense-in-depth: a generous per-IP cap that bounds anonymous floods without
+# tripping legitimate bursty use. State lives in-process: a multi-worker /
+# multi-host deployment should additionally throttle at the reverse proxy.
+_UPLOAD_RATE_LIMIT = 20  # max uploads per client IP per window
+_UPLOAD_RATE_WINDOW = 60.0  # sliding window, seconds
+_UPLOAD_RATE_MAX_CLIENTS = 4096  # hard cap on tracked IPs to bound memory
+_upload_hits: dict[str, deque[float]] = {}
+_upload_hits_lock = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP: first X-Forwarded-For hop, else the socket peer."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_upload_rate_limit(request: Request) -> None:
+    """Throttle a client IP that exceeds the public upload rate (HTTP 429)."""
+    ip = _client_ip(request)
+    now = monotonic()
+    cutoff = now - _UPLOAD_RATE_WINDOW
+    with _upload_hits_lock:
+        # Bound the table before inserting: drop clients whose window has fully
+        # expired, then hard-cap so a spoofed-IP flood cannot grow it.
+        if len(_upload_hits) > _UPLOAD_RATE_MAX_CLIENTS:
+            stale = [k for k, v in _upload_hits.items() if not v or v[-1] <= cutoff]
+            for key in stale:
+                del _upload_hits[key]
+            while len(_upload_hits) > _UPLOAD_RATE_MAX_CLIENTS:
+                del _upload_hits[next(iter(_upload_hits))]
+        hits = _upload_hits.get(ip)
+        if hits is None:
+            hits = _upload_hits[ip] = deque()
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+        if len(hits) >= _UPLOAD_RATE_LIMIT:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many uploads, please retry shortly",
+            )
+        hits.append(now)
 
 
 def to_public_job(job: JobRequisition) -> PublicJob:
@@ -155,6 +208,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> PublicJob:
     status_code=status.HTTP_201_CREATED,
 )
 async def create_application(
+    request: Request,
     job_id: int | None = Form(None),
     name: str = Form(...),
     email: str | None = Form(None),
@@ -173,6 +227,7 @@ async def create_application(
 ) -> PublicApplicationResult | PublicTalentPoolResult:
     if job_id is None:
         return await join_talent_pool(
+            request=request,
             name=name,
             email=email,
             phone=phone,
@@ -187,6 +242,7 @@ async def create_application(
             resume=resume,
             db=db,
         )
+    _enforce_upload_rate_limit(request)
     try:
         payload = PublicApplicationCreate(
             requisition_id=job_id,
@@ -223,7 +279,7 @@ async def create_application(
             select(ResumeFile).where(ResumeFile.storage_key == upload_data.storage_key)
         )
         if stored:
-            _parse_into(stored, stored_path, "direct")
+            await run_in_threadpool(_parse_into, stored, stored_path, "direct")
             # Public submissions must remain visible in the HR queue even when
             # extraction cannot run synchronously; the error is retained for retry.
             if stored.parse_status in {"failed", "needs_review"}:
@@ -243,6 +299,7 @@ async def create_application(
     "/talent-pool", response_model=PublicTalentPoolResult, status_code=status.HTTP_201_CREATED
 )
 async def join_talent_pool(
+    request: Request,
     name: str = Form(..., min_length=1, max_length=100),
     email: str | None = Form(None),
     phone: str | None = Form(None),
@@ -257,6 +314,7 @@ async def join_talent_pool(
     resume: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ) -> PublicTalentPoolResult:
+    _enforce_upload_rate_limit(request)
     email = (email or "").strip() or None
     phone = (phone or "").strip() or None
     if not consent:
@@ -348,7 +406,7 @@ async def join_talent_pool(
             parse_status="pending",
         )
         db.add(record)
-        _parse_into(record, path, source_platform)
+        await run_in_threadpool(_parse_into, record, path, source_platform)
         parsed = dict(record.parsed_payload or {})
         submitted = {
             "name": name,

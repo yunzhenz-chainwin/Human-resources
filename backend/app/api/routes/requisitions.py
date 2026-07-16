@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -13,6 +13,7 @@ from app.dependencies.auth import (
 )
 from app.models import JobRequisition, User
 from app.schemas.hr import (
+    ALLOWED_REQUISITION_TRANSITIONS,
     REQUISITION_STATUSES,
     RequisitionCreate,
     RequisitionRead,
@@ -21,22 +22,59 @@ from app.schemas.hr import (
 
 router = APIRouter(prefix="/requisitions")
 
+# Statuses whose entry means the requisition is published; the first of these to
+# be reached stamps published_at.
+_PUBLISHED_STATUSES = frozenset({"approved", "sourcing", "interviewing"})
+
+# Upper bound for an explicitly requested page size.
+_MAX_PAGE_SIZE = 200
+
+
+def _apply_status_timestamps(requisition: JobRequisition, new_status: str) -> None:
+    """Stamp workflow timestamps as a requisition enters ``new_status``.
+
+    Only empty columns are filled, so re-entering a status keeps the original
+    timestamp. Writing filled_at here is what makes the time-to-fill report work.
+    """
+    now = datetime.now(UTC)
+    if new_status == "approved" and requisition.approved_at is None:
+        requisition.approved_at = now
+    if new_status in _PUBLISHED_STATUSES and requisition.published_at is None:
+        requisition.published_at = now
+    if new_status == "filled" and requisition.filled_at is None:
+        requisition.filled_at = now
+    if new_status == "closed" and requisition.closed_at is None:
+        requisition.closed_at = now
+
 
 @router.get("", response_model=list[RequisitionRead])
 def list_requisitions(
+    response: Response,
     requisition_status: str | None = Query(None, alias="status"),
+    limit: int | None = Query(None, ge=1, le=_MAX_PAGE_SIZE),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[JobRequisition]:
+    filters = []
+    if user.role == "manager":
+        filters.append(JobRequisition.department_id == user.department_id)
+    if requisition_status:
+        filters.append(JobRequisition.status == requisition_status)
+    count_stmt = select(func.count(JobRequisition.id))
     query = (
         select(JobRequisition)
         .options(joinedload(JobRequisition.department))
         .order_by(JobRequisition.updated_at.desc())
     )
-    if user.role == "manager":
-        query = query.where(JobRequisition.department_id == user.department_id)
-    if requisition_status:
-        query = query.where(JobRequisition.status == requisition_status)
+    if filters:
+        count_stmt = count_stmt.where(*filters)
+        query = query.where(*filters)
+    total = db.scalar(count_stmt) or 0
+    query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+    response.headers["X-Total-Count"] = str(total)
     return list(db.scalars(query).all())
 
 
@@ -97,16 +135,25 @@ def update_requisition(
         raise HTTPException(status_code=404, detail="職缺不存在")
     enforce_department_scope(user, requisition.department_id)
     updates = payload.model_dump(exclude_unset=True)
-    if "status" in updates and updates["status"] not in REQUISITION_STATUSES:
+    new_status = updates.get("status")
+    if new_status is not None and new_status not in REQUISITION_STATUSES:
         raise HTTPException(status_code=422, detail="未知的需求單狀態")
+    transitioning = new_status is not None and new_status != requisition.status
+    if transitioning and new_status not in ALLOWED_REQUISITION_TRANSITIONS.get(
+        requisition.status, frozenset()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"需求單狀態不可由「{requisition.status}」變更為「{new_status}」",
+        )
     salary_min = updates.get("salary_min", requisition.salary_min)
     salary_max = updates.get("salary_max", requisition.salary_max)
     if salary_min is not None and salary_max is not None and salary_max < salary_min:
         raise HTTPException(status_code=422, detail="salary_max 不可小於 salary_min")
     for field, value in updates.items():
         setattr(requisition, field, value)
-    if "status" in updates and updates["status"] in {"approved", "sourcing", "interviewing"}:
-        requisition.published_at = requisition.published_at or datetime.now(UTC)
+    if transitioning:
+        _apply_status_timestamps(requisition, new_status)
     db.commit()
     db.refresh(requisition)
     return requisition
@@ -122,11 +169,10 @@ def approve_requisition(
     if not requisition:
         raise HTTPException(status_code=404, detail="職缺不存在")
     enforce_department_scope(user, requisition.department_id)
-    if requisition.status not in {"draft", "submitted", "returned"}:
+    if "approved" not in ALLOWED_REQUISITION_TRANSITIONS.get(requisition.status, frozenset()):
         raise HTTPException(status_code=409, detail="此狀態不可核准")
     requisition.status = "approved"
-    requisition.approved_at = datetime.now(UTC)
-    requisition.published_at = requisition.published_at or datetime.now(UTC)
+    _apply_status_timestamps(requisition, "approved")
     db.commit()
     db.refresh(requisition)
     return requisition

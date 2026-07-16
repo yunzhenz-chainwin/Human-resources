@@ -54,6 +54,10 @@ PHOTO_TYPES = {
     ),
 }
 
+# Applications in these states are closed; anything else still ties the candidate
+# to an open hiring process and must be withdrawn before the record is removed.
+TERMINAL_APPLICATION_STATUSES = frozenset({"rejected", "withdrawn"})
+
 
 def _safe_external_url(value: str | None) -> str | None:
     if not value:
@@ -511,6 +515,19 @@ def delete_candidate(
     candidate = db.get(Candidate, candidate_id)
     if not candidate or candidate.deleted_at:
         raise HTTPException(status_code=404, detail="人才不存在")
+    open_application_id = db.scalar(
+        select(JobApplication.id)
+        .where(
+            JobApplication.candidate_id == candidate.id,
+            ~JobApplication.status.in_(TERMINAL_APPLICATION_STATUSES),
+        )
+        .limit(1)
+    )
+    if open_application_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="人才仍有進行中的應徵，請先撤回或結束這些應徵後再刪除",
+        )
     storage = Path(settings.candidate_photo_storage_path).resolve()
     previous_path = Path(candidate.photo_path).resolve() if candidate.photo_path else None
     candidate.photo_path = None

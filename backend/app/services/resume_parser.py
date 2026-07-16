@@ -184,9 +184,11 @@ def parse_text(text: str, requested_platform: str = "generic") -> ParserResult:
     text = text.replace("\x00", "").strip()
     parsed = select_adapter(text, requested_platform)
     populated = [score for score in parsed.confidence.values() if score > 0]
-    overall = (
-        round(sum(populated) / len(parsed.confidence), 2) if populated else 0.0
-    )
+    # Average only the fields that were actually populated. Dividing by the full field
+    # count penalised a complete-but-sparse resume (e.g. full identity but no employer
+    # or seniority labels) below the review threshold even though every field present
+    # was high-confidence.
+    overall = round(sum(populated) / len(populated), 2) if populated else 0.0
     has_identity = bool(
         parsed.payload.get("name")
         and (parsed.payload.get("email") or parsed.payload.get("phone"))
@@ -285,7 +287,7 @@ def parse_resume(path: Path, requested_platform: str) -> ParserResult:
             }
             populated = [score for score in result.confidence.values() if score > 0]
             result.overall_confidence = (
-                round(sum(populated) / len(result.confidence), 2) if populated else 0.0
+                round(sum(populated) / len(populated), 2) if populated else 0.0
             )
             result.status = "needs_review"
             result.source_evidence = list(result.source_evidence or []) + [

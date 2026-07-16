@@ -20,6 +20,20 @@ REQUISITION_STATUSES = (
     "filled",
     "closed",
 )
+# Legal requisition status transitions (single source of truth for the approval
+# workflow). Every key and value is a member of REQUISITION_STATUSES; "closed" is
+# terminal. Enforced by both the PATCH and approve endpoints so the workflow and
+# its timestamp side-effects cannot be bypassed by a direct status jump.
+ALLOWED_REQUISITION_TRANSITIONS: dict[str, frozenset[str]] = {
+    "draft": frozenset({"submitted", "approved", "closed"}),
+    "submitted": frozenset({"approved", "returned", "closed"}),
+    "returned": frozenset({"draft", "submitted", "approved", "closed"}),
+    "approved": frozenset({"sourcing", "interviewing", "filled", "closed"}),
+    "sourcing": frozenset({"interviewing", "filled", "closed"}),
+    "interviewing": frozenset({"sourcing", "filled", "closed"}),
+    "filled": frozenset({"closed"}),
+    "closed": frozenset(),
+}
 CANDIDATE_STATUSES = (
     "new",
     "contacted",
@@ -113,6 +127,13 @@ class CandidateUpdate(BaseModel):
         "other",
     ] | None = None
     status: str | None = Field(default=None, max_length=20)
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str | None) -> str | None:
+        if value is not None and value not in CANDIDATE_STATUSES:
+            raise ValueError("未知的人才狀態")
+        return value
 
 
 class CandidateActivityCreate(BaseModel):

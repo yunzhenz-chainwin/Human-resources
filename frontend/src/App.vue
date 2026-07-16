@@ -353,8 +353,9 @@ async function refreshAll(silent = false) {
     }
     lastSync.value = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })
     if (failures.length) {
-      showError(failures[0])
-      if (failures.length === 3) apiOnline.value = false
+      // Surface every failed dataset; health() already ran and set apiOnline, so a data/permission error is not a connection outage.
+      const messages = failures.map(failure => failure instanceof Error ? failure.message : '發生未預期錯誤')
+      error.value = Array.from(new Set(messages)).join('；')
     } else if (!silent) {
       setNotice('資料已同步')
     }
@@ -1050,6 +1051,7 @@ onMounted(async () => {
               <footer><button class="button secondary" @click="viewCandidate(candidate)">查看詳情</button><template v-if="authState.user.role !== 'manager'"><button class="text-button" @click="openCandidate(candidate)">編輯</button><button class="text-button danger-text" :disabled="saving" @click="removeCandidate(candidate)">刪除</button></template><span v-else>唯讀</span></footer>
             </article>
           </div>
+          <div v-else-if="loading" class="empty panel"><span class="spinner"></span><p>正在載入人才資料…</p></div>
           <div v-else class="empty panel"><strong>找不到符合條件的人才</strong><p>請調整搜尋或篩選條件。</p></div>
         </section>
 
@@ -1118,7 +1120,8 @@ onMounted(async () => {
                 <div id="resume-queue-list" class="resume-center-queue-list" role="region" :aria-label="`解析佇列，共 ${filteredResumes.length} 份履歷`" aria-live="polite">
                   <button v-for="resume in filteredResumes" :key="resume.id" class="resume-row resume-center-queue-item" :class="{ active: selectedResume?.id === resume.id }" type="button" :aria-pressed="selectedResume?.id === resume.id" :aria-label="`${resume.original_filename || `履歷 #${resume.id}`}，${resume.source_review_required ? '來源待確認' : resumeQueueStatusLabels[resume.parse_status] || resume.parse_status}`" :data-testid="`resume-queue-row-${resume.id}`" @click="openResume(resume)"><span class="file-badge">{{ resume.original_filename?.split('.').pop()?.toUpperCase() || 'FILE' }}</span><span><strong>{{ resume.original_filename || `履歷 #${resume.id}` }}</strong><small>{{ sourceLabels[resume.source_platform] || resume.source_platform }} · 信心 {{ Math.round((resume.source_confidence || 0) * 100) }}% · {{ date(resume.uploaded_at) }}<template v-if="resume.target_requisition_id"> · {{ targetJobName(resume.target_requisition_id) }}</template></small></span><span class="status" role="status" :data-status="resume.source_review_required ? 'needs_review' : resume.parse_status">{{ resume.source_review_required ? '來源待確認' : resumeQueueStatusLabels[resume.parse_status] || resume.parse_status }}</span></button>
                 </div>
-                <div v-if="!filteredResumes.length" class="empty"><strong>{{ resumeStatus === 'all' ? '沒有待處理履歷' : '這個狀態目前沒有履歷' }}</strong><p>{{ resumeStatus === 'all' ? '已入庫履歷不會留在這裡，請至人才庫查看。' : '可調整篩選條件或按「更新進度」。' }}</p></div>
+                <div v-if="loading && !filteredResumes.length" class="empty"><span class="spinner"></span><p>正在載入解析佇列…</p></div>
+                <div v-else-if="!filteredResumes.length" class="empty"><strong>{{ resumeStatus === 'all' ? '沒有待處理履歷' : '這個狀態目前沒有履歷' }}</strong><p>{{ resumeStatus === 'all' ? '已入庫履歷不會留在這裡，請至人才庫查看。' : '可調整篩選條件或按「更新進度」。' }}</p></div>
               </article>
             </div>
             <article id="resume-review-stage" class="panel review-panel resume-center-review-panel" aria-labelledby="resume-review-heading" data-testid="resume-center-review">
@@ -1140,7 +1143,7 @@ onMounted(async () => {
 
         <section v-else-if="page === 'jobs'" class="page">
           <div class="page-heading"><div><p class="eyebrow">{{ roleProfile.scope }}</p><h1>{{ authState.user.role === 'manager' ? '我的職缺' : '職缺管理' }}</h1><p>{{ authState.user.role === 'manager' ? '追蹤所屬部門職缺、推薦人才與招募進度。' : '建立、編輯及核准全公司職缺；核准後公開前台才能讀取。' }}</p></div><button v-if="authState.user.role !== 'manager'" class="button primary" @click="openJob()">＋ 建立職缺</button></div>
-          <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="panel job-card"><header><span class="status" :data-status="job.status">{{ jobStatusLabels[job.status] || job.status }}</span><button v-if="authState.user.role !== 'manager'" class="text-button" @click="openJob(job)">編輯</button><button v-else class="text-button" @click="navigate('matching')">查看人才 →</button></header><h2>{{ job.title }}</h2><p>{{ job.req_no }} · {{ job.department_name || (job.department_id ? `部門 #${job.department_id}` : '未設定部門') }} · {{ job.work_city }} · 需求 {{ job.headcount }} 人</p><div class="job-summary">{{ job.summary || job.jd }}</div><div class="skill-list"><span v-for="skill in job.skills || []" :key="skill">{{ skill }}</span></div><footer><small>{{ job.requested_by ? '部門送交 · ' : '' }}{{ job.published_at ? `發布：${date(job.published_at)}` : '尚未發布' }}</small><button v-if="authState.user.role !== 'manager' && ['draft','submitted'].includes(job.status)" class="button primary" :disabled="saving" @click="approveJob(job)">核准職缺</button></footer></article><div v-if="!jobs.length" class="empty panel"><strong>目前沒有職缺</strong><p>目前權限範圍內沒有可檢視的職缺。</p></div></div>
+          <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="panel job-card"><header><span class="status" :data-status="job.status">{{ jobStatusLabels[job.status] || job.status }}</span><button v-if="authState.user.role !== 'manager'" class="text-button" @click="openJob(job)">編輯</button><button v-else class="text-button" @click="navigate('matching')">查看人才 →</button></header><h2>{{ job.title }}</h2><p>{{ job.req_no }} · {{ job.department_name || (job.department_id ? `部門 #${job.department_id}` : '未設定部門') }} · {{ job.work_city }} · 需求 {{ job.headcount }} 人</p><div class="job-summary">{{ job.summary || job.jd }}</div><div class="skill-list"><span v-for="skill in job.skills || []" :key="skill">{{ skill }}</span></div><footer><small>{{ job.requested_by ? '部門送交 · ' : '' }}{{ job.published_at ? `發布：${date(job.published_at)}` : '尚未發布' }}</small><button v-if="authState.user.role !== 'manager' && ['draft','submitted'].includes(job.status)" class="button primary" :disabled="saving" @click="approveJob(job)">核准職缺</button></footer></article><div v-if="loading && !jobs.length" class="empty panel"><span class="spinner"></span><p>正在載入職缺…</p></div><div v-else-if="!jobs.length" class="empty panel"><strong>目前沒有職缺</strong><p>目前權限範圍內沒有可檢視的職缺。</p></div></div>
         </section>
 
         <InterviewManagement v-else-if="page === 'interviews'" />

@@ -1,8 +1,8 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import and_, delete, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import and_, delete, distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -200,6 +200,8 @@ def delete_department_requisition(
 
 @router.get("/workspace", response_model=DepartmentWorkspaceRead)
 def department_workspace(
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(require_department_manager),
     db: Session = Depends(get_db),
 ) -> DepartmentWorkspaceRead:
@@ -209,13 +211,16 @@ def department_workspace(
     if not department or not department.is_active:
         raise HTTPException(status_code=403, detail="Department is unavailable")
 
-    requisitions = list(
-        db.scalars(
-            select(JobRequisition)
-            .where(JobRequisition.department_id == department.id)
-            .order_by(JobRequisition.updated_at.desc(), JobRequisition.id.desc())
-        ).all()
+    requisition_query = (
+        select(JobRequisition)
+        .where(JobRequisition.department_id == department.id)
+        .order_by(JobRequisition.updated_at.desc(), JobRequisition.id.desc())
     )
+    if offset:
+        requisition_query = requisition_query.offset(offset)
+    if limit is not None:
+        requisition_query = requisition_query.limit(limit)
+    requisitions = list(db.scalars(requisition_query).all())
     grouped: dict[int, list[DepartmentApplicantRead]] = {
         requisition.id: [] for requisition in requisitions
     }
@@ -256,14 +261,32 @@ def department_workspace(
         )
         for requisition in requisitions
     ]
-    unique_candidates = {
-        applicant.candidate.id for job in jobs for applicant in job.applicants
-    }
+    # Summary totals stay department-wide (independent of the requisition page).
+    total_jobs = int(
+        db.scalar(
+            select(func.count(JobRequisition.id)).where(
+                JobRequisition.department_id == department.id
+            )
+        )
+        or 0
+    )
+    application_totals = db.execute(
+        select(
+            func.count(JobApplication.id),
+            func.count(distinct(JobApplication.candidate_id)),
+        )
+        .join(Candidate, Candidate.id == JobApplication.candidate_id)
+        .join(JobRequisition, JobRequisition.id == JobApplication.requisition_id)
+        .where(
+            JobRequisition.department_id == department.id,
+            Candidate.deleted_at.is_(None),
+        )
+    ).one()
     return DepartmentWorkspaceRead(
         department_id=department.id,
         department_name=department.name,
-        total_jobs=len(jobs),
-        total_applications=sum(len(job.applicants) for job in jobs),
-        total_candidates=len(unique_candidates),
+        total_jobs=total_jobs,
+        total_applications=int(application_totals[0] or 0),
+        total_candidates=int(application_totals[1] or 0),
         jobs=jobs,
     )

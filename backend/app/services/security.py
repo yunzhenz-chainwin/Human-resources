@@ -3,10 +3,11 @@ import hashlib
 import hmac
 import json
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Request, status
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
@@ -134,6 +135,77 @@ def authenticate(db: Session, username: str, password: str) -> User | None:
     return user if verify_password(password, user.password_hash) else None
 
 
+# Durable, per-account brute-force throttle. The counters live on the user row, so the
+# limit cannot be defeated by rotating source IPs (every request behind nginx shares one
+# IP) and cannot grow an unbounded in-memory structure. Lock windows are deliberately
+# SHORT and auto-expiring: the aim is to slow sustained guessing against one account,
+# never to give an attacker a way to permanently lock out the real owner.
+_LOGIN_FAILURE_THRESHOLD = 5
+_LOGIN_LOCK_BASE_SECONDS = 60
+_LOGIN_LOCK_MAX_SECONDS = 15 * 60
+
+
+@dataclass(frozen=True)
+class LoginOutcome:
+    """Result of an authentication attempt with throttle bookkeeping already applied.
+
+    ``status`` is one of ``"ok"`` (issue tokens), ``"invalid"`` (reject credentials), or
+    ``"locked"`` (reject with 429). Any mutation of the user row is left uncommitted for
+    the caller to persist.
+    """
+
+    user: User | None
+    status: str
+    retry_after: int | None = None
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def authenticate_login(
+    db: Session, username: str, password: str, now: datetime | None = None
+) -> LoginOutcome:
+    """Authenticate a login while maintaining the per-account lockout counters."""
+    now = now or datetime.now(UTC)
+    normalized = username.strip().lower()
+    user = db.scalar(
+        select(User).where(
+            or_(User.username == normalized, User.email == normalized),
+            User.is_active.is_(True),
+        )
+    )
+    if user is None:
+        # Unknown account: run one dummy verification so response timing does not
+        # reveal whether the account exists.
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        return LoginOutcome(None, "invalid")
+
+    locked_until = _as_utc(user.locked_until)
+    if locked_until is not None and locked_until > now:
+        retry_after = max(1, int((locked_until - now).total_seconds()))
+        return LoginOutcome(user, "locked", retry_after)
+
+    if not verify_password(password, user.password_hash):
+        user.failed_login_count = (user.failed_login_count or 0) + 1
+        if user.failed_login_count >= _LOGIN_FAILURE_THRESHOLD:
+            # Mild escalation, capped: first lock ~1 min, doubling up to 15 min. Each
+            # window is short and auto-expires so the true owner is never locked out
+            # for long, even while an attacker keeps failing.
+            over = user.failed_login_count - _LOGIN_FAILURE_THRESHOLD
+            window = min(_LOGIN_LOCK_BASE_SECONDS * (2**over), _LOGIN_LOCK_MAX_SECONDS)
+            user.locked_until = now + timedelta(seconds=window)
+        return LoginOutcome(user, "invalid")
+
+    # Success clears the durable throttle so a later failure starts from zero.
+    if user.failed_login_count or user.locked_until is not None:
+        user.failed_login_count = 0
+        user.locked_until = None
+    return LoginOutcome(user, "ok")
+
+
 def issue_token_pair(db: Session, user: User) -> tuple[str, str, int]:
     settings = get_settings()
     access_jti, refresh_jti = uuid4().hex, uuid4().hex
@@ -150,6 +222,33 @@ def issue_token_pair(db: Session, user: User) -> tuple[str, str, int]:
     )
     db.commit()
     return access, refresh, access_seconds
+
+
+def revoke_user_refresh_tokens(
+    db: Session, user_id: int, now: datetime | None = None
+) -> int:
+    """Revoke every active refresh token for a user; return how many were revoked."""
+    now = now or datetime.now(UTC)
+    result = db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    return max(int(result.rowcount or 0), 0)
+
+
+def revoke_refresh_token_jti(db: Session, jti: str, now: datetime | None = None) -> bool:
+    """Revoke a single refresh token by its JTI; return True if one was revoked."""
+    now = now or datetime.now(UTC)
+    result = db.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.jti_hash == hashlib.sha256(jti.encode()).hexdigest(),
+            RefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
+    return bool(result.rowcount)
 
 
 def rotate_refresh_token(db: Session, token: str) -> tuple[str, str, int]:
@@ -184,9 +283,30 @@ def rotate_refresh_token(db: Session, token: str) -> tuple[str, str, int]:
             .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
             .values(revoked_at=now)
         )
+        # Replay of an already-rotated token signals theft: besides revoking the whole
+        # refresh-token family, invalidate already-issued access tokens and record the
+        # security event so it is visible in the audit trail.
+        user.tokens_valid_after = now
+        write_audit(db, user, "refresh.reuse", "session", resource_id=user.id)
         db.commit()
         raise HTTPException(status_code=401, detail="Refresh token reuse detected")
     return issue_token_pair(db, user)
+
+
+def client_ip(request: Request) -> str | None:
+    """Best-effort real client IP for audit logging.
+
+    Behind nginx the browser address arrives in ``X-Forwarded-For`` (its left-most entry
+    is the original client); the raw ASGI transport peer is only the proxy. uvicorn
+    ``--proxy-headers`` already rewrites ``request.client`` for us, but parsing the header
+    here keeps the audit trail correct even if that flag is ever dropped.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        first = forwarded.split(",", 1)[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else None
 
 
 def write_audit(

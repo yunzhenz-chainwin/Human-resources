@@ -65,7 +65,7 @@ from app.schemas.admin import (
     UserRead,
     UserUpdate,
 )
-from app.services.security import hash_password, write_audit
+from app.services.security import client_ip, hash_password, write_audit
 
 router = APIRouter(prefix="/admin")
 admin_user = require_system_admin
@@ -650,6 +650,9 @@ def update_user(
         write_audit(db, actor, "update", "user", user.id, details={"fields": sorted(values)})
     if password:
         user.password_hash = hash_password(password)
+        # An administrator-chosen password is known to the administrator, so force the
+        # owner to set their own on next use.
+        user.must_change_password = True
         revoked_at = datetime.now(UTC)
         # Invalidate already-issued access tokens immediately, not just refresh tokens.
         user.tokens_valid_after = revoked_at
@@ -674,7 +677,7 @@ def update_user(
                 "sessions_revoked": sessions_revoked,
                 "administrator_chosen_password": True,
             },
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
     db.commit()
@@ -699,6 +702,9 @@ def reset_user_password(
 
     temporary_password = _generate_temporary_password()
     user.password_hash = hash_password(temporary_password)
+    # The temporary password is handed to IT, so the owner must set their own on next
+    # login before regaining access to normal endpoints.
+    user.must_change_password = True
     revoked_at = datetime.now(UTC)
     # Invalidate already-issued access tokens immediately, not just refresh tokens.
     user.tokens_valid_after = revoked_at
@@ -723,7 +729,7 @@ def reset_user_password(
             "sessions_revoked": sessions_revoked,
             "temporary_password_issued": True,
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
@@ -1124,7 +1130,7 @@ def database_table_preview(
                 "row_count": len(rows),
                 "revealed_columns": sorted(revealable_columns),
             },
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         db.commit()
@@ -1202,7 +1208,7 @@ def database_row_detail(
                 "reason": reason,
                 "revealed_columns": sorted(revealable_columns),
             },
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         db.commit()
