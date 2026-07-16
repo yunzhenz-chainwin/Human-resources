@@ -20,7 +20,10 @@ interface JourneyStep {
   compactY: number
 }
 
-const view = ref<View>('home')
+// 暫時只開放『加入人才庫』；改回 false 即恢復職缺瀏覽等頁面
+const PUBLIC_ONLY_APPLY: boolean = true
+
+const view = ref<View>('apply')
 const jobs = ref<Job[]>([])
 const selectedJob = ref<Job | null>(null)
 const loading = ref(false)
@@ -150,7 +153,9 @@ async function loadJobs() {
 }
 
 function go(next: View) {
-  view.value = next
+  // 旗標開啟時，導向被隱藏的頁面（home／jobs／detail）一律回到『加入人才庫』
+  const target: View = PUBLIC_ONLY_APPLY && next !== 'apply' && next !== 'success' ? 'apply' : next
+  view.value = target
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
@@ -246,7 +251,8 @@ onMounted(async () => {
   const jobId = new URLSearchParams(window.location.search).get('job_id')
   if (!jobId) return
   const job = jobs.value.find(item => String(item.id) === jobId)
-  if (job) startApplication(job)
+  // 旗標開啟時，帶 job_id 進站也只開啟通用的『加入人才庫』表單
+  if (job) startApplication(PUBLIC_ONLY_APPLY ? null : job)
 })
 
 function syncJourneyLayout() {
@@ -258,12 +264,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', syncJourneyLayout))
 
 <template>
   <header class="site-header">
-    <button class="brand" @click="go('home')" aria-label="回到首頁">
+    <button class="brand" @click="go(PUBLIC_ONLY_APPLY ? 'apply' : 'home')" :aria-label="PUBLIC_ONLY_APPLY ? '加入人才庫' : '回到首頁'">
       <span class="brand-mark">T</span>
       <span>TalentBridge<small>CAREERS</small></span>
     </button>
     <nav aria-label="主要導覽">
-      <button @click="go('jobs')">查看職缺</button>
+      <button v-if="!PUBLIC_ONLY_APPLY" @click="go('jobs')">查看職缺</button>
       <button class="nav-cta" @click="startApplication(null)">加入人才庫</button>
     </nav>
   </header>
@@ -356,7 +362,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', syncJourneyLayout))
 
     <template v-else-if="view === 'apply'">
       <section class="application-page">
-        <button class="back" @click="selectedJob ? go('detail') : go('home')">← 返回</button>
+        <button v-if="!PUBLIC_ONLY_APPLY" class="back" @click="selectedJob ? go('detail') : go('home')">← 返回</button>
         <div class="application-heading"><p class="eyebrow">TALENT PROFILE</p><h1>{{ applyTitle }}</h1><p>只需姓名、至少一種聯絡方式與同意，其他資料及履歷都可選填。</p><div v-if="selectedJob" class="selected-job"><span>應徵職缺</span><strong>{{ selectedJob.title }}</strong><button type="button" @click="startApplication(null)">改為加入人才庫</button></div></div>
         <form @submit.prevent="submit">
           <section class="form-section"><h2>基本資料</h2><div class="form-grid">
@@ -388,7 +394,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', syncJourneyLayout))
     </template>
 
     <template v-else-if="view === 'success'">
-      <section class="success-page"><div class="success-check">✓</div><p class="eyebrow">RECEIVED</p><h1>{{ selectedJob ? '應徵資料已成功送出' : '已成功加入人才庫' }}</h1><p>{{ selectedJob ? `我們已收到你對「${selectedJob.title}」的應徵。` : '資料已交給 HR，有合適機會時我們會與你聯繫。' }}</p><p v-if="resultId" class="reference">參考編號：{{ resultId }}</p><button class="primary" @click="go('jobs')">查看其他職缺</button><button class="text-button" @click="go('home')">回到首頁</button></section>
+      <section class="success-page"><div class="success-check">✓</div><p class="eyebrow">RECEIVED</p><h1>{{ selectedJob ? '應徵資料已成功送出' : '已成功加入人才庫' }}</h1><p>{{ selectedJob ? `我們已收到你對「${selectedJob.title}」的應徵。` : '資料已交給 HR，有合適機會時我們會與你聯繫。' }}</p><p v-if="resultId" class="reference">參考編號：{{ resultId }}</p><button v-if="PUBLIC_ONLY_APPLY" class="primary" @click="startApplication(null)">返回加入人才庫</button><template v-else><button class="primary" @click="go('jobs')">查看其他職缺</button><button class="text-button" @click="go('home')">回到首頁</button></template></section>
     </template>
   </main>
 
