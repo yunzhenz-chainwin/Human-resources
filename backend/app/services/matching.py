@@ -575,3 +575,104 @@ def assess_matching_readiness(results: list[MatchResult]) -> dict[str, Any]:
             "marital_status",
         ],
     }
+
+
+def evaluate_matching(results: list[MatchResult]) -> dict[str, Any]:
+    """Grade the matching engine against human outcome labels so HR can judge accuracy.
+
+    Ground truth is the human `status`: POSITIVE_OUTCOME_STATUSES are people the engine
+    surfaced who advanced (interview/offered/hired); NEGATIVE_OUTCOME_STATUSES are ones a
+    manager turned down. Precision asks "are the top ranks worth reviewing?"; recall asks
+    "did the gate or ranking bury someone good?"; calibration asks "does a higher score
+    really mean a better outcome?". Every metric returns None instead of dividing by an
+    empty set, so unlabeled or empty data reads as "unknown", not a misleading zero.
+    """
+
+    eligible = [item for item in results if item.gate_passed]
+    labeled = [
+        item
+        for item in results
+        if item.status in POSITIVE_OUTCOME_STATUSES | NEGATIVE_OUTCOME_STATUSES
+    ]
+    positives = [item for item in labeled if item.status in POSITIVE_OUTCOME_STATUSES]
+    negatives = [item for item in labeled if item.status in NEGATIVE_OUTCOME_STATUSES]
+
+    def precision_at_k(k: int) -> float | None:
+        # Of the top-K eligible results by rank (None last), the labeled fraction that
+        # ended positive.  Generalizes assess_matching_readiness's precision_at_5.
+        top_k = sorted(
+            eligible,
+            key=lambda item: (item.rank is None, item.rank or 0, -float(item.total_score)),
+        )[:k]
+        labeled_top_k = [item for item in top_k if item in labeled]
+        if not labeled_top_k:
+            return None
+        return round(
+            sum(item.status in POSITIVE_OUTCOME_STATUSES for item in labeled_top_k)
+            / len(labeled_top_k),
+            4,
+        )
+
+    def recall_at_k(k: int) -> float | None:
+        # Of every positive-labeled result, the fraction the ranking placed within K.
+        # A low value means good people were buried below the fold (false negatives).
+        if not positives:
+            return None
+        found = sum(1 for item in positives if item.rank is not None and item.rank <= k)
+        return round(found / len(positives), 4)
+
+    # A human advanced an "ineligible" match to a positive outcome, so the hard gate
+    # wrongly excluded a good candidate.
+    gate_false_negatives = [
+        item
+        for item in results
+        if not item.gate_passed and item.status in POSITIVE_OUTCOME_STATUSES
+    ]
+
+    score_buckets = (
+        ("0-39", 0.0, 40.0),
+        ("40-59", 40.0, 60.0),
+        ("60-79", 60.0, 80.0),
+        ("80-100", 80.0, 101.0),
+    )
+    score_calibration = []
+    for label, low, high in score_buckets:
+        bucket = [item for item in labeled if low <= float(item.total_score) < high]
+        bucket_positives = sum(item.status in POSITIVE_OUTCOME_STATUSES for item in bucket)
+        score_calibration.append(
+            {
+                "bucket": label,
+                "count": len(bucket),
+                "positive_rate": round(bucket_positives / len(bucket), 4) if bucket else None,
+            }
+        )
+
+    positive_ranks = [item.rank for item in positives if item.rank is not None]
+    negative_ranks = [item.rank for item in negatives if item.rank is not None]
+
+    notes: list[str] = []
+    if len(labeled) < 10:
+        notes.append("small_sample")
+    if len(labeled) < 30:
+        notes.append("insufficient_for_tuning")
+
+    return {
+        "sample_size": len(results),
+        "labeled_outcomes": len(labeled),
+        "positive_outcomes": len(positives),
+        "negative_outcomes": len(negatives),
+        "precision_at_k": {"5": precision_at_k(5), "10": precision_at_k(10)},
+        "recall_at_k": {"5": recall_at_k(5), "10": recall_at_k(10)},
+        "gate_false_negatives": len(gate_false_negatives),
+        "gate_false_negative_candidates": [item.candidate_id for item in gate_false_negatives],
+        "score_calibration": score_calibration,
+        "rank_effectiveness": {
+            "avg_rank_positive": round(sum(positive_ranks) / len(positive_ranks), 2)
+            if positive_ranks
+            else None,
+            "avg_rank_negative": round(sum(negative_ranks) / len(negative_ranks), 2)
+            if negative_ranks
+            else None,
+        },
+        "notes": notes,
+    }

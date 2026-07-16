@@ -55,3 +55,23 @@ class TalentPoolReport(BaseModel):
     cities: list[DistributionBucket]
     education: list[DistributionBucket]
     monthly_growth: list[MonthlyGrowth]
+
+
+class ScoreCalibrationBucket(BaseModel):
+    bucket: str
+    count: int
+    positive_rate: float | None = None
+
+
+class MatchingEvaluation(BaseModel):
+    sample_size: int
+    labeled_outcomes: int
+    positive_outcomes: int
+    negative_outcomes: int
+    precision_at_k: dict[str, float | None]
+    recall_at_k: dict[str, float | None]
+    gate_false_negatives: int
+    gate_false_negative_candidates: list[int]
+    score_calibration: list[ScoreCalibrationBucket]
+    rank_effectiveness: dict[str, float | None]
+    notes: list[str]
