@@ -45,6 +45,7 @@ def _criteria(requisition: JobRequisition) -> MatchingCriteria:
         require_years=config.get("require_years", True),
         require_education=config.get("require_education", True),
         require_location=config.get("require_location", True),
+        required_skill_ratio=config.get("required_skill_ratio", 1.0),
     )
 
 
@@ -256,6 +257,7 @@ def update_matching_criteria(
         require_years=payload.require_years,
         require_education=payload.require_education,
         require_location=payload.require_location,
+        required_skill_ratio=payload.required_skill_ratio,
     )
     requisition.match_weights = config
     requisition.skills = list(dict.fromkeys(payload.required_skills + payload.preferred_skills))

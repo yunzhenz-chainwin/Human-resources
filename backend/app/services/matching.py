@@ -43,14 +43,108 @@ ADJACENT_CITIES = {
     "高雄市": {"台南市", "屏東縣"},
 }
 SKILL_ALIASES = {
+    # JavaScript / web ecosystem
     "fast api": "fastapi",
     "nodejs": "node.js",
     "node js": "node.js",
-    "postgres": "postgresql",
-    "postgres sql": "postgresql",
-    "powerbi": "power bi",
+    "node": "node.js",
+    "js": "javascript",
+    "ts": "typescript",
+    "react.js": "react",
+    "reactjs": "react",
+    "react js": "react",
     "vue.js": "vue",
     "vuejs": "vue",
+    "vue js": "vue",
+    "angular.js": "angular",
+    "angularjs": "angular",
+    "nextjs": "next.js",
+    "nestjs": "nest.js",
+    # databases
+    "postgres": "postgresql",
+    "postgres sql": "postgresql",
+    "postgre sql": "postgresql",
+    "ms sql": "sql server",
+    "mssql": "sql server",
+    "sqlserver": "sql server",
+    "資料庫": "database",
+    # languages
+    "golang": "go",
+    "c#": "csharp",
+    "c sharp": "csharp",
+    "c++": "cpp",
+    "c plus plus": "cpp",
+    ".net": "dotnet",
+    "dot net": "dotnet",
+    "objective c": "objective-c",
+    # cloud / devops
+    "amazon web services": "aws",
+    "google cloud": "gcp",
+    "google cloud platform": "gcp",
+    "microsoft azure": "azure",
+    "k8s": "kubernetes",
+    "ci/cd": "cicd",
+    "ci cd": "cicd",
+    "powerbi": "power bi",
+    # data / ml (Chinese <-> English)
+    "ml": "machine learning",
+    "機器學習": "machine learning",
+    "dl": "deep learning",
+    "深度學習": "deep learning",
+    "nlp": "natural language processing",
+    "自然語言處理": "natural language processing",
+    "資料分析": "data analysis",
+    "數據分析": "data analysis",
+    "資料科學": "data science",
+    "數據科學": "data science",
+    # roles / soft skills (Chinese <-> English)
+    "專案管理": "project management",
+    "跨部門溝通": "cross-functional communication",
+    "使用者經驗": "ux",
+    "user experience": "ux",
+    "使用者介面": "ui",
+    "user interface": "ui",
+    "品質保證": "qa",
+    "quality assurance": "qa",
+    "資訊安全": "cybersecurity",
+    "網路安全": "cybersecurity",
+    "information security": "cybersecurity",
+}
+# Conservative fuzzy fallback for skills that aren't in the alias table (e.g. minor
+# spelling variants). Only applied to canonical tokens of length >= 5 to avoid
+# false merges of short/unrelated skills.
+SKILL_FUZZY_THRESHOLD = 0.86
+# Canonical role tokens for title relevance, bilingual so a Chinese title aligns
+# with an English one (e.g. 資深後端工程師 -> {senior, backend, engineer}).
+TITLE_TOKEN_SYNONYMS = {
+    # seniority
+    "資深": "senior", "senior": "senior", "sr": "senior",
+    "初級": "junior", "junior": "junior", "jr": "junior",
+    "首席": "principal", "principal": "principal", "lead": "lead", "leader": "lead",
+    # function
+    "工程師": "engineer", "engineer": "engineer", "developer": "engineer",
+    "開發": "engineer", "programmer": "engineer",
+    "設計師": "designer", "designer": "designer",
+    "分析師": "analyst", "analyst": "analyst",
+    "經理": "manager", "manager": "manager", "主管": "manager",
+    "專員": "specialist", "specialist": "specialist",
+    "架構師": "architect", "architect": "architect",
+    "科學家": "scientist", "scientist": "scientist",
+    "顧問": "consultant", "consultant": "consultant",
+    # domain
+    "後端": "backend", "backend": "backend", "back end": "backend", "back-end": "backend",
+    "前端": "frontend", "frontend": "frontend", "front end": "frontend", "front-end": "frontend",
+    "全端": "fullstack", "fullstack": "fullstack", "full stack": "fullstack",
+    "軟體": "software", "software": "software",
+    "資料": "data", "數據": "data", "data": "data",
+    "雲端": "cloud", "cloud": "cloud",
+    "行動": "mobile", "mobile": "mobile",
+    "產品": "product", "product": "product",
+    "專案": "project", "project": "project",
+    "行銷": "marketing", "marketing": "marketing",
+    "業務": "sales", "sales": "sales",
+    "財務": "finance", "finance": "finance",
+    "會計": "accounting", "accounting": "accounting",
 }
 
 
@@ -70,6 +164,51 @@ def canonical_skill(value: str | None) -> str:
 
     readable = " ".join((value or "").strip().casefold().split())
     return normalize_text(SKILL_ALIASES.get(readable, readable))
+
+
+def _skill_similarity(a: str, b: str) -> float:
+    """Similarity of two already-canonical skill tokens; conservative fuzzy match
+    only for tokens long enough that a high ratio is unlikely to be coincidental."""
+    if a == b:
+        return 1.0
+    if len(a) < 5 or len(b) < 5:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _match_skill(target_canonical: str, candidate_map: dict[str, str]) -> str | None:
+    """Return the candidate's original skill label that satisfies target_canonical
+    (exact canonical match first, then conservative fuzzy), or None if unmet."""
+    exact = candidate_map.get(target_canonical)
+    if exact is not None:
+        return exact
+    best_label, best_sim = None, 0.0
+    for canonical, original in candidate_map.items():
+        similarity = _skill_similarity(target_canonical, canonical)
+        if similarity >= SKILL_FUZZY_THRESHOLD and similarity > best_sim:
+            best_label, best_sim = original, similarity
+    return best_label
+
+
+def _title_tokens(title: str | None) -> set[str]:
+    text = " ".join((title or "").strip().casefold().replace("臺", "台").split())
+    return {canonical for token, canonical in TITLE_TOKEN_SYNONYMS.items() if token in text}
+
+
+def _title_relevance(candidate_title: str | None, requisition_title: str | None) -> float:
+    """Role-family similarity via canonical role tokens, so a Chinese title aligns
+    with an English one. Falls back to character similarity only when neither side
+    exposes a known role token."""
+    if not candidate_title:
+        return 0.5
+    candidate_tokens = _title_tokens(candidate_title)
+    requisition_tokens = _title_tokens(requisition_title)
+    if candidate_tokens and requisition_tokens:
+        overlap = len(candidate_tokens & requisition_tokens)
+        return overlap / len(candidate_tokens | requisition_tokens)
+    return SequenceMatcher(
+        None, normalize_text(candidate_title), normalize_text(requisition_title)
+    ).ratio()
 
 
 def _education_rank(value: str | None) -> int:
@@ -148,22 +287,25 @@ def score_candidate(
     normalized_candidate_skills = {
         canonical_skill(skill): skill for skill in candidate_skills if canonical_skill(skill)
     }
-    required_hits = [
-        skill for skill in required if canonical_skill(skill) in normalized_candidate_skills
-    ]
-    required_misses = [
-        skill for skill in required if canonical_skill(skill) not in normalized_candidate_skills
-    ]
-    preferred_hits = [
-        skill for skill in preferred if canonical_skill(skill) in normalized_candidate_skills
-    ]
-    preferred_misses = [
-        skill for skill in preferred if canonical_skill(skill) not in normalized_candidate_skills
-    ]
-    skill_evidence = {
-        skill: normalized_candidate_skills[canonical_skill(skill)]
-        for skill in required_hits + preferred_hits
-    }
+    required_hits: list[str] = []
+    required_misses: list[str] = []
+    preferred_hits: list[str] = []
+    preferred_misses: list[str] = []
+    skill_evidence: dict[str, str] = {}
+    for skill in required:
+        matched = _match_skill(canonical_skill(skill), normalized_candidate_skills)
+        if matched is not None:
+            required_hits.append(skill)
+            skill_evidence[skill] = matched
+        else:
+            required_misses.append(skill)
+    for skill in preferred:
+        matched = _match_skill(canonical_skill(skill), normalized_candidate_skills)
+        if matched is not None:
+            preferred_hits.append(skill)
+            skill_evidence[skill] = matched
+        else:
+            preferred_misses.append(skill)
 
     candidate_education = max(
         [_education_rank(candidate.highest_education)]
@@ -185,7 +327,14 @@ def score_candidate(
         gate_misses.append("consent_withdrawn")
     if candidate.status in EXCLUDED_CANDIDATE_STATUSES:
         gate_misses.append(f"status:{candidate.status}")
-    if config.get("require_skills", True) and required_misses:
+    required_ratio = config.get("required_skill_ratio", 1.0)
+    if not isinstance(required_ratio, int | float) or not 0 <= required_ratio <= 1:
+        required_ratio = 1.0
+    if (
+        config.get("require_skills", True)
+        and required
+        and len(required_hits) / len(required) < required_ratio
+    ):
         gate_misses.append("required_skills")
     if (
         config.get("require_years", True)
@@ -199,10 +348,15 @@ def score_candidate(
         and candidate_education < required_education
     ):
         gate_misses.append("education")
+    work_adjacent = {
+        normalize_text(city)
+        for city in ADJACENT_CITIES.get(normalize_text(requisition.work_city), set())
+    }
     if (
         config.get("require_location", True)
         and expected_cities
         and work_city not in expected_cities
+        and not (expected_cities & work_adjacent)
     ):
         gate_misses.append("location")
 
@@ -212,13 +366,7 @@ def score_candidate(
         if skill_denominator
         else 1.0
     )
-    title_score = (
-        SequenceMatcher(
-            None, normalize_text(candidate.current_title), normalize_text(requisition.title)
-        ).ratio()
-        if candidate.current_title
-        else 0.5
-    )
+    title_score = _title_relevance(candidate.current_title, requisition.title)
     years_score = 1.0 if min_years is None else min(1.0, (years or 0) / max(min_years, 0.1))
     salary_score = _salary_score(candidate, requisition)
     education_score = (
@@ -289,6 +437,9 @@ def score_candidate(
         if total >= 60
         else "review"
     )
+    # Surface "so close" candidates: gated by a single hard requirement yet still a
+    # strong fit, so HR can review stretch picks instead of never seeing them.
+    breakdown["near_miss"] = (not passed) and len(gate_misses) == 1 and total >= 60
     return ScoreResult(passed, total, breakdown)
 
 

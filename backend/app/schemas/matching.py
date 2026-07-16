@@ -74,6 +74,10 @@ class MatchingCriteria(BaseModel):
     require_years: bool = True
     require_education: bool = True
     require_location: bool = True
+    # Fraction of required skills a candidate must have to pass the hard gate.
+    # 1.0 keeps the strict "must have all" behaviour; lower it to surface strong
+    # partial matches instead of gating them out entirely.
+    required_skill_ratio: float = Field(default=1.0, ge=0, le=1)
 
     @model_validator(mode="after")
     def validate_salary_range(self):

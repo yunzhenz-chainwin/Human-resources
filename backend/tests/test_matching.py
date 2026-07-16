@@ -445,3 +445,58 @@ def test_matching_readiness_supports_shadow_pilot(matching_client) -> None:
         results = list(db.scalars(select(MatchResult)).all())
         report = assess_matching_readiness(results)
         assert 0 <= report["metrics"]["data_completeness"] <= 1
+
+
+def test_matching_accuracy_improvements(matching_client) -> None:
+    _, testing_session = matching_client
+    with testing_session() as db:
+        requisition = db.get(JobRequisition, 1)  # 台北市, min 3y, 大學, title Backend Engineer
+        candidate = db.get(Candidate, 1)  # 台北市, 5y, 大學 -> clears the non-skill gates
+
+        # Chinese<->English skill synonym is matched with auditable evidence.
+        requisition.match_weights = {"required_skills": ["Project Management"]}
+        cross_lang = score_candidate(requisition, candidate, ["專案管理"])
+        assert cross_lang.gate_passed is True
+        assert cross_lang.breakdown["skill"]["evidence"] == {"Project Management": "專案管理"}
+
+        # Version/punctuation variant via the alias table.
+        requisition.match_weights = {"required_skills": ["React"]}
+        assert score_candidate(requisition, candidate, ["React.js"]).gate_passed is True
+
+        # Conservative fuzzy matches a near-spelling but never merges distinct skills.
+        requisition.match_weights = {"required_skills": ["JavaScript"]}
+        assert score_candidate(requisition, candidate, ["Javascripts"]).gate_passed is True
+        assert score_candidate(requisition, candidate, ["Java"]).gate_passed is False
+
+        # required_skill_ratio softens the all-or-nothing skill gate.
+        requisition.match_weights = {"required_skills": ["Python", "Go"]}
+        assert score_candidate(requisition, candidate, ["Python"]).gate_passed is False
+        requisition.match_weights = {
+            "required_skills": ["Python", "Go"],
+            "required_skill_ratio": 0.5,
+        }
+        assert score_candidate(requisition, candidate, ["Python"]).gate_passed is True
+
+        # Location gate now accepts an adjacent city instead of excluding it.
+        requisition.match_weights = {}
+        candidate.expected_cities = ["新北市"]
+        adjacent = score_candidate(requisition, candidate, ["Python"])
+        assert adjacent.gate_passed is True
+        assert "location" not in adjacent.breakdown["gate"]["miss"]
+
+        # Cross-language title relevance: 資深後端工程師 aligns with Backend Engineer.
+        candidate.expected_cities = ["台北市"]
+        candidate.current_title = "資深後端工程師"
+        cross_title = score_candidate(requisition, candidate, ["Python"])
+        assert cross_title.breakdown["relevance"]["score"] >= 0.6
+
+        # near_miss surfaces a strong candidate gated by a single hard requirement.
+        candidate.current_title = "Backend Engineer"
+        requisition.match_weights = {
+            "required_skills": ["Kubernetes"],
+            "preferred_skills": ["Python"],
+        }
+        near = score_candidate(requisition, candidate, ["Python", "SQL", "Docker"])
+        assert near.gate_passed is False
+        assert near.breakdown["gate"]["miss"] == ["required_skills"]
+        assert near.breakdown["near_miss"] is True
