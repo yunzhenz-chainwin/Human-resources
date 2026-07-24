@@ -67,3 +67,8 @@ class MatchResult(TimestampMixin, Base):
 
     candidate = relationship("Candidate")
     requisition = relationship("JobRequisition")
+
+    @property
+    def highlights(self) -> list[dict]:
+        value = (self.score_breakdown or {}).get("highlights", [])
+        return value if isinstance(value, list) else []

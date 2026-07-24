@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.db.session import SessionLocal
+from app.services.retention_worker import run_retention_worker
 from app.services.security import bootstrap_admin
 
 settings = get_settings()
@@ -16,7 +18,18 @@ settings = get_settings()
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     with SessionLocal() as db:
         bootstrap_admin(db)
-    yield
+    retention_stop = asyncio.Event()
+    retention_task = (
+        asyncio.create_task(run_retention_worker(retention_stop, settings=settings))
+        if settings.talent_retention_worker_enabled
+        else None
+    )
+    try:
+        yield
+    finally:
+        if retention_task is not None:
+            retention_stop.set()
+            await retention_task
 
 _docs_enabled = settings.app_env == "development"
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import BIGINT_PK, Base, TimestampMixin, UTCDateTime
@@ -21,9 +21,7 @@ class Department(TimestampMixin, Base):
 
 class User(TimestampMixin, Base):
     __tablename__ = "users"
-    __table_args__ = (
-        CheckConstraint("role IN ('admin','it','hr','manager')", name="valid_role"),
-    )
+    __table_args__ = (CheckConstraint("role IN ('admin','it','hr','manager')", name="valid_role"),)
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
@@ -40,7 +38,7 @@ class User(TimestampMixin, Base):
     tokens_valid_after: Mapped[datetime | None] = mapped_column(UTCDateTime())
     # Force a credential change on next login (set on IT reset / admin-set password).
     must_change_password: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false"
+        Boolean, default=False, server_default=false()
     )
     # Durable brute-force throttle: consecutive failures + optional temporary lock.
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

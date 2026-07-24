@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import (
@@ -77,6 +77,8 @@ class CandidateRead(BaseModel):
     status: str
     has_photo: bool
     photo_updated_at: datetime | None
+    retention_years_override: int | None
+    retention_until: date | None
     created_at: datetime
     updated_at: datetime
 

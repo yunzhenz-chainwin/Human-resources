@@ -19,6 +19,7 @@ from app.models import (
     CandidateExperience,
     CandidateSkill,
     Department,
+    InterviewRecord,
     JobApplication,
     JobRequisition,
     ResumeFile,
@@ -233,13 +234,9 @@ def _assert_aware(value: str) -> None:
 def test_application_listing_is_role_and_department_scoped(application_client) -> None:
     client, _, ids = application_client
     assert client.get("/api/v1/applications").status_code == 401
-    assert client.get(
-        "/api/v1/applications", headers=_headers(client, "it")
-    ).status_code == 403
+    assert client.get("/api/v1/applications", headers=_headers(client, "it")).status_code == 403
 
-    hr_response = client.get(
-        "/api/v1/applications", headers=_headers(client, "hr")
-    )
+    hr_response = client.get("/api/v1/applications", headers=_headers(client, "hr"))
     assert hr_response.status_code == 200
     assert {item["id"] for item in hr_response.json()} == {
         ids["engineering_application"],
@@ -247,10 +244,7 @@ def test_application_listing_is_role_and_department_scoped(application_client) -
     }
     assert all(set(item) == APPLICATION_KEYS for item in hr_response.json())
     assert all(item["candidate"]["id"] == item["candidate_id"] for item in hr_response.json())
-    assert all(
-        item["requisition"]["id"] == item["requisition_id"]
-        for item in hr_response.json()
-    )
+    assert all(item["requisition"]["id"] == item["requisition_id"] for item in hr_response.json())
     for item in hr_response.json():
         _assert_aware(item["applied_at"])
 
@@ -258,14 +252,20 @@ def test_application_listing_is_role_and_department_scoped(application_client) -
     own = client.get("/api/v1/applications", headers=engineering_headers)
     assert own.status_code == 200
     assert [item["id"] for item in own.json()] == [ids["engineering_application"]]
-    assert client.get(
-        f"/api/v1/applications?department_id={ids['design']}",
-        headers=engineering_headers,
-    ).status_code == 403
-    assert client.get(
-        f"/api/v1/applications?requisition_id={ids['design_job']}",
-        headers=engineering_headers,
-    ).status_code == 403
+    assert (
+        client.get(
+            f"/api/v1/applications?department_id={ids['design']}",
+            headers=engineering_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            f"/api/v1/applications?requisition_id={ids['design_job']}",
+            headers=engineering_headers,
+        ).status_code
+        == 403
+    )
     own_filter = client.get(
         f"/api/v1/applications?requisition_id={ids['engineering_job']}",
         headers=engineering_headers,
@@ -353,9 +353,9 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
 
     engineering_headers = _headers(client, "engineering-manager")
     design_headers = _headers(client, "design-manager")
-    assert client.get(
-        f"/api/v1/candidates/{ids['alice']}", headers=design_headers
-    ).status_code == 403
+    assert (
+        client.get(f"/api/v1/candidates/{ids['alice']}", headers=design_headers).status_code == 403
+    )
 
     with testing_session() as db:
         design_application = JobApplication(
@@ -392,17 +392,13 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
     assert engineering_body["educations"][0]["school"] == "Example University"
     assert len(engineering_body["applications"]) == 1
     assert engineering_body["applications"][0]["requisition_id"] == ids["engineering_job"]
-    assert engineering_body["applications"][0]["cover_letter"] == (
-        "Engineering-only cover letter"
-    )
+    assert engineering_body["applications"][0]["cover_letter"] == ("Engineering-only cover letter")
     assert engineering_body["applications"][0]["linkedin_url"] is None
     assert "Design-only private cover letter" not in engineering_detail.text
     assert [item["id"] for item in engineering_body["resumes"]] == [engineering_resume_id]
     assert engineering_body["resumes"][0]["has_file"] is True
 
-    design_detail = client.get(
-        f"/api/v1/candidates/{ids['alice']}", headers=design_headers
-    )
+    design_detail = client.get(f"/api/v1/candidates/{ids['alice']}", headers=design_headers)
     assert design_detail.status_code == 200
     design_body = design_detail.json()
     assert len(design_body["applications"]) == 1
@@ -419,10 +415,13 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
     assert own_download.content == engineering_bytes
     assert own_download.headers["cache-control"] == "private, no-store"
     assert "engineering.pdf" in own_download.headers["content-disposition"]
-    assert client.get(
-        f"/api/v1/resumes/{design_resume_id}/file",
-        headers=engineering_headers,
-    ).status_code == 403
+    assert (
+        client.get(
+            f"/api/v1/resumes/{design_resume_id}/file",
+            headers=engineering_headers,
+        ).status_code
+        == 403
+    )
 
     with testing_session() as db:
         audit = db.scalar(
@@ -443,16 +442,22 @@ def test_hr_assignment_returns_full_dto_and_rejects_duplicates(application_clien
         "candidate_id": ids["alice"],
         "requisition_id": ids["design_job"],
     }
-    assert client.post(
-        "/api/v1/applications",
-        headers=_headers(client, "engineering-manager"),
-        json=payload,
-    ).status_code == 403
-    assert client.post(
-        "/api/v1/applications",
-        headers=_headers(client, "it"),
-        json=payload,
-    ).status_code == 403
+    assert (
+        client.post(
+            "/api/v1/applications",
+            headers=_headers(client, "engineering-manager"),
+            json=payload,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/v1/applications",
+            headers=_headers(client, "it"),
+            json=payload,
+        ).status_code
+        == 403
+    )
 
     hr_headers = _headers(client, "hr")
     created = client.post("/api/v1/applications", headers=hr_headers, json=payload)
@@ -489,21 +494,30 @@ def test_hr_assignment_returns_full_dto_and_rejects_duplicates(application_clien
     duplicate = client.post("/api/v1/applications", headers=hr_headers, json=payload)
     assert duplicate.status_code == 409
     assert duplicate.json()["detail"] == "Candidate is already assigned to this job"
-    assert client.post(
-        "/api/v1/applications",
-        headers=hr_headers,
-        json={"candidate_id": 999999, "requisition_id": ids["design_job"]},
-    ).status_code == 404
-    assert client.post(
-        "/api/v1/applications",
-        headers=hr_headers,
-        json={"candidate_id": ids["alice"], "requisition_id": 999999},
-    ).status_code == 404
-    assert client.post(
-        "/api/v1/applications",
-        headers=hr_headers,
-        json={"candidate_id": ids["deleted"], "requisition_id": ids["design_job"]},
-    ).status_code == 409
+    assert (
+        client.post(
+            "/api/v1/applications",
+            headers=hr_headers,
+            json={"candidate_id": 999999, "requisition_id": ids["design_job"]},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/v1/applications",
+            headers=hr_headers,
+            json={"candidate_id": ids["alice"], "requisition_id": 999999},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/v1/applications",
+            headers=hr_headers,
+            json={"candidate_id": ids["deleted"], "requisition_id": ids["design_job"]},
+        ).status_code
+        == 409
+    )
 
     with testing_session() as db:
         assert (
@@ -596,16 +610,22 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         unlinked_resume_id = unlinked_resume.id
         reassigned_resume_ids = {resume_id, unlinked_resume_id}
 
-    assert client.patch(
-        endpoint,
-        headers=_headers(client, "engineering-manager"),
-        json=payload,
-    ).status_code == 403
-    assert client.patch(
-        endpoint,
-        headers=_headers(client, "it"),
-        json=payload,
-    ).status_code == 403
+    assert (
+        client.patch(
+            endpoint,
+            headers=_headers(client, "engineering-manager"),
+            json=payload,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            endpoint,
+            headers=_headers(client, "it"),
+            json=payload,
+        ).status_code
+        == 403
+    )
 
     updated = client.patch(endpoint, headers=_headers(client, "hr"), json=payload)
     assert updated.status_code == 200
@@ -620,9 +640,7 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         headers=_headers(client, "engineering-manager"),
     )
     assert engineering_resumes.status_code == 200
-    assert reassigned_resume_ids.isdisjoint(
-        {item["id"] for item in engineering_resumes.json()}
-    )
+    assert reassigned_resume_ids.isdisjoint({item["id"] for item in engineering_resumes.json()})
     design_resumes = client.get(
         "/api/v1/resumes?include_confirmed=true",
         headers=_headers(client, "design-manager"),
@@ -670,10 +688,7 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         assert audit.details["resume_id"] == resume_id
         assert set(audit.details["resume_ids"]) == reassigned_resume_ids
         assert db.get(ResumeFile, resume_id).target_requisition_id == ids["design_job"]
-        assert (
-            db.get(ResumeFile, unlinked_resume_id).target_requisition_id
-            == ids["design_job"]
-        )
+        assert db.get(ResumeFile, unlinked_resume_id).target_requisition_id == ids["design_job"]
 
     unavailable = client.patch(
         endpoint,
@@ -711,10 +726,7 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         assert application.requisition_id == ids["design_job"]
         assert application.manager_interview_notes == "Design manager historical assessment"
         assert db.get(ResumeFile, resume_id).target_requisition_id == ids["design_job"]
-        assert (
-            db.get(ResumeFile, unlinked_resume_id).target_requisition_id
-            == ids["design_job"]
-        )
+        assert db.get(ResumeFile, unlinked_resume_id).target_requisition_id == ids["design_job"]
 
     new_assignment = client.post(
         "/api/v1/applications",
@@ -736,9 +748,7 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         "/api/v1/resumes?include_confirmed=true",
         headers=_headers(client, "engineering-manager"),
     )
-    assert reassigned_resume_ids.isdisjoint(
-        {item["id"] for item in engineering_resumes.json()}
-    )
+    assert reassigned_resume_ids.isdisjoint({item["id"] for item in engineering_resumes.json()})
 
 
 def test_department_manager_updates_interview_with_status_sync_and_audit(
@@ -749,27 +759,39 @@ def test_department_manager_updates_interview_with_status_sync_and_audit(
     endpoint = f"/api/v1/applications/{application_id}/interview"
     engineering_headers = _headers(client, "engineering-manager")
     design_headers = _headers(client, "design-manager")
-    assert client.patch(
-        endpoint,
-        headers=engineering_headers,
-        json={"interview_result": "pending"},
-    ).status_code == 403
-    assert client.patch(
-        endpoint,
-        headers=_headers(client, "it"),
-        json={"interview_result": "pending"},
-    ).status_code == 403
+    assert (
+        client.patch(
+            endpoint,
+            headers=engineering_headers,
+            json={"interview_result": "pending"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            endpoint,
+            headers=_headers(client, "it"),
+            json={"interview_result": "pending"},
+        ).status_code
+        == 403
+    )
     assert client.patch(endpoint, headers=design_headers, json={}).status_code == 422
-    assert client.patch(
-        endpoint,
-        headers=design_headers,
-        json={"interview_at": "2030-08-20T09:30:00"},
-    ).status_code == 422
-    assert client.patch(
-        endpoint,
-        headers=design_headers,
-        json={"interview_result": "unknown"},
-    ).status_code == 422
+    assert (
+        client.patch(
+            endpoint,
+            headers=design_headers,
+            json={"interview_at": "2030-08-20T09:30:00"},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.patch(
+            endpoint,
+            headers=design_headers,
+            json={"interview_result": "unknown"},
+        ).status_code
+        == 422
+    )
 
     scheduled = client.patch(
         endpoint,
@@ -854,26 +876,38 @@ def test_hr_and_manager_interview_records_are_separate_and_role_owned(
     hr_headers = _headers(client, "hr")
     design_headers = _headers(client, "design-manager")
 
-    assert client.patch(
-        hr_endpoint,
-        headers=design_headers,
-        json={"interview_notes": "Manager must not edit HR feedback"},
-    ).status_code == 403
-    assert client.patch(
-        manager_endpoint,
-        headers=hr_headers,
-        json={"interview_notes": "HR must not edit manager feedback"},
-    ).status_code == 403
-    assert client.patch(
-        manager_endpoint,
-        headers=_headers(client, "engineering-manager"),
-        json={"interview_notes": "Other department"},
-    ).status_code == 403
-    assert client.patch(
-        f"/api/v1/applications/{application_id}/interviews/third",
-        headers=hr_headers,
-        json={"interview_notes": "Invalid stage"},
-    ).status_code == 422
+    assert (
+        client.patch(
+            hr_endpoint,
+            headers=design_headers,
+            json={"interview_notes": "Manager must not edit HR feedback"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            manager_endpoint,
+            headers=hr_headers,
+            json={"interview_notes": "HR must not edit manager feedback"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            manager_endpoint,
+            headers=_headers(client, "engineering-manager"),
+            json={"interview_notes": "Other department"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            f"/api/v1/applications/{application_id}/interviews/third",
+            headers=hr_headers,
+            json={"interview_notes": "Invalid stage"},
+        ).status_code
+        == 422
+    )
 
     hr_saved = client.patch(
         hr_endpoint,
@@ -890,9 +924,7 @@ def test_hr_and_manager_interview_records_are_separate_and_role_owned(
     assert hr_body["hr_interview"]["updated_by"] is not None
     _assert_aware(hr_body["hr_interview"]["updated_at"])
     assert hr_body["manager_interview"]["interview_at"] is None
-    assert hr_body["interview_notes"] == (
-        "HR recommends advancing; communication is clear."
-    )
+    assert hr_body["interview_notes"] == ("HR recommends advancing; communication is clear.")
 
     manager_saved = client.patch(
         manager_endpoint,
@@ -936,3 +968,437 @@ def test_hr_and_manager_interview_records_are_separate_and_role_owned(
             "application.interview.hr.update",
             "application.interview.manager.update",
         }
+
+
+def test_structured_interview_records_preserve_session_and_actor_history(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    application_id = ids["design_application"]
+    endpoint = f"/api/v1/applications/{application_id}/interview-records"
+    hr_headers = _headers(client, "hr")
+    design_headers = _headers(client, "design-manager")
+
+    payload = {
+        "stage": "hr",
+        "interviewed_at": "2030-08-20T09:30:00+08:00",
+        "duration_minutes": 50,
+        "mode": "video",
+        "status": "completed",
+        "questions": [
+            {
+                "question": "  請分享跨部門合作的經驗？  ",
+                "trait": "合作",
+                "response": "  與產品和工程共同排定範圍。  ",
+                "rating": 4,
+                "notes": "  有具體結果。  ",
+                "purpose": "  確認跨部門協作方式。  ",
+                "follow_up": "  最後如何取得共識？  ",
+                "source": "  HR 固定題  ",
+            }
+        ],
+        "summary": "  溝通清楚，建議進入主管面談。  ",
+        "recommendation": "advance",
+        "overall_rating": 4,
+    }
+    assert client.post(endpoint, headers=design_headers, json=payload).status_code == 403
+    assert (
+        client.post(
+            endpoint,
+            headers=_headers(client, "engineering-manager"),
+            json={**payload, "stage": "manager"},
+        ).status_code
+        == 403
+    )
+
+    created = client.post(endpoint, headers=hr_headers, json=payload)
+    assert created.status_code == 201, created.text
+    body = created.json()
+    record_id = body["id"]
+    assert body["stage"] == "hr"
+    assert body["interviewer_name"] == "Application HR"
+    assert body["interviewer_id"] is not None
+    assert body["questions"][0]["question"] == "請分享跨部門合作的經驗？"
+    assert body["questions"][0]["response"] == "與產品和工程共同排定範圍。"
+    assert body["questions"][0]["purpose"] == "確認跨部門協作方式。"
+    assert body["questions"][0]["follow_up"] == "最後如何取得共識？"
+    assert body["questions"][0]["source"] == "HR 固定題"
+    assert body["summary"] == "溝通清楚，建議進入主管面談。"
+    _assert_aware(body["interviewed_at"])
+    _assert_aware(body["created_at"])
+    _assert_aware(body["updated_at"])
+
+    listed = client.get(endpoint, headers=design_headers)
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [record_id]
+    assert client.get(f"{endpoint}/{record_id}", headers=design_headers).status_code == 200
+    assert (
+        client.patch(
+            f"{endpoint}/{record_id}",
+            headers=design_headers,
+            json={"summary": "Manager must not alter HR record"},
+        ).status_code
+        == 403
+    )
+    for field in ("interviewed_at", "mode", "status", "questions"):
+        assert (
+            client.patch(
+                f"{endpoint}/{record_id}",
+                headers=hr_headers,
+                json={field: None},
+            ).status_code
+            == 422
+        )
+
+    updated = client.patch(
+        f"{endpoint}/{record_id}",
+        headers=_headers(client, "admin"),
+        json={"status": "completed", "summary": "Final HR interview summary"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["interviewer_name"] == "Application HR"
+    assert updated.json()["updated_by_name"] == "Application Admin"
+    assert updated.json()["summary"] == "Final HR interview summary"
+
+    manager_created = client.post(
+        endpoint,
+        headers=design_headers,
+        json={
+            **payload,
+            "stage": "manager",
+            "interviewed_at": "2030-08-22T14:00:00+08:00",
+            "questions": [],
+        },
+    )
+    assert manager_created.status_code == 201
+    filtered = client.get(f"{endpoint}?stage=manager", headers=hr_headers)
+    assert filtered.status_code == 200
+    assert [item["stage"] for item in filtered.json()] == ["manager"]
+
+    with testing_session() as db:
+        record = db.get(InterviewRecord, record_id)
+        assert record is not None
+        assert record.interviewer_id is not None
+        assert record.interviewer_name == "Application HR"
+        audit_actions = set(
+            db.scalars(
+                select(AuditLog.action).where(
+                    AuditLog.resource_type == "interview_record",
+                    AuditLog.resource_id == str(record_id),
+                )
+            ).all()
+        )
+        assert audit_actions == {
+            "application.interview_record.create",
+            "application.interview_record.update",
+        }
+
+
+def test_interview_answers_are_shared_but_peer_evaluations_wait_for_both_submissions(
+    application_client,
+) -> None:
+    client, _, ids = application_client
+    application_id = ids["design_application"]
+    endpoint = f"/api/v1/applications/{application_id}/interview-records"
+    hr_headers = _headers(client, "hr")
+    manager_headers = _headers(client, "design-manager")
+
+    hr_payload = {
+        "stage": "hr",
+        "interviewed_at": "2030-08-20T09:30:00+08:00",
+        "duration_minutes": 45,
+        "mode": "video",
+        "status": "in_progress",
+        "questions": [
+            {
+                "question": "Why are you interested in this role?",
+                "response": "The candidate wants to own end-to-end product design.",
+                "rating": 4,
+                "notes": "Clear motivation with specific examples.",
+            }
+        ],
+        "summary": "Strong communication and motivation.",
+        "private_notes": "HR-only compensation context.",
+        "recommendation": "advance",
+        "overall_rating": 4,
+    }
+    hr_created = client.post(endpoint, headers=hr_headers, json=hr_payload)
+    assert hr_created.status_code == 201, hr_created.text
+    hr_record_id = hr_created.json()["id"]
+    assert hr_created.json()["evaluation_revealed"] is True
+    assert hr_created.json()["private_notes_visible"] is True
+    assert hr_created.json()["private_notes"] == "HR-only compensation context."
+
+    manager_view = client.get(endpoint, headers=manager_headers)
+    assert manager_view.status_code == 200
+    masked_hr = manager_view.json()[0]
+    assert masked_hr["questions"][0]["response"] == (
+        "The candidate wants to own end-to-end product design."
+    )
+    assert masked_hr["questions"][0]["rating"] is None
+    assert masked_hr["questions"][0]["notes"] is None
+    assert masked_hr["summary"] is None
+    assert masked_hr["recommendation"] is None
+    assert masked_hr["overall_rating"] is None
+    assert masked_hr["private_notes"] is None
+    assert masked_hr["evaluation_revealed"] is False
+    assert masked_hr["private_notes_visible"] is False
+
+    rejected_private_note = client.post(
+        endpoint,
+        headers=manager_headers,
+        json={
+            **hr_payload,
+            "stage": "manager",
+            "private_notes": "A manager must not create an HR-only note.",
+        },
+    )
+    assert rejected_private_note.status_code == 403
+
+    manager_payload = {
+        "stage": "manager",
+        "interviewed_at": "2030-08-22T14:00:00+08:00",
+        "duration_minutes": 60,
+        "mode": "onsite",
+        "status": "in_progress",
+        "questions": [
+            {
+                "question": "How did you validate your latest design decision?",
+                "response": "The candidate described research, testing, and metrics.",
+                "rating": 5,
+                "notes": "Strong evidence-based decision process.",
+            }
+        ],
+        "summary": "Strong role-specific evidence.",
+        "recommendation": "offer",
+        "overall_rating": 5,
+    }
+    manager_created = client.post(
+        endpoint,
+        headers=manager_headers,
+        json=manager_payload,
+    )
+    assert manager_created.status_code == 201, manager_created.text
+    manager_record_id = manager_created.json()["id"]
+
+    hr_view_before_both_submit = client.get(f"{endpoint}/{manager_record_id}", headers=hr_headers)
+    assert hr_view_before_both_submit.status_code == 200
+    masked_manager = hr_view_before_both_submit.json()
+    assert masked_manager["questions"][0]["response"] == (
+        "The candidate described research, testing, and metrics."
+    )
+    assert masked_manager["questions"][0]["rating"] is None
+    assert masked_manager["questions"][0]["notes"] is None
+    assert masked_manager["summary"] is None
+    assert masked_manager["evaluation_revealed"] is False
+
+    hr_submitted = client.patch(
+        f"{endpoint}/{hr_record_id}",
+        headers=hr_headers,
+        json={"status": "completed"},
+    )
+    assert hr_submitted.status_code == 200
+    still_masked = client.get(f"{endpoint}/{hr_record_id}", headers=manager_headers).json()
+    assert still_masked["evaluation_revealed"] is False
+    assert still_masked["overall_rating"] is None
+
+    manager_submitted = client.patch(
+        f"{endpoint}/{manager_record_id}",
+        headers=manager_headers,
+        json={"status": "completed"},
+    )
+    assert manager_submitted.status_code == 200
+
+    hr_view_after_both_submit = client.get(
+        f"{endpoint}/{manager_record_id}", headers=hr_headers
+    ).json()
+    assert hr_view_after_both_submit["evaluation_revealed"] is True
+    assert hr_view_after_both_submit["questions"][0]["rating"] == 5
+    assert hr_view_after_both_submit["questions"][0]["notes"] == (
+        "Strong evidence-based decision process."
+    )
+    assert hr_view_after_both_submit["summary"] == "Strong role-specific evidence."
+    assert hr_view_after_both_submit["recommendation"] == "offer"
+
+    manager_view_after_both_submit = client.get(
+        f"{endpoint}/{hr_record_id}", headers=manager_headers
+    ).json()
+    assert manager_view_after_both_submit["evaluation_revealed"] is True
+    assert manager_view_after_both_submit["questions"][0]["rating"] == 4
+    assert manager_view_after_both_submit["summary"] == ("Strong communication and motivation.")
+    assert manager_view_after_both_submit["private_notes"] is None
+    assert manager_view_after_both_submit["private_notes_visible"] is False
+
+
+def test_hr_plan_is_fixed_and_manager_plan_uses_candidate_background(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    with testing_session() as db:
+        alice = db.get(Candidate, ids["alice"])
+        engineering_job = db.get(JobRequisition, ids["engineering_job"])
+        assert alice is not None
+        assert engineering_job is not None
+        alice.current_title = "Python API Developer"
+        alice.total_years = 6
+        engineering_job.skills = ["Python", "FastAPI", "PostgreSQL"]
+        db.add_all(
+            [
+                CandidateSkill(
+                    candidate_id=alice.id,
+                    skill="Python",
+                    skill_norm="python",
+                ),
+                CandidateExperience(
+                    candidate_id=alice.id,
+                    company="Example Systems",
+                    title="API Developer",
+                    description="Led a billing API migration",
+                    years=3,
+                    sort_order=0,
+                ),
+            ]
+        )
+        db.commit()
+
+    hr_headers = _headers(client, "hr")
+    engineering_application = ids["engineering_application"]
+    design_application = ids["design_application"]
+    engineering_hr = client.get(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=hr",
+        headers=hr_headers,
+    )
+    design_hr = client.get(
+        f"/api/v1/applications/{design_application}/interview-question-plan?stage=hr",
+        headers=hr_headers,
+    )
+    assert engineering_hr.status_code == 200, engineering_hr.text
+    assert design_hr.status_code == 200, design_hr.text
+    assert len(engineering_hr.json()["questions"]) == 5
+    assert [item["question"] for item in engineering_hr.json()["questions"]] == [
+        item["question"] for item in design_hr.json()["questions"]
+    ]
+    assert all(item["source"] == "全公司 HR 固定題" for item in engineering_hr.json()["questions"])
+
+    manager = client.get(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=manager",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert manager.status_code == 200, manager.text
+    body = manager.json()
+    assert body["stage"] == "manager"
+    assert body["job_title"] == "Application Backend Engineer"
+    assert len(body["questions"]) == 5
+    combined_questions = " ".join(item["question"] for item in body["questions"])
+    assert "Application Backend Engineer" in combined_questions
+    assert "Python API Developer" in combined_questions
+    assert "Python" in combined_questions
+    assert "Example Systems" in combined_questions
+    assert any("候選人技能：Python" in item for item in body["personalization_basis"])
+    assert (
+        client.get(
+            f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=manager",
+            headers=_headers(client, "design-manager"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=third",
+            headers=hr_headers,
+        ).status_code
+        == 422
+    )
+
+
+def test_trait_questions_differ_for_two_resumes_on_the_same_job(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    with testing_session() as db:
+        alice = db.get(Candidate, ids["alice"])
+        bob = db.get(Candidate, ids["bob"])
+        engineering_job = db.get(JobRequisition, ids["engineering_job"])
+        assert alice is not None
+        assert bob is not None
+        assert engineering_job is not None
+        alice.current_title = "Backend Developer"
+        alice.total_years = 5
+        bob.current_title = "Product Designer"
+        bob.total_years = 3
+        engineering_job.skills = ["Python", "System Design"]
+        db.add_all(
+            [
+                CandidateSkill(
+                    candidate_id=alice.id,
+                    skill="Python",
+                    skill_norm="python",
+                ),
+                CandidateSkill(
+                    candidate_id=bob.id,
+                    skill="Figma",
+                    skill_norm="figma",
+                ),
+                CandidateExperience(
+                    candidate_id=alice.id,
+                    company="API Works",
+                    title="Backend Developer",
+                    description="Built payment services",
+                    sort_order=0,
+                ),
+                CandidateExperience(
+                    candidate_id=bob.id,
+                    company="Design Lab",
+                    title="Product Designer",
+                    description="Redesigned onboarding journeys",
+                    sort_order=0,
+                ),
+            ]
+        )
+        bob_engineering_application = JobApplication(
+            requisition_id=engineering_job.id,
+            candidate_id=bob.id,
+            status="submitted",
+            source="career_site",
+        )
+        db.add(bob_engineering_application)
+        db.commit()
+        bob_application_id = bob_engineering_application.id
+
+    headers = _headers(client, "hr")
+    payload = {"personality_traits": ["主動積極"]}
+    alice_response = client.post(
+        f"/api/v1/applications/{ids['engineering_application']}/interview-question-suggestions",
+        headers=headers,
+        json=payload,
+    )
+    bob_response = client.post(
+        f"/api/v1/applications/{bob_application_id}/interview-question-suggestions",
+        headers=headers,
+        json=payload,
+    )
+    assert alice_response.status_code == 200, alice_response.text
+    assert bob_response.status_code == 200, bob_response.text
+    alice_body = alice_response.json()
+    bob_body = bob_response.json()
+    alice_questions = alice_body["suggestions"][0]["questions"]
+    bob_questions = bob_body["suggestions"][0]["questions"]
+    assert [item["question"] for item in alice_questions] != [
+        item["question"] for item in bob_questions
+    ]
+    assert "API Works" in alice_questions[0]["question"]
+    assert "Design Lab" in bob_questions[0]["question"]
+    assert alice_questions[0]["source"] == "最近經歷：API Works／Backend Developer"
+    assert bob_questions[0]["source"] == "最近經歷：Design Lab／Product Designer"
+    assert alice_body["application_id"] == ids["engineering_application"]
+    assert bob_body["application_id"] == bob_application_id
+    assert any("候選人技能：Python" in item for item in alice_body["personalization_basis"])
+    assert any("候選人技能：Figma" in item for item in bob_body["personalization_basis"])
+    assert (
+        client.post(
+            f"/api/v1/applications/{bob_application_id}/interview-question-suggestions",
+            headers=_headers(client, "design-manager"),
+            json=payload,
+        ).status_code
+        == 403
+    )

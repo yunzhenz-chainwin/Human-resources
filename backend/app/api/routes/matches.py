@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -12,21 +12,29 @@ from app.dependencies.auth import (
     require_recruiting_user,
 )
 from app.models import Candidate, JobApplication, JobRequisition, MatchResult, User
+from app.schemas.interview_questions import (
+    InterviewQuestionSuggestionRequest,
+    InterviewQuestionSuggestionResponse,
+)
 from app.schemas.matching import (
     CandidateMatchOverview,
     CandidateMatchOverviewItem,
     MatchCandidateRead,
     MatchFeedback,
     MatchingCriteria,
+    MatchingWeights,
     MatchList,
     MatchRead,
     MatchStatusUpdate,
 )
+from app.services.interview_questions import suggest_interview_questions
 from app.services.matching import (
     POSITIVE_OUTCOME_STATUSES,
     assess_matching_readiness,
     rematch_requisition,
+    resolve_weights,
 )
+from app.services.security import write_audit
 
 router = APIRouter()
 
@@ -46,6 +54,7 @@ def _criteria(requisition: JobRequisition) -> MatchingCriteria:
         require_education=config.get("require_education", True),
         require_location=config.get("require_location", True),
         required_skill_ratio=config.get("required_skill_ratio", 1.0),
+        weights=MatchingWeights(**resolve_weights(config)),
     )
 
 
@@ -259,6 +268,8 @@ def update_matching_criteria(
         require_location=payload.require_location,
         required_skill_ratio=payload.required_skill_ratio,
     )
+    if "weights" in payload.model_fields_set:
+        config.update(payload.weights.normalized().model_dump())
     requisition.match_weights = config
     requisition.skills = list(dict.fromkeys(payload.required_skills + payload.preferred_skills))
     requisition.min_years = payload.min_years
@@ -270,6 +281,83 @@ def update_matching_criteria(
     db.refresh(requisition)
     rematch_requisition(db, requisition)
     return _criteria(requisition)
+
+
+@router.get(
+    "/requisitions/{requisition_id}/matching-weights",
+    response_model=MatchingWeights,
+)
+def get_matching_weights(
+    requisition_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> MatchingWeights:
+    requisition = _requisition(db, requisition_id, user)
+    return MatchingWeights(**resolve_weights(requisition.match_weights))
+
+
+@router.put(
+    "/requisitions/{requisition_id}/matching-weights",
+    response_model=MatchingWeights,
+)
+def update_matching_weights(
+    requisition_id: int,
+    payload: MatchingWeights,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_user),
+) -> MatchingWeights:
+    """Let HR or the owning department manager set relative scoring importance."""
+
+    requisition = _requisition(db, requisition_id, user)
+    normalized = payload.normalized()
+    previous = resolve_weights(requisition.match_weights)
+    config = dict(requisition.match_weights or {})
+    config.update(normalized.model_dump())
+    requisition.match_weights = config
+    write_audit(
+        db,
+        user,
+        "matching.weights.update",
+        "job_requisition",
+        requisition.id,
+        requisition.department_id,
+        details={
+            "previous": previous,
+            "weights": normalized.model_dump(),
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    db.commit()
+    db.refresh(requisition)
+    rematch_requisition(db, requisition)
+    return normalized
+
+
+@router.post(
+    "/requisitions/{requisition_id}/interview-question-suggestions",
+    response_model=InterviewQuestionSuggestionResponse,
+)
+def interview_question_suggestions(
+    requisition_id: int,
+    payload: InterviewQuestionSuggestionRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> InterviewQuestionSuggestionResponse:
+    requisition = _requisition(db, requisition_id, user)
+    return InterviewQuestionSuggestionResponse(
+        requisition_id=requisition.id,
+        job_title=requisition.title,
+        suggestions=suggest_interview_questions(
+            payload.personality_traits,
+            requisition.title,
+        ),
+        guidance=(
+            "請以與職務相關的實際行為與結果追問；人格特質僅用於安排提問，"
+            "不應作為診斷或單獨的錄用依據。"
+        ),
+    )
 
 
 @router.post("/requisitions/{requisition_id}/rematch", response_model=MatchList)

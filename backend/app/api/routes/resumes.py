@@ -54,6 +54,7 @@ from app.services.storage import (
     get_storage_provider,
     prepare_resume_upload,
 )
+from app.services.talent_retention import candidate_retention_until
 
 router = APIRouter(prefix="/resumes")
 SourcePlatform = Literal["direct", "p104", "p1111", "generic"]
@@ -570,11 +571,13 @@ def confirm_resume(
             enforce_candidate_scope(db, user, candidate.id)
     created = candidate is None
     if candidate is None:
+        now = datetime.now(UTC)
         candidate = Candidate(
-            code=f"T-{datetime.now(UTC):%Y%m%d}-{uuid4().hex[:8].upper()}",
+            code=f"T-{now:%Y%m%d}-{uuid4().hex[:8].upper()}",
             name=name,
             source=resume.source_platform,
             status="new",
+            retention_until=candidate_retention_until(db, now),
         )
         db.add(candidate)
         db.flush()

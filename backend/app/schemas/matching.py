@@ -16,6 +16,48 @@ MatchStatus = Literal[
 ]
 
 
+class MatchHighlight(BaseModel):
+    kind: Literal["strength", "concern", "info"]
+    category: str
+    text: str
+
+
+class MatchingWeights(BaseModel):
+    """Relative importance points; callers need not make them add up to 100."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill: float = Field(ge=0, le=100)
+    relevance: float = Field(ge=0, le=100)
+    years: float = Field(ge=0, le=100)
+    salary: float = Field(ge=0, le=100)
+    education: float = Field(ge=0, le=100)
+    location: float = Field(ge=0, le=100)
+
+    @model_validator(mode="after")
+    def require_positive_total(self):
+        if sum(self.model_dump().values()) <= 0:
+            raise ValueError("At least one matching weight must be greater than zero")
+        return self
+
+    def normalized(self) -> "MatchingWeights":
+        values = self.model_dump()
+        total = sum(values.values())
+        normalized = {key: value / total for key, value in values.items()}
+        return MatchingWeights(**normalized)
+
+
+def _default_matching_weights() -> MatchingWeights:
+    return MatchingWeights(
+        skill=0.40,
+        relevance=0.20,
+        years=0.15,
+        salary=0.10,
+        education=0.10,
+        location=0.05,
+    )
+
+
 class MatchCandidateRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -38,6 +80,7 @@ class MatchRead(BaseModel):
     gate_passed: bool
     total_score: float
     score_breakdown: dict
+    highlights: list[MatchHighlight] = Field(default_factory=list)
     rank: int | None
     status: MatchStatus
     feedback_reason: str | None
@@ -78,6 +121,7 @@ class MatchingCriteria(BaseModel):
     # 1.0 keeps the strict "must have all" behaviour; lower it to surface strong
     # partial matches instead of gating them out entirely.
     required_skill_ratio: float = Field(default=1.0, ge=0, le=1)
+    weights: MatchingWeights = Field(default_factory=_default_matching_weights)
 
     @model_validator(mode="after")
     def validate_salary_range(self):

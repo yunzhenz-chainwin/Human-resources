@@ -41,6 +41,7 @@ from app.schemas.hr import (
 )
 from app.services.applications import normalize_email, normalize_phone
 from app.services.security import write_audit
+from app.services.talent_retention import candidate_retention_until
 
 router = APIRouter(prefix="/candidates")
 settings = get_settings()
@@ -170,6 +171,7 @@ def create_candidate(
         total_years=payload.total_years,
         source=payload.source,
         status="new",
+        retention_until=candidate_retention_until(db, now),
     )
     db.add(candidate)
     db.flush()

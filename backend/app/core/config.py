@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +18,13 @@ class Settings(BaseSettings):
     resume_max_bytes: int = 10 * 1024 * 1024
     candidate_photo_storage_path: str = "./storage/candidate-photos"
     candidate_photo_max_bytes: int = 5 * 1024 * 1024
+    talent_retention_worker_enabled: bool = False
+    talent_retention_worker_initial_delay_seconds: int = Field(default=30, ge=0, le=86_400)
+    talent_retention_worker_interval_seconds: int = Field(
+        default=24 * 60 * 60, ge=60, le=31 * 24 * 60 * 60
+    )
+    talent_retention_batch_size: int = Field(default=500, ge=1, le=5_000)
+    talent_retention_max_batches_per_run: int = Field(default=20, ge=1, le=100)
     resume_scanner: str = "none"
     resume_scan_policy: str = "allow_unavailable"
     clamav_host: str = "localhost"

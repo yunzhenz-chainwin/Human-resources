@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import type { RequisitionDto } from '../services/hrApi'
 import {
   matchingReportsApi,
@@ -9,10 +9,12 @@ import {
   type MatchReadiness,
   type MatchStatus,
   type MatchingCriteria,
+  type MatchingWeights,
+  type MatchHighlight,
   type ScorePart,
 } from '../services/matchingReportsApi'
 
-const props = defineProps<{ jobs: RequisitionDto[]; canConfigure?: boolean }>()
+const props = defineProps<{ jobs: RequisitionDto[]; canConfigure?: boolean; canConfigureWeights?: boolean }>()
 const selectedJobId = ref<number | null>(null)
 const overview = ref<CandidateMatchOverview | null>(null)
 const readiness = ref<MatchReadiness | null>(null)
@@ -24,6 +26,10 @@ const requiredSkillsText = ref('')
 const preferredSkillsText = ref('')
 const showCriteria = ref(false)
 const savingCriteria = ref(false)
+const weights = ref<MatchingWeights | null>(null)
+const weightDraft = reactive<MatchingWeights>({ skill: 40, relevance: 20, years: 15, salary: 10, education: 10, location: 5 })
+const showWeights = ref(false)
+const savingWeights = ref(false)
 const minDisplayScore = ref(0)
 const onlyPassed = ref(false)
 const talentSearch = ref('')
@@ -50,10 +56,22 @@ const eligibleTotalCount = computed(() => allPeople.value.filter(item => item.ma
 const formulaParts = computed(() => {
   const sample = allPeople.value.find(item => item.match)?.match
   return Object.entries(componentLabels).map(([key, label]) => {
-    const weight = Number(sample?.score_breakdown[key]?.weight)
+    const configured = weights.value?.[key as keyof MatchingWeights]
+    const weight = Number(configured ?? sample?.score_breakdown[key]?.weight)
     return { key, label, percent: Number.isFinite(weight) ? Math.round(weight * 100) : null }
   })
 })
+const weightTotal = computed(() => Object.values(weightDraft).reduce((total, value) => total + (Number(value) || 0), 0))
+const weightItems = computed(() => Object.entries(componentLabels).map(([key, label]) => ({
+  key: key as keyof MatchingWeights,
+  label,
+  value: weightDraft[key as keyof MatchingWeights],
+})))
+const weightPresets: Array<{ label: string; description: string; values: MatchingWeights }> = [
+  { label: '均衡', description: '兼顧技能、職務內容與經驗', values: { skill: 40, relevance: 20, years: 15, salary: 10, education: 10, location: 5 } },
+  { label: '技能優先', description: '強調必要技術與實作能力', values: { skill: 55, relevance: 20, years: 10, salary: 5, education: 5, location: 5 } },
+  { label: '經驗優先', description: '重視相關職務與年資成熟度', values: { skill: 25, relevance: 35, years: 25, salary: 5, education: 5, location: 5 } },
+]
 const statusLabels: Record<string, string> = {
   ineligible: '未通過必要條件', recommended: '建議人選', shortlisted: '入選名單', contacted: '已聯絡',
   interview: '面試中', offered: '已發 Offer', hired: '已錄取', rejected_by_manager: '主管婉拒', withdrawn: '已退出',
@@ -85,21 +103,53 @@ async function loadOverview() {
   readiness.value = null
   criteria.value = null
   try {
-    const [overviewResult, readinessResult, criteriaResult] = await Promise.all([
+    const [overviewResult, readinessResult, criteriaResult, weightsResult] = await Promise.all([
       matchingReportsApi.candidateOverview(jobId),
       matchingReportsApi.readiness(jobId),
       matchingReportsApi.matchingCriteria(jobId),
+      matchingReportsApi.matchingWeights(jobId),
     ])
     if (requestId !== overviewRequestSequence || selectedJobId.value !== jobId) return
     overview.value = overviewResult
     readiness.value = readinessResult
     criteria.value = criteriaResult
+    weights.value = weightsResult
+    setWeightDraft(weightsResult)
     requiredSkillsText.value = criteriaResult.required_skills.join('、')
     preferredSkillsText.value = criteriaResult.preferred_skills.join('、')
   } catch (cause) {
     if (requestId === overviewRequestSequence) error.value = message(cause)
   } finally {
     if (requestId === overviewRequestSequence) loading.value = false
+  }
+}
+
+function setWeightDraft(value: MatchingWeights) {
+  for (const key of Object.keys(weightDraft) as Array<keyof MatchingWeights>) {
+    weightDraft[key] = Math.round(Number(value[key] || 0) * 100)
+  }
+}
+
+function applyWeightPreset(value: MatchingWeights) {
+  Object.assign(weightDraft, value)
+}
+
+async function saveWeights() {
+  if (!props.canConfigureWeights || !selectedJobId.value || weightTotal.value <= 0) {
+    if (weightTotal.value <= 0) error.value = '至少一項媒合權重必須大於 0'
+    return
+  }
+  savingWeights.value = true
+  error.value = ''
+  try {
+    weights.value = await matchingReportsApi.updateMatchingWeights(selectedJobId.value, { ...weightDraft })
+    setWeightDraft(weights.value)
+    await loadOverview()
+    showWeights.value = false
+  } catch (cause) {
+    error.value = message(cause)
+  } finally {
+    savingWeights.value = false
   }
 }
 
@@ -208,6 +258,27 @@ function gateReasons(match: MatchDto) {
   const misses = (match.score_breakdown.gate?.miss || []) as unknown[]
   return misses.map(value => gateLabels[String(value)] || String(value)).join('、')
 }
+
+function matchHighlights(match: MatchDto): MatchHighlight[] {
+  if (match.highlights?.length) return match.highlights
+  const scored = Object.entries(componentLabels)
+    .map(([key, label]) => ({ key, label, score: Number(part(match, key).score || 0) }))
+    .sort((left, right) => right.score - left.score)
+  const result: MatchHighlight[] = []
+  scored.filter(item => item.score >= 0.7).slice(0, 2).forEach(item => result.push({
+    kind: 'strength', category: item.label, text: `${item.label}契合度 ${Math.round(item.score * 100)}%，是這位人才的主要優勢。`,
+  }))
+  scored.filter(item => item.score < 0.5).sort((left, right) => left.score - right.score).slice(0, 2).forEach(item => result.push({
+    kind: 'concern', category: item.label, text: `${item.label}契合度 ${Math.round(item.score * 100)}%，建議在面談中進一步確認。`,
+  }))
+  if (!match.gate_passed) result.unshift({ kind: 'concern', category: '必要條件', text: gateReasons(match) || '有必要條件尚未符合。' })
+  return result.length ? result : [{ kind: 'info', category: '整體', text: '目前資料有限，建議搭配履歷與面談內容綜合判斷。' }]
+}
+
+const highlightKindLabels: Record<MatchHighlight['kind'], string> = { strength: '優勢', concern: '待確認', info: '補充' }
+const highlightCategoryLabels: Record<string, string> = {
+  gate: '必要條件', skill: '技能', years: '年資', relevance: '職務相關', location: '地點', data_quality: '資料完整度',
+}
 </script>
 
 <template>
@@ -220,6 +291,25 @@ function gateReasons(match: MatchDto) {
     <div class="match-formula" aria-label="目前職缺的媒合權重">
       <article v-for="item in formulaParts" :key="item.key"><b>{{ item.percent === null ? '—' : `${item.percent}%` }}</b><span>{{ item.label }}</span></article>
     </div>
+
+    <div class="weight-explainer panel">
+      <div><strong>這個職缺最重視什麼？</strong><span>目前百分比會直接影響總分。HR、管理員與該職缺的部門主管可依招募目標人工調整。</span></div>
+      <button v-if="props.canConfigureWeights" class="button secondary" data-testid="matching-weight-toggle" @click="showWeights = !showWeights">{{ showWeights ? '收合權重' : '調整加權比重' }}</button>
+    </div>
+
+    <form v-if="props.canConfigureWeights && showWeights && weights" class="weight-panel panel" data-testid="matching-weight-panel" @submit.prevent="saveWeights">
+      <header><div><strong>人工調整媒合權重</strong><span>數值代表相對重要程度；總和不必剛好 100，儲存時會自動正規化。</span></div><b :class="{ invalid: weightTotal <= 0 }">目前合計 {{ weightTotal }}</b></header>
+      <div class="weight-presets">
+        <button v-for="preset in weightPresets" :key="preset.label" type="button" @click="applyWeightPreset(preset.values)"><strong>{{ preset.label }}</strong><small>{{ preset.description }}</small></button>
+      </div>
+      <div class="weight-grid">
+        <label v-for="item in weightItems" :key="item.key">
+          <span><strong>{{ item.label }}</strong><output>{{ weightDraft[item.key] }}</output></span>
+          <input v-model.number="weightDraft[item.key]" :data-testid="`matching-weight-${item.key}`" type="range" min="0" max="100" step="1">
+        </label>
+      </div>
+      <footer><button class="button secondary" type="button" @click="showWeights = false">取消</button><button class="button primary" data-testid="matching-weight-save" :disabled="savingWeights || weightTotal <= 0">{{ savingWeights ? '儲存並重新媒合中…' : '套用權重並重新媒合' }}</button></footer>
+    </form>
 
     <div class="gate-explainer panel">
       <div><strong>「必要條件」是什麼？</strong><span>HR 指定的硬性門檻，例如必要技能、最低年資、學歷與地點。未通過時仍顯示原始適配分數，並清楚標示缺少哪一項，不再全部變成 0.0%。</span></div>
@@ -293,6 +383,10 @@ function gateReasons(match: MatchDto) {
             <small v-if="part(item.match, key).miss?.length" class="miss">缺口：{{ values(part(item.match, key).miss) }}</small>
           </div>
         </div>
+        <section v-if="item.match" class="match-highlights" :aria-label="`${item.candidate.name}的媒合重點`">
+          <strong>媒合重點</strong>
+          <ul><li v-for="(highlight, index) in matchHighlights(item.match)" :key="`${highlight.category}-${index}`" :data-kind="highlight.kind"><b>{{ highlightKindLabels[highlight.kind] }} · {{ highlightCategoryLabels[highlight.category] || highlight.category }}</b><span>{{ highlight.text }}</span></li></ul>
+        </section>
         <div v-if="item.match && !item.match.gate_passed" class="gate-warning"><strong>參考分數 {{ item.match.total_score.toFixed(1) }}%，但未通過必要條件</strong><span>{{ gateReasons(item.match) }}</span></div>
         <div v-else-if="!item.match" class="pending-message"><b>等待第一次計算</b><span>按上方「計算全部人才」後，這裡會顯示百分比與技能、年資、薪資、學歷、地點等評分依據。</span></div>
 
@@ -317,12 +411,14 @@ function gateReasons(match: MatchDto) {
 <style scoped>
 .match-hero{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:12px;padding:27px 30px;border-radius:20px;background:linear-gradient(120deg,#102f47,#146b71 58%,#52a98f);color:#fff;box-shadow:0 17px 40px rgba(20,74,75,.14)}.match-hero p{margin:0;color:#f5ca77;font-size:8px;font-weight:800;letter-spacing:1.3px}.match-hero h1{margin:7px 0;font-size:25px}.match-hero span{font-size:9px;color:rgba(255,255,255,.72)}.match-hero>strong{flex:0 0 auto;padding:14px 17px;border:1px solid rgba(255,255,255,.28);border-radius:14px;background:rgba(255,255,255,.1);font-size:12px}.match-hero>strong small{display:block;margin-top:4px;color:rgba(255,255,255,.65);font-size:8px}
 .match-formula{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:13px}.match-formula article{display:flex;align-items:center;gap:8px;padding:11px;border:1px solid #deebe7;border-radius:11px;background:#fff}.match-formula b{color:#16776b;font-size:13px}.match-formula span{color:#72847f;font-size:8px}
+.weight-explainer{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 17px;margin-bottom:13px;border-color:#cce1dc;background:#f2f9f7}.weight-explainer div{display:flex;flex-direction:column;gap:4px}.weight-explainer strong{font-size:12px;color:#315f57}.weight-explainer span{font-size:10px;color:#61766f;line-height:1.6}.weight-panel{padding:18px;margin-bottom:14px;border-color:#bddbd3}.weight-panel>header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}.weight-panel>header strong,.weight-panel>header span{display:block}.weight-panel>header strong{font-size:14px}.weight-panel>header span{margin-top:4px;color:#71827d;font-size:10px}.weight-panel>header>b{padding:6px 9px;border-radius:99px;background:#eaf4f1;color:#287066;font-size:11px}.weight-panel>header>b.invalid{background:#fff0ef;color:#9a4943}.weight-presets{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.weight-presets button{padding:10px 11px;border:1px solid #d5e4e0;border-radius:9px;background:#fbfdfc;color:#395f58;text-align:left}.weight-presets button:hover{border-color:#7db8aa;background:#f0f9f6}.weight-presets strong,.weight-presets small{display:block}.weight-presets strong{font-size:11px}.weight-presets small{margin-top:3px;color:#71837e;font-size:9px}.weight-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:11px 18px;margin-top:16px;padding:14px;border-radius:11px;background:#f5f9f8}.weight-grid label>span{display:flex;justify-content:space-between;align-items:center}.weight-grid strong{font-size:10px;color:#45665f}.weight-grid output{min-width:35px;padding:3px 6px;border-radius:6px;background:#fff;color:#1e776b;font-size:11px;font-weight:800;text-align:center}.weight-grid input{width:100%;margin-top:8px;accent-color:#247c70}.weight-panel>footer{display:flex;justify-content:flex-end;gap:8px;margin-top:15px}
 .gate-explainer{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 17px;margin-bottom:13px;border-color:#ecd9ac;background:#fffaf0}.gate-explainer div{display:flex;flex-direction:column;gap:4px}.gate-explainer strong{font-size:11px;color:#705120}.gate-explainer span{font-size:9px;color:#806e4f;line-height:1.6}.criteria-panel{padding:18px;margin-bottom:14px;border-color:#cde2dc}.criteria-panel header strong,.criteria-panel header span{display:block}.criteria-panel header strong{font-size:14px}.criteria-panel header span{font-size:9px;color:#71827d;margin-top:4px}.criteria-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}.criteria-grid .wide{grid-column:span 3}.criteria-grid label{font-size:9px;color:#61736e}.criteria-grid input{display:block;width:100%;height:38px;margin-top:5px;border:1px solid #d7e3df;border-radius:8px;padding:0 10px}.criteria-grid small{display:block;margin-top:4px;color:#9a6c3f}.hard-gates{display:flex;flex-wrap:wrap;gap:17px;margin:15px 0;padding:12px;border-radius:9px;background:#f2f8f6}.hard-gates label{font-size:9px;color:#365f58}.hard-gates input{margin-right:5px}.criteria-panel footer{display:flex;justify-content:flex-end;gap:8px}.result-filters{display:flex;align-items:end;gap:12px;padding:12px 14px;margin-bottom:14px}.result-filters label{font-size:8px;color:#657872}.result-filters input:not([type=checkbox]),.result-filters select{display:block;height:36px;margin-top:4px;border:1px solid #dce5e2;border-radius:8px;background:#fff;padding:0 9px}.result-filters .check{display:flex;align-items:center;gap:5px;height:36px}.result-filters>span{margin-left:auto;font-size:9px;color:#54736d}
 .match-toolbar{display:flex;align-items:end;gap:14px;padding:14px;margin-bottom:14px}.match-toolbar label{font-size:9px;color:#627570}.match-toolbar select{display:block;margin-top:5px;height:38px;min-width:310px;border:1px solid #dce5e2;border-radius:8px;background:#fff;padding:0 10px}.match-toolbar>span{flex:1;color:#758581;font-size:9px}.match-error{padding:11px 14px;background:#fff0ef;color:#943f3a;border-radius:8px;margin-bottom:12px;font-size:10px}
 .people-summary,.readiness{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:14px;margin-bottom:14px}.people-summary{background:#eef8f4;border-color:#d5e9e2}.readiness{background:#fffaf1;border-color:#eadfc8}.people-summary div,.readiness div{padding:8px 10px;border-right:1px solid #d9e9e3}.people-summary div:last-child,.readiness div:last-child{border:0}.people-summary span,.people-summary strong,.readiness span,.readiness strong{display:block}.people-summary span,.readiness span{font-size:8px;color:#71827d}.people-summary strong,.readiness strong{font-size:15px;margin-top:3px;color:#276d64}
 .match-empty{text-align:center;padding:70px 20px}.match-empty strong,.match-empty p{display:block;font-size:12px}.match-empty p{font-size:9px;color:#758581}.match-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.match-card{padding:18px}.match-card.pending{border-style:dashed;background:linear-gradient(145deg,#fff,#fbfcfc)}.match-card header{display:flex;justify-content:space-between;align-items:center}.candidate{display:flex;align-items:center;gap:11px}.candidate>span{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:#dfeeea;color:#286e66;font-weight:700}.candidate h2{font-size:14px;margin:0}.candidate p{font-size:8px;color:#7d8d89;margin:4px 0}.score{text-align:right;color:#216b63}.score.failed{color:#a55049}.score.uncomputed{color:#98a6a2}.score strong,.score small{display:block}.score strong{font-size:27px}.score strong b{font-size:12px;margin-left:2px}.score small{font-size:8px}
 .score-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:18px 0}.score-grid>div{background:#f7f9f8;border-radius:8px;padding:10px}.score-grid span{display:flex;justify-content:space-between;font-size:9px}.score-grid em{font-style:normal;color:#47726b}.score-grid i{display:block;height:4px;background:#dfe8e5;border-radius:4px;margin:7px 0}.score-grid u{display:block;height:100%;background:#3e8c80;border-radius:4px;text-decoration:none}.score-grid small{display:block;font-size:7px;line-height:1.5}.hit{color:#39806b}.miss{color:#a65a52}.pending-message{margin:18px 0;padding:18px;border-radius:10px;background:#f4f7f6;text-align:center;color:#768783}.pending-message b,.pending-message span{display:block}.pending-message b{font-size:11px;color:#566c66}.pending-message span{margin-top:6px;font-size:8px;line-height:1.6}.feedback{padding:9px;background:#fff3e9;color:#855b37;border-radius:7px;font-size:9px;margin-bottom:12px}.feedback strong{display:block;margin-bottom:3px}
+.match-highlights{margin:-4px 0 14px;padding:12px;border:1px solid #dce8e4;border-radius:9px;background:#fbfdfc}.match-highlights>strong{display:block;margin-bottom:8px;color:#315d56;font-size:11px}.match-highlights ul{list-style:none;display:grid;gap:7px;margin:0;padding:0}.match-highlights li{position:relative;padding-left:14px;color:#526c66}.match-highlights li:before{content:"";position:absolute;left:0;top:6px;width:6px;height:6px;border-radius:50%;background:#6e9189}.match-highlights li[data-kind="strength"]:before{background:#359274}.match-highlights li[data-kind="concern"]:before{background:#d18451}.match-highlights b,.match-highlights span{display:block}.match-highlights b{font-size:9px}.match-highlights span{margin-top:2px;font-size:9px;line-height:1.55}.match-highlights li[data-kind="strength"] b{color:#28765e}.match-highlights li[data-kind="concern"] b{color:#985c34}
 .gate-warning{margin:-4px 0 14px;padding:10px 12px;border-left:3px solid #d68850;background:#fff5ec;color:#8a5135;border-radius:7px}.gate-warning strong,.gate-warning span{display:block;font-size:9px}.gate-warning span{margin-top:3px;font-size:8px}
 .match-card footer{border-top:1px solid #edf1f0;padding-top:12px;display:flex;align-items:center;gap:8px}.match-card footer>div{flex:1}.match-card footer strong,.match-card footer small{display:block;font-size:9px}.match-card footer small{font-size:8px;color:#81908d;margin-top:3px}.match-card footer select{height:37px;border:1px solid #dce5e2;border-radius:8px;background:#fff;font-size:9px;padding:0 8px}.pending-badge{padding:7px 11px;border-radius:99px;background:#edf1f0;color:#6d7c78;font-size:8px}
-@media(max-width:1050px){.match-list{grid-template-columns:1fr}.match-toolbar,.result-filters{align-items:stretch;flex-direction:column}.match-toolbar select{width:100%;min-width:0}.result-filters>span{margin-left:0}.people-summary,.readiness{grid-template-columns:1fr 1fr}.match-formula{grid-template-columns:repeat(3,1fr)}.criteria-grid{grid-template-columns:1fr 1fr}.criteria-grid .wide{grid-column:span 2}}@media(max-width:650px){.match-hero,.gate-explainer{align-items:flex-start;flex-direction:column;padding:22px 19px}.match-formula{grid-template-columns:repeat(2,1fr)}.criteria-grid{grid-template-columns:1fr}.criteria-grid .wide{grid-column:span 1}}
+@media(max-width:1050px){.match-list{grid-template-columns:1fr}.match-toolbar,.result-filters{align-items:stretch;flex-direction:column}.match-toolbar select{width:100%;min-width:0}.result-filters>span{margin-left:0}.people-summary,.readiness{grid-template-columns:1fr 1fr}.match-formula{grid-template-columns:repeat(3,1fr)}.criteria-grid{grid-template-columns:1fr 1fr}.criteria-grid .wide{grid-column:span 2}}@media(max-width:650px){.match-hero,.gate-explainer,.weight-explainer{align-items:flex-start;flex-direction:column;padding:22px 19px}.match-formula{grid-template-columns:repeat(2,1fr)}.criteria-grid,.weight-grid,.weight-presets{grid-template-columns:1fr}.criteria-grid .wide{grid-column:span 1}}
 </style>

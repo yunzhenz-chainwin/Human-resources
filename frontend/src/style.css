@@ -113,3 +113,31 @@ body{color:var(--ink);background:radial-gradient(circle at 82% 4%,rgba(82,184,16
   .sidebar .nav-item{min-height:32px;max-height:40px}
   .sidebar-footer{padding:9px 17px}
 }
+
+/* Candidate-level retention controls: the effective rule and date stay visible
+   next to the selector so HR can tell company defaults from custom periods. */
+.candidate-retention-control{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin:0 0 13px;
+  padding:11px 12px;
+  border:1px solid #d9e7e2;
+  border-radius:10px;
+  background:#f5faf8;
+}
+.candidate-retention-control.custom{border-color:#d7c58f;background:#fffaf0}
+.candidate-retention-control>div{min-width:0}
+.candidate-retention-control>div span,.candidate-retention-control>div small{display:block}
+.candidate-retention-control>div span{color:#27695e;font-size:12px;font-weight:800}
+.candidate-retention-control.custom>div span{color:#8a641e}
+.candidate-retention-control>div small{margin-top:3px;color:#60766f!important;font-size:11px!important}
+.candidate-retention-control label{display:grid;gap:4px;flex:0 0 min(210px,52%);font-size:11px!important;font-weight:700}
+.candidate-retention-control select{width:100%;height:38px;border:1px solid #cbded8;border-radius:8px;background:#fff;padding:0 9px;font-size:12px!important;color:#244b45}
+.candidate-retention-control select:disabled{opacity:.6;cursor:wait}
+#candidate-retention-list{scroll-margin-top:92px}
+@media(max-width:520px){
+  .candidate-retention-control{align-items:stretch;flex-direction:column}
+  .candidate-retention-control label{flex-basis:auto}
+}

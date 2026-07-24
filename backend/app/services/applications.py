@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models import Candidate, CandidateSkill, JobApplication, ResumeFile
 from app.repositories.recruitment import RecruitmentRepository
 from app.schemas.public import PublicApplicationCreate, PublicApplicationResult
+from app.services.talent_retention import candidate_retention_until
 
 
 @dataclass
@@ -98,7 +99,7 @@ def submit_application(
             status="new",
             consent_status="consented",
             consent_at=datetime.now(UTC),
-            retention_until=date(datetime.now(UTC).year + 2, datetime.now(UTC).month, 1),
+            retention_until=candidate_retention_until(db),
         )
         db.add(candidate)
         db.flush()

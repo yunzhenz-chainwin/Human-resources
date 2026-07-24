@@ -27,6 +27,21 @@ export type ScorePart = {
   miss?: unknown[]
 }
 
+export type MatchHighlight = {
+  kind: 'strength' | 'concern' | 'info'
+  category: string
+  text: string
+}
+
+export type MatchingWeights = {
+  skill: number
+  relevance: number
+  years: number
+  salary: number
+  education: number
+  location: number
+}
+
 export type MatchDto = {
   id: number
   requisition_id: number
@@ -48,6 +63,7 @@ export type MatchDto = {
   feedback_reason: string | null
   feedback_at: string | null
   computed_at: string
+  highlights: MatchHighlight[]
 }
 
 export type MatchList = { items: MatchDto[]; total: number }
@@ -73,6 +89,8 @@ export type MatchingCriteria = {
   require_years: boolean
   require_education: boolean
   require_location: boolean
+  required_skill_ratio?: number
+  weights: MatchingWeights
 }
 export type MatchReadiness = {
   strategy: string
@@ -134,6 +152,12 @@ export const matchingReportsApi = {
   updateMatchingCriteria: (requisitionId: number, criteria: MatchingCriteria) =>
     request<MatchingCriteria>(`/requisitions/${requisitionId}/matching-criteria`, {
       method: 'PUT', body: JSON.stringify(criteria),
+    }),
+  matchingWeights: (requisitionId: number) =>
+    request<MatchingWeights>(`/requisitions/${requisitionId}/matching-weights`),
+  updateMatchingWeights: (requisitionId: number, weights: MatchingWeights) =>
+    request<MatchingWeights>(`/requisitions/${requisitionId}/matching-weights`, {
+      method: 'PUT', body: JSON.stringify(weights),
     }),
   matches: (requisitionId: number, includeIneligible = true) =>
     request<MatchList>(`/requisitions/${requisitionId}/matches?include_ineligible=${includeIneligible}`),

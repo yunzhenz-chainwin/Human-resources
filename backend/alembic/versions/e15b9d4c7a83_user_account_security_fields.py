@@ -24,7 +24,11 @@ def upgrade() -> None:
             "must_change_password",
             sa.Boolean(),
             nullable=False,
-            server_default="false",
+            # Use a SQL boolean expression instead of the quoted string literal
+            # ``'false'``. SQLite otherwise stores that literal as TEXT for rows
+            # which predate this column; SQLAlchemy then interprets the non-empty
+            # string as truthy and incorrectly forces a password change.
+            server_default=sa.false(),
         ),
     )
     # Durable brute-force throttle: consecutive failures + optional temporary lock.

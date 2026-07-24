@@ -1,7 +1,7 @@
 import re
 import threading
 from collections import deque
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Literal
@@ -30,6 +30,7 @@ from app.services.applications import (
 )
 from app.services.resume_parser import PARSER_VERSION, parse_resume
 from app.services.storage import prepare_resume_upload
+from app.services.talent_retention import candidate_retention_until
 
 router = APIRouter(prefix="/public")
 SourcePlatform = Literal["direct", "p104", "p1111", "generic"]
@@ -165,7 +166,7 @@ def _save_talent_profile(
             status="new",
             consent_status="consented",
             consent_at=now,
-            retention_until=date(now.year + 2, now.month, 1),
+            retention_until=candidate_retention_until(db, now),
         )
         db.add(candidate)
         db.flush()

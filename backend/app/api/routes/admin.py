@@ -121,6 +121,7 @@ _TABLE_REDACTED_COLUMNS: dict[str, frozenset[str]] = {
             "blacklist_reason",
         }
     ),
+    "retention_storage_deletions": frozenset({"locator", "last_error"}),
 }
 
 # Only these recruiting fields may be revealed by an explicitly authorized IT
@@ -174,6 +175,10 @@ _TABLE_PRESENTATION: dict[str, tuple[str, str]] = {
     "job_requisitions": ("職缺資料", "招募職缺、需求條件與媒合權重"),
     "match_results": ("人才媒合結果", "人才與職缺的媒合分數及評分明細"),
     "refresh_tokens": ("登入更新權杖", "登入工作階段的安全更新權杖"),
+    "retention_storage_deletions": (
+        "到期檔案清理佇列",
+        "到期履歷與照片刪除失敗時保留的重試工作",
+    ),
     "resume_files": ("履歷檔案與解析紀錄", "每份履歷的檔案索引、來源、解析內容及人才關聯"),
     "skill_catalog": ("技能目錄", "系統可用的標準技能清單"),
     "system_issues": ("系統維護問題", "IT 問題追蹤、預計時程與處理進度"),
@@ -291,6 +296,7 @@ _TABLE_PROTECTION_REASONS: dict[str, str] = {
     "audit_logs": "稽核紀錄必須保持不可竄改。",
     "candidates": "包含人才個資，請由人才庫頁面新增、編輯或刪除。",
     "refresh_tokens": "登入權杖由認證系統管理。",
+    "retention_storage_deletions": "由人才保存期限清理工作自動管理，禁止人工修改。",
     "resume_files": "履歷必須經由上傳與履歷辨識流程建立，避免檔案與資料列不同步。",
     "system_issues": "請由本頁的問題紀錄功能維護，以保留日期與進度驗證。",
     "system_settings": "系統設定可能包含秘密值，請由系統設定功能維護。",

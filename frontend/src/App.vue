@@ -6,6 +6,8 @@ import DepartmentWorkspace from './components/DepartmentWorkspace.vue'
 import InterviewManagement from './components/InterviewManagement.vue'
 import MatchingView from './components/MatchingView.vue'
 import ReportsView from './components/ReportsView.vue'
+import ResumeAnonymizationView from './components/ResumeAnonymizationView.vue'
+import TalentRetentionPanel from './components/TalentRetentionPanel.vue'
 import { adminApi, type Department } from './services/adminApi'
 import { authSession } from './services/auth'
 import {
@@ -23,9 +25,10 @@ import {
   type ResumeSource,
   type ResumeUploadResult,
 } from './services/hrApi'
+import { privacyApi } from './services/privacyApi'
 import { formatApiDateTime } from './utils/dateTime'
 
-type Page = 'dashboard' | 'department' | 'candidates' | 'resumes' | 'jobs' | 'interviews' | 'matching' | 'reports' | 'admin'
+type Page = 'dashboard' | 'department' | 'candidates' | 'resumes' | 'anonymization' | 'jobs' | 'interviews' | 'matching' | 'reports' | 'admin'
 type Dialog = 'candidate' | 'activity' | 'job' | null
 type IntakeStageId = 1 | 2 | 3 | 4
 type IntakeStage = {
@@ -60,6 +63,9 @@ const error = ref('')
 const notice = ref('')
 const lastSync = ref('尚未同步')
 const candidates = ref<CandidateDto[]>([])
+const retentionPolicyYears = ref(2)
+const retentionSavingCandidateId = ref<number | null>(null)
+const retentionYearOptions = Array.from({ length: 20 }, (_, index) => index + 1)
 const applications = ref<ApplicationDto[]>([])
 const applicationsLoaded = ref(false)
 const departments = ref<Department[]>([])
@@ -143,6 +149,7 @@ const allNav: { id: Page; label: string; icon: string; roles: string[] }[] = [
   { id: 'department', label: '部門後台', icon: '▦', roles: ['manager'] },
   { id: 'candidates', label: '人才庫', icon: '人', roles: ['admin', 'hr', 'manager'] },
   { id: 'resumes', label: '履歷辨識中心', icon: '▤', roles: ['admin', 'hr', 'manager'] },
+  { id: 'anonymization', label: '履歷去識別化', icon: '隱', roles: ['admin', 'hr'] },
   { id: 'jobs', label: '職缺管理', icon: '◇', roles: ['admin', 'hr', 'manager'] },
   { id: 'interviews', label: '面試安排', icon: '▣', roles: ['admin', 'hr', 'manager'] },
   { id: 'matching', label: '媒合程度', icon: '◎', roles: ['admin', 'hr', 'manager'] },
@@ -893,6 +900,39 @@ function date(value: string) {
   return formatApiDateTime(value)
 }
 
+async function updateCandidateRetention(candidate: CandidateDto, event: Event) {
+  const select = event.target as HTMLSelectElement
+  const previous = candidate.retention_years_override
+  const retentionYears = select.value === '' ? null : Number(select.value)
+  if (retentionYears !== null && (!Number.isInteger(retentionYears) || retentionYears < 1 || retentionYears > 20)) {
+    select.value = previous === null ? '' : String(previous)
+    showError('個別保存年限必須是 1 到 20 年')
+    return
+  }
+  if (retentionYears === previous) return
+  retentionSavingCandidateId.value = candidate.id
+  error.value = ''
+  try {
+    const setting = (await privacyApi.updateCandidateRetention(candidate.id, retentionYears)).data
+    candidate.retention_years_override = setting.retention_years_override
+    candidate.retention_until = setting.retention_until
+    setNotice(
+      setting.uses_company_default
+        ? `${candidate.name} 已恢復公司預設 ${setting.effective_retention_years} 年，保存至 ${dateOnly(setting.retention_until)}`
+        : `${candidate.name} 已個別設定 ${setting.effective_retention_years} 年，保存至 ${dateOnly(setting.retention_until)}`,
+    )
+  } catch (cause) {
+    select.value = previous === null ? '' : String(previous)
+    showError(cause)
+  } finally {
+    retentionSavingCandidateId.value = null
+  }
+}
+
+function dateOnly(value: string) {
+  return formatApiDateTime(value, { dateStyle: 'medium' })
+}
+
 let authenticationSync: Promise<void> | null = null
 
 async function authenticated() {
@@ -1041,13 +1081,18 @@ onMounted(async () => {
             <article><span>優先／面試中</span><strong>{{ priorityCandidateCount }}</strong><small>建議優先跟進</small></article>
             <article><span>平均年資</span><strong>{{ averageCandidateYears }}</strong><small>年</small></article>
           </div>
-          <div class="filter-bar panel"><label class="search-field"><span>⌕</span><input v-model="search" placeholder="搜尋姓名、Email、電話、職稱或來源"></label><select v-model="candidateStatus"><option value="all">全部狀態</option><option v-for="(label, key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select><span>{{ filteredCandidates.length }} 筆結果</span></div>
+          <TalentRetentionPanel v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" @policy-loaded="retentionPolicyYears = $event" @policy-updated="refreshAll(true)" @purged="refreshAll(true)" />
+          <div id="candidate-retention-list" class="filter-bar panel"><label class="search-field"><span>⌕</span><input v-model="search" placeholder="搜尋姓名、Email、電話、職稱或來源"></label><select v-model="candidateStatus"><option value="all">全部狀態</option><option v-for="(label, key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select><span>{{ filteredCandidates.length }} 筆結果</span></div>
           <div v-if="filteredCandidates.length" class="talent-card-grid">
             <article v-for="candidate in filteredCandidates" :key="candidate.id" class="panel talent-card">
               <header><button class="talent-identity" @click="viewCandidate(candidate)"><img v-if="candidatePhotoPreviews[candidate.id]" class="person-avatar large candidate-photo" :src="candidatePhotoPreviews[candidate.id]" :alt="`${candidate.name}的大頭照`"><span v-else class="person-avatar large">{{ candidate.name.slice(0,1) }}</span><span><strong>{{ candidate.name }}</strong><small>{{ candidate.code }}</small></span></button><span class="status" :data-status="candidate.status">{{ candidateStatusLabels[candidate.status] || candidate.status }}</span></header>
               <div class="talent-role"><strong>{{ candidate.current_title || '尚未填寫目前職稱' }}</strong><span>{{ candidate.city || '地區待補' }} · {{ candidate.total_years ?? 0 }} 年經驗</span></div>
               <div class="talent-contact"><p><small>EMAIL</small><strong>{{ candidate.email || '未提供' }}</strong></p><p><small>PHONE</small><strong>{{ candidate.phone || '未提供' }}</strong></p></div>
-              <div class="talent-source"><span>{{ sourceLabels[candidate.source || ''] || candidate.source || '未知來源' }}</span><small>DB #{{ candidate.id }} · 更新於 {{ date(candidate.updated_at) }}</small></div>
+              <div class="talent-source"><span>{{ sourceLabels[candidate.source || ''] || candidate.source || '未知來源' }}</span><small>DB #{{ candidate.id }} · 更新於 {{ date(candidate.updated_at) }}<template v-if="candidate.retention_until"> · 保存至 {{ dateOnly(candidate.retention_until) }}</template></small></div>
+              <div v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" class="candidate-retention-control" :class="{ custom: candidate.retention_years_override !== null }">
+                <div><span>{{ candidate.retention_years_override === null ? `公司預設 ${retentionPolicyYears} 年` : `個別設定 ${candidate.retention_years_override} 年` }}</span><small>{{ candidate.retention_until ? `到期日 ${dateOnly(candidate.retention_until)}` : '尚未計算到期日' }}</small></div>
+                <label>保存年限<select :value="candidate.retention_years_override ?? ''" :disabled="retentionSavingCandidateId === candidate.id" :aria-label="`${candidate.name}的保存年限`" @change="updateCandidateRetention(candidate, $event)"><option value="">沿用公司預設（{{ retentionPolicyYears }} 年）</option><option v-for="years in retentionYearOptions" :key="years" :value="years">個別設定 {{ years }} 年</option></select></label>
+              </div>
               <footer><button class="button secondary" @click="viewCandidate(candidate)">查看詳情</button><template v-if="authState.user.role !== 'manager'"><button class="text-button" @click="openCandidate(candidate)">編輯</button><button class="text-button danger-text" :disabled="saving" @click="removeCandidate(candidate)">刪除</button></template><span v-else>唯讀</span></footer>
             </article>
           </div>
@@ -1141,13 +1186,15 @@ onMounted(async () => {
           </div>
         </section>
 
+        <ResumeAnonymizationView v-else-if="page === 'anonymization'" />
+
         <section v-else-if="page === 'jobs'" class="page">
           <div class="page-heading"><div><p class="eyebrow">{{ roleProfile.scope }}</p><h1>{{ authState.user.role === 'manager' ? '我的職缺' : '職缺管理' }}</h1><p>{{ authState.user.role === 'manager' ? '追蹤所屬部門職缺、推薦人才與招募進度。' : '建立、編輯及核准全公司職缺；核准後公開前台才能讀取。' }}</p></div><button v-if="authState.user.role !== 'manager'" class="button primary" @click="openJob()">＋ 建立職缺</button></div>
           <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="panel job-card"><header><span class="status" :data-status="job.status">{{ jobStatusLabels[job.status] || job.status }}</span><button v-if="authState.user.role !== 'manager'" class="text-button" @click="openJob(job)">編輯</button><button v-else class="text-button" @click="navigate('matching')">查看人才 →</button></header><h2>{{ job.title }}</h2><p>{{ job.req_no }} · {{ job.department_name || (job.department_id ? `部門 #${job.department_id}` : '未設定部門') }} · {{ job.work_city }} · 需求 {{ job.headcount }} 人</p><div class="job-summary">{{ job.summary || job.jd }}</div><div class="skill-list"><span v-for="skill in job.skills || []" :key="skill">{{ skill }}</span></div><footer><small>{{ job.requested_by ? '部門送交 · ' : '' }}{{ job.published_at ? `發布：${date(job.published_at)}` : '尚未發布' }}</small><button v-if="authState.user.role !== 'manager' && ['draft','submitted'].includes(job.status)" class="button primary" :disabled="saving" @click="approveJob(job)">核准職缺</button></footer></article><div v-if="loading && !jobs.length" class="empty panel"><span class="spinner"></span><p>正在載入職缺…</p></div><div v-else-if="!jobs.length" class="empty panel"><strong>目前沒有職缺</strong><p>目前權限範圍內沒有可檢視的職缺。</p></div></div>
         </section>
 
         <InterviewManagement v-else-if="page === 'interviews'" />
-        <MatchingView v-else-if="page === 'matching'" :jobs="jobs" :can-configure="authState.user.role === 'hr' || authState.user.role === 'admin'" />
+        <MatchingView v-else-if="page === 'matching'" :jobs="jobs" :can-configure="authState.user.role === 'hr' || authState.user.role === 'admin'" :can-configure-weights="['hr', 'admin', 'manager'].includes(authState.user.role)" />
         <ReportsView v-else-if="page === 'reports'" :jobs="jobs" />
         <AdminView v-else-if="page === 'admin'" :current-user="authState.user" />
         <section v-else class="page unavailable-page"><div class="unavailable-icon">⌛</div><p class="eyebrow">NOT CONNECTED</p><h1>{{ pageTitle }}尚未接上後端</h1><p>這個模組目前沒有可持久化的 API，因此先停用所有操作，避免產生「看似成功但未寫入資料庫」的誤解。</p><button class="button secondary" @click="navigate('dashboard')">返回工作總覽</button></section>

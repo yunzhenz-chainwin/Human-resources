@@ -14,6 +14,8 @@ export type CandidateDto = {
   status: CandidateStatus | string
   has_photo: boolean
   photo_updated_at: string | null
+  retention_years_override: number | null
+  retention_until?: string | null
   created_at: string
   updated_at: string
 }
@@ -195,6 +197,77 @@ export type InterviewWrite = {
   interview_notes: string | null
 }
 
+export type InterviewRecordMode = 'onsite' | 'video' | 'phone' | 'other'
+export type InterviewRecordStatus = 'planned' | 'in_progress' | 'completed' | 'cancelled' | 'no_show'
+export type InterviewRecommendation = 'advance' | 'hold' | 'reject' | 'offer'
+export type InterviewRecordQuestion = {
+  question: string
+  trait?: string | null
+  response?: string | null
+  rating?: number | null
+  notes?: string | null
+  purpose?: string | null
+  follow_up?: string | null
+  source?: string | null
+}
+export type InterviewRecordWrite = {
+  stage: InterviewStage
+  interviewed_at: string
+  duration_minutes?: number | null
+  mode: InterviewRecordMode
+  status: InterviewRecordStatus
+  questions: InterviewRecordQuestion[]
+  summary?: string | null
+  private_notes?: string | null
+  recommendation?: InterviewRecommendation | null
+  overall_rating?: number | null
+}
+export type InterviewRecordDto = InterviewRecordWrite & {
+  id: number
+  application_id: number
+  interviewer_id: number | null
+  interviewer_name: string
+  updated_by_id: number | null
+  updated_by_name: string
+  created_at: string
+  updated_at: string
+  evaluation_revealed: boolean
+  private_notes_visible: boolean
+}
+export type InterviewQuestion = {
+  question: string
+  purpose: string
+  follow_up: string
+  source?: string | null
+}
+export type InterviewQuestionSuggestion = {
+  trait: string
+  questions: InterviewQuestion[]
+}
+export type InterviewQuestionSuggestions = {
+  requisition_id: number
+  job_title: string
+  suggestions: InterviewQuestionSuggestion[]
+  guidance: string
+  application_id?: number | null
+  personalization_basis: string[]
+}
+export type InterviewQuestionPlanItem = {
+  category: string
+  question: string
+  purpose: string
+  follow_up: string
+  source: string
+}
+export type InterviewQuestionPlan = {
+  application_id: number
+  stage: InterviewStage
+  job_title: string
+  questions: InterviewQuestionPlanItem[]
+  personalization_basis: string[]
+  guidance: string
+}
+
 export type ResumeSource = 'p104' | 'p1111' | 'generic' | 'direct'
 export type ParsedResume = {
   name?: string
@@ -354,6 +427,26 @@ export const hrApi = {
   updateApplicationInterviewStage: (id: number, stage: InterviewStage, payload: InterviewWrite) => apiRequest<ApplicationDto>(`/applications/${id}/interviews/${stage}`, {
     method: 'PATCH', body: JSON.stringify(payload),
   }),
+  interviewQuestionSuggestions: (requisitionId: number, personalityTraits: string[]) =>
+    apiRequest<InterviewQuestionSuggestions>(`/requisitions/${requisitionId}/interview-question-suggestions`, {
+      method: 'POST', body: JSON.stringify({ personality_traits: personalityTraits }),
+    }),
+  applicationInterviewQuestionSuggestions: (applicationId: number, personalityTraits: string[]) =>
+    apiRequest<InterviewQuestionSuggestions>(`/applications/${applicationId}/interview-question-suggestions`, {
+      method: 'POST', body: JSON.stringify({ personality_traits: personalityTraits }),
+    }),
+  interviewQuestionPlan: (applicationId: number, stage: InterviewStage) =>
+    apiRequest<InterviewQuestionPlan>(`/applications/${applicationId}/interview-question-plan?stage=${stage}`),
+  interviewRecords: (applicationId: number) =>
+    apiRequest<InterviewRecordDto[]>(`/applications/${applicationId}/interview-records`),
+  createInterviewRecord: (applicationId: number, payload: InterviewRecordWrite) =>
+    apiRequest<InterviewRecordDto>(`/applications/${applicationId}/interview-records`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  updateInterviewRecord: (applicationId: number, recordId: number, payload: Partial<Omit<InterviewRecordWrite, 'stage'>>) =>
+    apiRequest<InterviewRecordDto>(`/applications/${applicationId}/interview-records/${recordId}`, {
+      method: 'PATCH', body: JSON.stringify(payload),
+    }),
 
   resumes: async (status?: string, includeConfirmed = false): Promise<ApiResult<ResumeDto[]>> => {
     const pageSize = 100

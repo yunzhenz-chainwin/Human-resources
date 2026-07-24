@@ -140,6 +140,10 @@ def test_score_is_deterministic_and_gates_hard_requirements(matching_client) -> 
         assert missing.gate_passed is False
         assert 0 <= missing.total_score <= 100
         assert "required_skills" in missing.breakdown["gate"]["miss"]
+        assert missing.breakdown["highlights"][0]["text"].startswith(
+            "未通過必要條件：必要技能"
+        )
+        assert "required_skills" not in missing.breakdown["highlights"][0]["text"]
 
         wrong_city = score_candidate(requisition, candidates[3], ["Python"])
         assert wrong_city.gate_passed is False
@@ -410,6 +414,118 @@ def test_hr_can_update_matching_criteria_and_recalculate(matching_client) -> Non
     assert response.json()["preferred_skills"] == ["SQL", "Git"]
     overview = client.get("/api/v1/requisitions/1/candidate-match-overview").json()
     assert overview["computed_count"] == 4
+
+
+def test_relative_weights_are_normalized_validated_and_used(matching_client) -> None:
+    client, testing_session = matching_client
+    criteria = client.get("/api/v1/requisitions/1/matching-criteria")
+    assert criteria.status_code == 200
+    assert sum(criteria.json()["weights"].values()) == pytest.approx(1.0)
+
+    response = client.put(
+        "/api/v1/requisitions/1/matching-weights",
+        json={
+            "skill": 80,
+            "relevance": 10,
+            "years": 5,
+            "salary": 2,
+            "education": 2,
+            "location": 1,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "skill": 0.8,
+        "relevance": 0.1,
+        "years": 0.05,
+        "salary": 0.02,
+        "education": 0.02,
+        "location": 0.01,
+    }
+    assert client.put(
+        "/api/v1/requisitions/1/matching-weights",
+        json={key: 0 for key in response.json()},
+    ).status_code == 422
+    missing = dict(response.json())
+    missing.pop("location")
+    assert client.put(
+        "/api/v1/requisitions/1/matching-weights", json=missing
+    ).status_code == 422
+
+    with testing_session() as db:
+        result = db.scalar(
+            select(MatchResult).where(
+                MatchResult.requisition_id == 1,
+                MatchResult.candidate_id == 1,
+            )
+        )
+        assert result is not None
+        assert result.score_breakdown["skill"]["weight"] == 0.8
+        assert result.highlights
+
+
+def test_department_manager_can_adjust_only_own_job_weights(matching_client) -> None:
+    client, testing_session = matching_client
+    with testing_session() as db:
+        own_department = Department(name="Weight Owner")
+        other_department = Department(name="Weight Other")
+        db.add_all([own_department, other_department])
+        db.flush()
+        db.get(JobRequisition, 1).department_id = own_department.id
+        db.commit()
+        own_id, other_id = own_department.id, other_department.id
+
+    payload = {
+        "skill": 60,
+        "relevance": 20,
+        "years": 10,
+        "salary": 5,
+        "education": 3,
+        "location": 2,
+    }
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=10, role="manager", department_id=own_id, is_active=True
+    )
+    assert client.put(
+        "/api/v1/requisitions/1/matching-weights", json=payload
+    ).status_code == 200
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=11, role="manager", department_id=other_id, is_active=True
+    )
+    assert client.put(
+        "/api/v1/requisitions/1/matching-weights", json=payload
+    ).status_code == 403
+
+
+def test_personality_trait_questions_are_job_specific_and_scoped(matching_client) -> None:
+    client, testing_session = matching_client
+    response = client.post(
+        "/api/v1/requisitions/1/interview-question-suggestions",
+        json={"personality_traits": ["細心", "抗壓性", "細心"]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_title"] == "Backend Engineer"
+    assert [item["trait"] for item in body["suggestions"]] == ["細心", "抗壓性"]
+    assert all(len(item["questions"]) == 3 for item in body["suggestions"])
+    assert "Backend Engineer" in body["suggestions"][0]["questions"][0]["question"]
+    assert body["guidance"]
+    assert client.post(
+        "/api/v1/requisitions/1/interview-question-suggestions",
+        json={"personality_traits": ["   "]},
+    ).status_code == 422
+
+    with testing_session() as db:
+        db.get(JobRequisition, 1).department_id = 20
+        db.commit()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=12, role="manager", department_id=21, is_active=True
+    )
+    assert client.post(
+        "/api/v1/requisitions/1/interview-question-suggestions",
+        json={"personality_traits": ["創意"]},
+    ).status_code == 403
 
 
 def test_match_unique_pair_and_score_constraints(matching_client) -> None:

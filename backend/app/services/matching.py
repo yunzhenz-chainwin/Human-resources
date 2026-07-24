@@ -277,6 +277,141 @@ def _location_score(candidate: Candidate, work_city: str) -> float:
     return 0.6 if cities & adjacent else 0.2
 
 
+def _match_highlights(
+    *,
+    required_hits: list[str],
+    preferred_hits: list[str],
+    required_misses: list[str],
+    preferred_misses: list[str],
+    gate_misses: list[str],
+    years: float | None,
+    min_years: float | None,
+    title_score: float,
+    location_score: float,
+    work_city: str,
+    missing_fields: list[str],
+) -> list[dict[str, str]]:
+    """Build concise, ordered evidence bullets for humans reviewing a score."""
+
+    gate_labels = {
+        "candidate_deleted": "人才資料已刪除",
+        "blacklisted": "人才列入黑名單",
+        "consent_withdrawn": "人才已撤回資料使用同意",
+        "required_skills": "必要技能",
+        "minimum_years": "最低年資",
+        "education": "學歷要求",
+        "location": "工作地點",
+    }
+
+    def gate_label(code: str) -> str:
+        if code.startswith("status:"):
+            return f"人才狀態（{code.removeprefix('status:')}）"
+        return gate_labels.get(code, code)
+
+    highlights: list[dict[str, str]] = []
+    skill_hits = required_hits + preferred_hits
+    skill_misses = required_misses + preferred_misses
+    if skill_hits:
+        highlights.append(
+            {
+                "kind": "strength",
+                "category": "skill",
+                "text": f"符合技能：{'、'.join(skill_hits)}",
+            }
+        )
+    if skill_misses:
+        highlights.append(
+            {
+                "kind": "concern",
+                "category": "skill",
+                "text": f"尚缺技能：{'、'.join(skill_misses)}",
+            }
+        )
+    if min_years is not None:
+        if years is None:
+            highlights.append(
+                {
+                    "kind": "concern",
+                    "category": "years",
+                    "text": f"未提供年資；職缺最低要求 {min_years:g} 年",
+                }
+            )
+        elif years >= min_years:
+            highlights.append(
+                {
+                    "kind": "strength",
+                    "category": "years",
+                    "text": f"年資 {years:g} 年，達到最低要求 {min_years:g} 年",
+                }
+            )
+        else:
+            highlights.append(
+                {
+                    "kind": "concern",
+                    "category": "years",
+                    "text": f"年資 {years:g} 年，低於最低要求 {min_years:g} 年",
+                }
+            )
+    if title_score >= 0.7:
+        highlights.append(
+            {
+                "kind": "strength",
+                "category": "relevance",
+                "text": "目前職稱與應徵職稱高度相關",
+            }
+        )
+    elif title_score < 0.4:
+        highlights.append(
+            {
+                "kind": "concern",
+                "category": "relevance",
+                "text": "目前職稱與應徵職稱相關度偏低，建議人工確認可轉移經驗",
+            }
+        )
+    if location_score == 1:
+        highlights.append(
+            {
+                "kind": "strength",
+                "category": "location",
+                "text": f"期望工作地點符合：{work_city}",
+            }
+        )
+    elif location_score == 0.6:
+        highlights.append(
+            {
+                "kind": "info",
+                "category": "location",
+                "text": f"期望地點鄰近工作地點 {work_city}，建議確認通勤意願",
+            }
+        )
+    elif location_score < 0.5:
+        highlights.append(
+            {
+                "kind": "concern",
+                "category": "location",
+                "text": f"期望地點與工作地點 {work_city} 不符",
+            }
+        )
+    if gate_misses:
+        highlights.insert(
+            0,
+            {
+                "kind": "concern",
+                "category": "gate",
+                "text": f"未通過必要條件：{'、'.join(map(gate_label, gate_misses))}",
+            },
+        )
+    if missing_fields:
+        highlights.append(
+            {
+                "kind": "info",
+                "category": "data_quality",
+                "text": f"資料待補：{'、'.join(missing_fields)}",
+            }
+        )
+    return highlights[:8]
+
+
 def score_candidate(
     requisition: JobRequisition,
     candidate: Candidate,
@@ -391,24 +526,23 @@ def score_candidate(
         ),
         "location": (location_score, [requisition.work_city] if location_score == 1 else [], []),
     }
+    missing_fields = [
+        field
+        for field, value in (
+            ("current_title", candidate.current_title),
+            ("total_years", candidate.total_years),
+            ("highest_education", candidate.highest_education),
+            (
+                "expected_salary",
+                candidate.expected_salary_min or candidate.expected_salary_max,
+            ),
+            ("location", candidate.expected_cities or candidate.city),
+        )
+        if value is None
+    ]
     breakdown: dict[str, Any] = {
         "gate": {"passed": not gate_misses, "miss": gate_misses},
-        "data_quality": {
-            "missing": [
-                field
-                for field, value in (
-                    ("current_title", candidate.current_title),
-                    ("total_years", candidate.total_years),
-                    ("highest_education", candidate.highest_education),
-                    (
-                        "expected_salary",
-                        candidate.expected_salary_min or candidate.expected_salary_max,
-                    ),
-                    ("location", candidate.expected_cities or candidate.city),
-                )
-                if value is None
-            ]
-        },
+        "data_quality": {"missing": missing_fields},
     }
     weighted_total = 0.0
     for key, (component_score, hits, misses) in components.items():
@@ -440,6 +574,19 @@ def score_candidate(
     # Surface "so close" candidates: gated by a single hard requirement yet still a
     # strong fit, so HR can review stretch picks instead of never seeing them.
     breakdown["near_miss"] = (not passed) and len(gate_misses) == 1 and total >= 60
+    breakdown["highlights"] = _match_highlights(
+        required_hits=required_hits,
+        preferred_hits=preferred_hits,
+        required_misses=required_misses,
+        preferred_misses=preferred_misses,
+        gate_misses=gate_misses,
+        years=years,
+        min_years=min_years,
+        title_score=title_score,
+        location_score=location_score,
+        work_city=requisition.work_city,
+        missing_fields=missing_fields,
+    )
     return ScoreResult(passed, total, breakdown)
 
 

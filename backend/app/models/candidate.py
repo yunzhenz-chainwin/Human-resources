@@ -33,6 +33,10 @@ class Candidate(TimestampMixin, Base):
             "expected_salary_max IS NULL OR expected_salary_max >= expected_salary_min",
             name="salary_range",
         ),
+        CheckConstraint(
+            "retention_years_override IS NULL OR retention_years_override BETWEEN 1 AND 20",
+            name="retention_years_override_range",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True)
@@ -69,6 +73,7 @@ class Candidate(TimestampMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text)
     consent_status: Mapped[str | None] = mapped_column(String(20))
     consent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    retention_years_override: Mapped[int | None] = mapped_column(SmallInteger)
     retention_until: Mapped[date | None] = mapped_column(Date, index=True)
     is_blacklisted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     blacklist_reason: Mapped[str | None] = mapped_column(String(200))
