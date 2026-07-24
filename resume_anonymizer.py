@@ -12,14 +12,26 @@ from __future__ import annotations
 
 import argparse
 import cgi
+import html
 import io
 import json
 import re
 import sys
+from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
-from dataclasses import dataclass, asdict
 from pathlib import Path
+from urllib.parse import parse_qs
+
+
+PDF_MAX_BYTES = 10 * 1024 * 1024
+PDF_MAX_PAGES = 20
+PDF_MAX_TEXT_CHARACTERS = 250_000
+PDF_MIN_TEXT_CHARACTERS = 20
+WEB_MAX_REQUEST_BYTES = PDF_MAX_BYTES + 1024 * 1024
+
+
+class ScannedPDFError(ValueError):
+    """A PDF has too little trustworthy text to anonymize safely."""
 
 
 @dataclass
@@ -57,16 +69,55 @@ def anonymize(text: str) -> tuple[str, Summary]:
 
 
 def extract_pdf(data: bytes) -> str:
-    """Extract selectable text from a PDF without connecting to any service."""
+    """Extract a bounded selectable-text PDF, failing closed for scans.
+
+    OCR output can omit or distort precisely the identifiers this tool must
+    remove. Automatically anonymizing that output would create false confidence,
+    so image-only PDFs require an approved local OCR step and human verification.
+    """
+
+    if len(data) > PDF_MAX_BYTES:
+        raise ValueError(f"PDF 超過 {PDF_MAX_BYTES // (1024 * 1024)} MB 上限。")
     try:
         from pypdf import PdfReader
     except ImportError as exc:
         raise RuntimeError("PDF 讀取需要 pypdf，請先執行：python -m pip install pypdf") from exc
-    reader = PdfReader(io.BytesIO(data))
-    text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
-    if not text:
-        raise ValueError("這份 PDF 沒有可擷取的文字，可能是掃描影像；請先做 OCR 或貼上文字。")
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted and reader.decrypt("") == 0:
+            raise ValueError("PDF 已加密，請先在受控環境解除密碼保護後再處理。")
+        page_count = len(reader.pages)
+        if page_count > PDF_MAX_PAGES:
+            raise ValueError(f"PDF 共 {page_count} 頁，超過 {PDF_MAX_PAGES} 頁上限。")
+        text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("PDF 無法讀取或檔案已損壞。") from exc
+
+    selectable_characters = len(re.sub(r"\s+", "", text))
+    if selectable_characters < PDF_MIN_TEXT_CHARACTERS:
+        raise ScannedPDFError(
+            "偵測到掃描型 PDF 或文字層不足。為避免 OCR 誤辨造成個資漏遮罩，"
+            "本工具不會直接產出去識別結果。請先用公司核准的本機 OCR 轉成"
+            "「可搜尋 PDF」，或貼上已人工核對的文字後再處理；完成後仍須人工確認"
+            "姓名、地址、電話、Email 與身分證字號都已遮罩。請勿將含個資的履歷"
+            "上傳到未核准的第三方 OCR 服務。"
+        )
+    if len(text) > PDF_MAX_TEXT_CHARACTERS:
+        raise ValueError(f"PDF 文字超過 {PDF_MAX_TEXT_CHARACTERS} 字元上限。")
     return text
+
+
+def read_resume_input(path: Path) -> str:
+    """Read text or PDF input through the same safe standalone boundary."""
+
+    if path.suffix.casefold() == ".pdf":
+        if path.stat().st_size > PDF_MAX_BYTES:
+            raise ValueError(f"PDF 超過 {PDF_MAX_BYTES // (1024 * 1024)} MB 上限。")
+        return extract_pdf(path.read_bytes())
+    return path.read_text(encoding="utf-8-sig")
 
 
 def main() -> int:
@@ -81,7 +132,7 @@ def main() -> int:
     if args.web:
         return serve_web(args.port)
 
-    text = sys.stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8-sig")
+    text = sys.stdin.read() if args.input == "-" else read_resume_input(Path(args.input))
     anonymized, summary = anonymize(text)
     if args.output:
         Path(args.output).write_text(anonymized, encoding="utf-8")
@@ -96,20 +147,36 @@ class WebHandler(BaseHTTPRequestHandler):
     def _page(self, source: str = "", result: str = "", summary: Summary | None = None, error: str = "") -> bytes:
         summary_html = ""
         if summary:
-            summary_html = f"<div class='summary'>共替換 {sum(summary.replacements.values())} 個欄位：{summary.replacements}</div>"
-        error_html = f"<p class='error'>{error}</p>" if error else ""
-        html = f"""<!doctype html><html lang='zh-Hant'><meta charset='utf-8'><title>履歷去識別化</title>
+            replacement_summary = html.escape(str(summary.replacements))
+            summary_html = (
+                f"<div class='summary'>共替換 {sum(summary.replacements.values())} 個欄位："
+                f"{replacement_summary}</div>"
+            )
+        error_html = f"<p class='error'>{html.escape(error)}</p>" if error else ""
+        source_html = html.escape(source)
+        result_html = html.escape(result)
+        document = f"""<!doctype html><html lang='zh-Hant'><meta charset='utf-8'><title>履歷去識別化</title>
 <style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:35px auto;padding:0 20px;color:#234}}h1{{color:#17685e}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}textarea{{width:100%;height:360px;padding:12px;box-sizing:border-box;border:1px solid #bdd4ce;border-radius:8px}}button{{margin-top:12px;padding:11px 20px;background:#087f70;color:white;border:0;border-radius:7px;cursor:pointer}}.summary{{margin:14px 0;padding:12px;background:#eaf7f2;border-radius:7px}}.error{{color:#a33}}small{{color:#607a73}}@media(max-width:800px){{.grid{{grid-template-columns:1fr}}}}</style>
-<h1>履歷去識別化</h1><small>獨立 Python 工具，不連接 TalentHub 後台</small>{error_html}<form method='post' enctype='multipart/form-data'><div class='grid'><label>原始履歷<br><input type='file' name='pdf' accept='.pdf,application/pdf'><small>可選取 PDF；也可直接貼上文字</small><textarea name='text' placeholder='請貼上履歷文字'>{source}</textarea></label><label>去識別化結果<br><textarea readonly>{result}</textarea></label></div><button type='submit'>開始去識別化</button></form>{summary_html}</html>"""
-        return html.encode("utf-8")
+<h1>履歷去識別化</h1><small>獨立 Python 工具，不連接 TalentHub 後台</small>{error_html}<form method='post' enctype='multipart/form-data'><div class='grid'><label>原始履歷<br><input type='file' name='pdf' accept='.pdf,application/pdf'><small>支援含文字層的 PDF；掃描影像請先使用公司核准的本機 OCR</small><textarea name='text' placeholder='請貼上履歷文字'>{source_html}</textarea></label><label>去識別化結果<br><textarea readonly>{result_html}</textarea></label></div><button type='submit'>開始去識別化</button></form>{summary_html}</html>"""
+        return document.encode("utf-8")
+
+    def _send_page(self, status_code: int, body: bytes) -> None:
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self) -> None:
-        body = self._page()
-        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        self._send_page(200, self._page())
 
     def do_POST(self) -> None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length < 0 or length > WEB_MAX_REQUEST_BYTES:
+                raise ValueError(
+                    f"上傳內容超過 {WEB_MAX_REQUEST_BYTES // (1024 * 1024)} MB 上限。"
+                )
             raw = self.rfile.read(length)
             content_type = self.headers.get("Content-Type", "")
             if content_type.startswith("multipart/form-data"):
@@ -122,10 +189,11 @@ class WebHandler(BaseHTTPRequestHandler):
                 source = parse_qs(raw.decode("utf-8"), keep_blank_values=True).get("text", [""])[0]
             result, summary = anonymize(source)
             body = self._page(source, result, summary)
-            self.send_response(200)
+            status_code = 200
         except Exception as exc:
-            body = self._page(error=str(exc)); self.send_response(400)
-        self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            body = self._page(error=str(exc))
+            status_code = 400
+        self._send_page(status_code, body)
 
     def log_message(self, *_args: object) -> None:
         return
