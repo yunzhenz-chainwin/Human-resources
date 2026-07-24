@@ -1,27 +1,5 @@
 import { apiRequest } from './hrApi'
 
-export type AnonymizationField =
-  | 'name'
-  | 'address'
-  | 'phone'
-  | 'email'
-  | 'birth_date'
-  | 'national_id'
-  | 'personal_url'
-
-export type ResumeAnonymizationSummary = {
-  field_counts: Partial<Record<AnonymizationField, number>> & Record<string, number>
-  total_replacements: number
-  input_characters: number
-  output_characters: number
-}
-
-export type ResumeAnonymizationResult = {
-  operation_id: string
-  anonymized_text: string
-  summary: ResumeAnonymizationSummary
-}
-
 export type TalentRetentionPolicy = {
   setting_key: string
   retention_years: number
@@ -54,18 +32,6 @@ export type CandidateRetentionSetting = {
 }
 
 export const privacyApi = {
-  anonymizeResume: (payload: {
-    plain_text: string
-    additional_names?: string[]
-    additional_addresses?: string[]
-  }) => apiRequest<ResumeAnonymizationResult>('/resume-anonymization', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  }),
-  anonymizationSummary: (operationId: string) =>
-    apiRequest<{ operation_id: string; summary: ResumeAnonymizationSummary }>(
-      `/resume-anonymization/${encodeURIComponent(operationId)}/summary`,
-    ),
   retentionPolicy: () => apiRequest<TalentRetentionPolicy>('/talent-retention/policy'),
   updateRetentionPolicy: (retentionYears: number) => apiRequest<TalentRetentionPolicy>('/talent-retention/policy', {
     method: 'PUT',

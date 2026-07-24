@@ -6,7 +6,6 @@ import DepartmentWorkspace from './components/DepartmentWorkspace.vue'
 import InterviewManagement from './components/InterviewManagement.vue'
 import MatchingView from './components/MatchingView.vue'
 import ReportsView from './components/ReportsView.vue'
-import ResumeAnonymizationView from './components/ResumeAnonymizationView.vue'
 import TalentRetentionPanel from './components/TalentRetentionPanel.vue'
 import { adminApi, type Department } from './services/adminApi'
 import { authSession } from './services/auth'
@@ -28,7 +27,7 @@ import {
 import { privacyApi } from './services/privacyApi'
 import { formatApiDateTime } from './utils/dateTime'
 
-type Page = 'dashboard' | 'department' | 'candidates' | 'resumes' | 'anonymization' | 'jobs' | 'interviews' | 'matching' | 'reports' | 'admin'
+type Page = 'dashboard' | 'department' | 'candidates' | 'resumes' | 'jobs' | 'interviews' | 'matching' | 'reports' | 'admin'
 type Dialog = 'candidate' | 'activity' | 'job' | null
 type IntakeStageId = 1 | 2 | 3 | 4
 type IntakeStage = {
@@ -149,7 +148,6 @@ const allNav: { id: Page; label: string; icon: string; roles: string[] }[] = [
   { id: 'department', label: '部門後台', icon: '▦', roles: ['manager'] },
   { id: 'candidates', label: '人才庫', icon: '人', roles: ['admin', 'hr', 'manager'] },
   { id: 'resumes', label: '履歷辨識中心', icon: '▤', roles: ['admin', 'hr', 'manager'] },
-  { id: 'anonymization', label: '履歷去識別化', icon: '隱', roles: ['admin', 'hr'] },
   { id: 'jobs', label: '職缺管理', icon: '◇', roles: ['admin', 'hr', 'manager'] },
   { id: 'interviews', label: '面試安排', icon: '▣', roles: ['admin', 'hr', 'manager'] },
   { id: 'matching', label: '媒合程度', icon: '◎', roles: ['admin', 'hr', 'manager'] },
@@ -1186,7 +1184,6 @@ onMounted(async () => {
           </div>
         </section>
 
-        <ResumeAnonymizationView v-else-if="page === 'anonymization'" />
 
         <section v-else-if="page === 'jobs'" class="page">
           <div class="page-heading"><div><p class="eyebrow">{{ roleProfile.scope }}</p><h1>{{ authState.user.role === 'manager' ? '我的職缺' : '職缺管理' }}</h1><p>{{ authState.user.role === 'manager' ? '追蹤所屬部門職缺、推薦人才與招募進度。' : '建立、編輯及核准全公司職缺；核准後公開前台才能讀取。' }}</p></div><button v-if="authState.user.role !== 'manager'" class="button primary" @click="openJob()">＋ 建立職缺</button></div>

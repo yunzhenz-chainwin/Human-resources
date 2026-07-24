@@ -11,7 +11,6 @@ from app.api.routes.matches import router as matches_router
 from app.api.routes.public import router as public_router
 from app.api.routes.reports import router as reports_router
 from app.api.routes.requisitions import router as requisitions_router
-from app.api.routes.resume_anonymization import router as resume_anonymization_router
 from app.api.routes.resumes import router as resumes_router
 from app.api.routes.talent_retention import router as talent_retention_router
 from app.dependencies.auth import require_recruiting_user
@@ -30,7 +29,6 @@ api_router.include_router(
 api_router.include_router(
     resumes_router, tags=["resumes"], dependencies=[Depends(require_recruiting_user)]
 )
-api_router.include_router(resume_anonymization_router, tags=["resume-anonymization"])
 api_router.include_router(talent_retention_router, tags=["talent-retention"])
 api_router.include_router(
     applications_router,
