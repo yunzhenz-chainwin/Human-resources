@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,6 +22,18 @@ class FakeProvider:
     def recognize(self, pdf_path: Path, page_count: int, limits: OCRLimits) -> str:
         self.calls += 1
         return self.text
+
+
+class PathRecordingProvider(FakeProvider):
+    """Provider used to ensure paths are passed as argv, never shell text."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.path_seen: Path | None = None
+
+    def recognize(self, pdf_path: Path, page_count: int, limits: OCRLimits) -> str:
+        self.path_seen = pdf_path
+        return super().recognize(pdf_path, page_count, limits)
 
 
 def scanned_pdf(path: Path, pages: int = 1) -> Path:
@@ -82,3 +95,42 @@ def test_page_and_file_limits_stop_before_ocr(ocr_path: Path) -> None:
     )
     assert file_result.error_code == "file_too_large"
     assert provider.calls == 0
+
+
+def test_empty_ocr_is_needs_review(ocr_path: Path) -> None:
+    pdf = scanned_pdf(ocr_path / "empty.pdf")
+    provider = FakeProvider("local_tesseract", True, "   \n")
+    result = extract_pdf_with_ocr(pdf, provider=provider)
+    assert result.needs_review
+    assert result.error_code == "empty_ocr_result"
+
+
+def test_provider_output_limit_is_enforced(ocr_path: Path) -> None:
+    pdf = scanned_pdf(ocr_path / "huge.pdf")
+    provider = FakeProvider("local_tesseract", True, "x" * 101)
+    result = extract_pdf_with_ocr(
+        pdf, provider=provider, limits=OCRLimits(max_output_chars=100)
+    )
+    assert result.needs_review
+    assert result.error_code == "output_too_large"
+
+
+def test_provider_receives_path_without_shell_interpolation(ocr_path: Path) -> None:
+    # A filename containing shell metacharacters must stay an ordinary Path.
+    pdf = scanned_pdf(ocr_path / "resume;echo INJECTED.pdf")
+    provider = PathRecordingProvider("local_tesseract", True, "safe text")
+    result = extract_pdf_with_ocr(pdf, provider=provider)
+    assert result.status == "ocr_extracted"
+    assert provider.path_seen == pdf
+
+
+def test_timeout_is_reported_without_leaking_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.ocr import LocalTesseractProvider, OCRProviderError
+
+    def blocked(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("tesseract", 0.01)
+
+    monkeypatch.setattr(subprocess, "run", blocked)
+    with pytest.raises(OCRProviderError) as captured:
+        LocalTesseractProvider._run(["tesseract", "input.png", "stdout"], 1.0)
+    assert captured.value.code == "ocr_timeout"

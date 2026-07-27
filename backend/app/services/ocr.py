@@ -247,7 +247,17 @@ def extract_pdf_with_ocr(
                 "Scanned PDF needs local OCR, but no OCR provider is available",
                 page_count,
             )
+        # Providers are intentionally injectable for tests and future local
+        # engines, so enforce the same output bound at the trust boundary.
+        # This prevents a faulty OCR process/provider from retaining an
+        # unbounded amount of extracted resume content in memory.
         text = selected.recognize(path, page_count, limits).strip()
+        if len(text) > limits.max_output_chars:
+            return _review(
+                "output_too_large",
+                "OCR output exceeds limit",
+                page_count,
+            )
         if not text:
             return _review("empty_ocr_result", "OCR did not recognize any text", page_count)
         return OCRResult(text, "ocr_extracted", selected.name, page_count)
