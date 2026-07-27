@@ -152,3 +152,10 @@ def test_text_input_accepts_utf8_and_rejects_unknown_suffix() -> None:
     unknown = UnknownPath()
     with pytest.raises(ValueError, match="不支援的檔案格式"):
         resume_anonymizer.read_resume_input(unknown)
+def test_ocr_quality_flags_low_confidence() -> None:
+    assert resume_anonymizer._ocr_quality([95.0, 90.0], "name candidate with enough text") >= 0.90
+    assert resume_anonymizer._ocr_quality([30.0, 40.0], "name candidate with enough text") < 0.75
+
+
+def test_ocr_resolution_is_300_dpi() -> None:
+    assert resume_anonymizer.OCR_DPI == 300

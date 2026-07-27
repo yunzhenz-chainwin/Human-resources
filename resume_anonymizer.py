@@ -22,6 +22,7 @@ import tempfile
 import time
 from datetime import datetime
 from dataclasses import asdict, dataclass
+from statistics import mean
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
@@ -30,10 +31,22 @@ PDF_MAX_BYTES = 10 * 1024 * 1024
 PDF_MAX_PAGES = 20
 PDF_MAX_TEXT_CHARACTERS = 250_000
 OCR_TIMEOUT_SECONDS = 90
-OCR_DPI = 200
+OCR_DPI = 300
 WEB_MAX_REQUEST_BYTES = PDF_MAX_BYTES + 1 * 1024 * 1024
 SUPPORTED_SUFFIXES = {".pdf", ".docx", ".txt", ".text"}
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _ocr_quality(confidences: list[float], text: str) -> float:
+    """Return a conservative 0..1 OCR quality estimate from Tesseract TSV."""
+    score = max(0.0, min(1.0, mean(confidences) / 100.0)) if confidences else 0.80
+    compact = re.sub(r"\s+", "", text)
+    if "�" in text:
+        score *= 0.6
+    if len(compact) < 20:
+        score *= 0.7
+    return round(score, 2)
+PDF_MIME = "application/pdf"
 
 
 class ScannedPDFError(ValueError):
@@ -96,11 +109,20 @@ def anonymize(text: str) -> tuple[str, Summary]:
     return result, Summary(len(text), len(result), counts)
 
 
-def _local_ocr_pdf(data: bytes, page_count: int) -> tuple[str, tuple[int, ...]]:
+def _local_ocr_pdf(data: bytes, page_count: int) -> tuple[str, tuple[int, ...], float]:
     """Run local Poppler + Tesseract only, with bounded resources."""
     tesseract, pdftoppm = shutil.which("tesseract"), shutil.which("pdftoppm")
     if not tesseract or not pdftoppm:
         raise RuntimeError("找不到本機 OCR：請安裝 Tesseract OCR 與 Poppler，並將工具加入 PATH。")
+    try:
+        languages = subprocess.run(
+            [tesseract, "--list-langs"], check=True, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=10, shell=False,
+        ).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("Unable to inspect Tesseract languages; install chi_tra.") from exc
+    if "chi_tra" not in {line.strip() for line in languages}:
+        raise RuntimeError("Tesseract chi_tra language pack is missing; install Traditional Chinese data.")
     started = time.monotonic()
     # Use unique filenames in the local workspace. Some managed Windows
     # profiles deny subprocess access to redirected temp directories.
@@ -118,25 +140,53 @@ def _local_ocr_pdf(data: bytes, page_count: int) -> tuple[str, tuple[int, ...]]:
             raise TimeoutError(f"本機 OCR 超過 {OCR_TIMEOUT_SECONDS} 秒，已停止處理。") from exc
         except (OSError, subprocess.CalledProcessError) as exc:
             raise RuntimeError("Poppler 無法將 PDF 轉成影像，請確認 PDF 未損壞。") from exc
-        parts, counts = [], []
+        parts, counts, confidences = [], [], []
         for index in range(1, page_count + 1):
             image = Path(f"{prefix}-{index}.png")
             if not image.exists(): parts.append(""); counts.append(0); continue
+            ocr_image = image
             try:
-                out = subprocess.run([tesseract, str(image), "stdout", "-l", "chi_tra+eng", "--psm", "6"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(5, OCR_TIMEOUT_SECONDS - int(time.monotonic() - started)), shell=False)
+                from PIL import Image, ImageEnhance, ImageOps
+                prepared = image.with_name(f"{image.stem}-prepared.png")
+                with Image.open(image) as source:
+                    gray = ImageOps.autocontrast(ImageOps.grayscale(source))
+                    gray = ImageEnhance.Sharpness(gray).enhance(1.35)
+                    gray.save(prepared, dpi=(OCR_DPI, OCR_DPI))
+                ocr_image = prepared
+            except (ImportError, OSError):
+                pass
+            try:
+                out = subprocess.run([tesseract, str(ocr_image), "stdout", "-l", "chi_tra+eng", "--psm", "6", "tsv"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(5, OCR_TIMEOUT_SECONDS - int(time.monotonic() - started)), shell=False)
             except subprocess.TimeoutExpired as exc:
                 raise TimeoutError(f"本機 OCR 超過 {OCR_TIMEOUT_SECONDS} 秒，已停止處理。") from exc
             except (OSError, subprocess.CalledProcessError) as exc:
                 raise RuntimeError("Tesseract 無法辨識頁面，請確認已安裝 chi_tra 語言包。") from exc
-            value = out.stdout.decode("utf-8", errors="replace").strip(); parts.append(value); counts.append(len(re.sub(r"\s+", "", value)))
+            raw = out.stdout.decode("utf-8", errors="replace")
+            words, page_conf = [], []
+            for row in raw.splitlines()[1:]:
+                fields = row.split("\t")
+                if len(fields) < 12 or not fields[10].strip():
+                    continue
+                try:
+                    confidence = float(fields[10])
+                except ValueError:
+                    continue
+                token_text = fields[11].strip()
+                if token_text:
+                    words.append(token_text)
+                    if confidence >= 0:
+                        page_conf.append(confidence)
+            value = " ".join(words).strip(); parts.append(value); counts.append(len(re.sub(r"\s+", "", value))); confidences.extend(page_conf)
+            if ocr_image != image:
+                ocr_image.unlink(missing_ok=True)
         result = "\n".join(parts).strip()
         # Best-effort cleanup; OCR output is never retained in the result.
-        for candidate in [pdf, *(Path(f"{prefix}-{i}.png") for i in range(1, page_count + 1))]:
+        for candidate in [pdf, *(Path(f"{prefix}-{i}.png") for i in range(1, page_count + 1)), *(Path(f"{prefix}-{i}-prepared.png") for i in range(1, page_count + 1))]:
             try:
                 candidate.unlink(missing_ok=True)
             except OSError:
                 pass
-        return result, tuple(counts)
+        return result, tuple(counts), _ocr_quality(confidences, result)
 
 
 def extract_pdf(data: bytes) -> str:
@@ -162,7 +212,7 @@ def extract_pdf(data: bytes) -> str:
     extracted_characters = len(re.sub(r"\s+", "", text))
     if extracted_characters < 20:
         try:
-            ocr_text, _ocr_pages = _local_ocr_pdf(data, len(reader.pages))
+            ocr_text, _ocr_pages, _ocr_quality_score = _local_ocr_pdf(data, len(reader.pages))
         except (RuntimeError, TimeoutError) as exc:
             details = "、".join(f"第{i}頁 {count} 字" for i, count in enumerate(page_characters, 1))
             raise ScannedPDFError(f"PDF 共 {len(reader.pages)} 頁，目前擷取 {extracted_characters} 字，至少需要 20 字。各頁文字量：{details}。可能原因：掃描圖片、空白頁或文字層損壞。本機 OCR 未完成：{exc}。請使用本機 OCR 後重新上傳，或貼上人工確認文字。", page_count=len(reader.pages), page_characters=page_characters, threshold=20) from exc
@@ -222,6 +272,43 @@ def render_docx(text: str) -> bytes:
     return output.getvalue()
 
 
+def _pdf_font_path() -> Path:
+    """Return a locally available font with Traditional Chinese glyphs."""
+    candidates = [
+        Path(r"C:\Windows\Fonts\msjh.ttc"),
+        Path(r"C:\Windows\Fonts\mingliu.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise RuntimeError("找不到支援繁體中文的 PDF 字型（需要 Microsoft JhengHei 或 Noto Sans CJK）")
+
+
+def render_pdf(text: str) -> bytes:
+    """Render sanitized text into a searchable, newly laid-out PDF.
+
+    The original page layout is intentionally not retained.  This produces a
+    predictable PDF that the talent-pool importer can ingest while keeping
+    the anonymized text selectable/searchable.
+    """
+    try:
+        from fpdf import FPDF
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("PDF export requires fpdf2; install with python -m pip install fpdf2") from exc
+    pdf = FPDF(format="A4", unit="mm")
+    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.add_font("resume-cjk", fname=str(_pdf_font_path()))
+    pdf.set_margins(18, 18, 18)
+    pdf.add_page()
+    pdf.set_font("resume-cjk", size=11)
+    # Preserve line breaks while allowing long lines to wrap within the page.
+    for line in (text.splitlines() or [""]):
+        pdf.multi_cell(0, 6, line, new_x="LMARGIN", new_y="NEXT")
+    return bytes(pdf.output())
+
+
 def extract_text(data: bytes, suffix: str = ".txt") -> str:
     """Decode plain text, accepting UTF-8 (with BOM), UTF-16, or legacy fallback."""
     if len(data) > PDF_MAX_BYTES:
@@ -262,7 +349,7 @@ def _extract_uploaded(filename: str, data: bytes) -> str:
     raise ValueError("不支援的檔案格式；請使用 PDF、DOCX 或 TXT")
 
 
-def _run_local_ocr(data: bytes) -> tuple[str, int, str]:
+def _run_local_ocr(data: bytes) -> tuple[str, int, str, float]:
     """Run the existing bounded local OCR provider for a scanned PDF."""
     backend_root = Path(__file__).resolve().parent / "backend"
     if str(backend_root) not in sys.path:
@@ -282,7 +369,7 @@ def _run_local_ocr(data: bytes) -> tuple[str, int, str]:
         result = extract_pdf_with_ocr(pdf_path, provider=provider, limits=OCRLimits())
         if result.needs_review or not result.text.strip():
             raise RuntimeError(result.error_message or "本機 OCR 未辨識到可用文字")
-        return result.text, result.page_count, result.provider
+        return result.text, result.page_count, result.provider, _ocr_quality([], result.text)
     finally:
         pdf_path.unlink(missing_ok=True)
 
@@ -294,14 +381,17 @@ def main() -> int:
     parser.add_argument("--summary", action="store_true", help="將摘要輸出到 stderr")
     parser.add_argument("--web", action="store_true", help="啟動本機網頁")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--host", default="127.0.0.1", help="網頁服務綁定位址；區網試用可用 0.0.0.0")
     args = parser.parse_args()
     if args.web:
-        return serve_web(args.port)
+        return serve_web(args.port, args.host)
     text = sys.stdin.read() if args.input == "-" else read_resume_input(Path(args.input))
     anonymized, summary = anonymize(text)
     if args.output:
         output_path = Path(args.output)
-        if output_path.suffix.casefold() == ".docx":
+        if output_path.suffix.casefold() == ".pdf":
+            output_path.write_bytes(render_pdf(anonymized))
+        elif output_path.suffix.casefold() == ".docx":
             output_path.write_bytes(render_docx(anonymized))
         else:
             output_path.write_text(anonymized, encoding="utf-8")
@@ -357,7 +447,7 @@ class WebHandler(BaseHTTPRequestHandler):
         stem = Path(original).stem if original else "resume"
         stem = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff._-]+", "_", stem).strip("._") or "resume"
         base = f"{stem}_{date}"
-        suffix = suffix if suffix in {".txt", ".docx"} else ".txt"
+        suffix = suffix if suffix in {".txt", ".docx", ".pdf"} else ".pdf"
         name = f"{base}{suffix}"
         index = 1
         while name in cls._used_names:
@@ -384,6 +474,8 @@ class WebHandler(BaseHTTPRequestHandler):
         document = f"""<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>履歷去識別化｜TalentHub 工具</title><style>
 :root{{--ink:#173b3a;--muted:#64817d;--teal:#087f70;--line:#d7e8e4;--soft:#eff8f5;--gold:#d89b28}}*{{box-sizing:border-box}}body{{margin:0;background:#f6faf9;color:var(--ink);font-family:Arial,'Microsoft JhengHei',sans-serif}}.shell{{max-width:1240px;margin:0 auto;padding:34px 26px 56px}}header{{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}}h1{{font-size:32px;margin:0 0 8px;color:#086b62;letter-spacing:.04em}}.subtitle,.hint{{color:var(--muted);font-size:13px}}.badge{{padding:8px 12px;border-radius:999px;background:#e4f3ef;color:var(--teal);font-size:13px;font-weight:700}}.notice{{margin:16px 0;padding:13px 16px;border:1px solid #f1dcad;border-left:4px solid var(--gold);border-radius:9px;background:#fffaf0;color:#6e5625;font-size:13px;line-height:1.6}}.alert{{margin:16px 0;padding:16px 18px;border:1px solid #efb8b1;border-left:4px solid #c9574e;border-radius:9px;background:#fff3f1;color:#7e302a;line-height:1.6}}.alert p{{margin:6px 0}}.alert ol{{margin:8px 0 0 20px;padding:0}}form{{margin-top:20px}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:20px}}.panel{{background:white;border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 5px 18px rgba(20,80,70,.05)}}.panel-head{{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}}label,.panel-title{{font-weight:700;font-size:15px}}input[type=file]{{width:100%;padding:10px;border:1px dashed #a7cbc2;border-radius:8px;background:#fbfefd;margin:8px 0 10px}}textarea{{width:100%;height:330px;resize:vertical;padding:14px;border:1px solid #c4ddd8;border-radius:9px;font:14px/1.65 Consolas,'Microsoft JhengHei',monospace;color:#203d3a;background:#fcfefe}}textarea:focus{{outline:2px solid #a7ded4;border-color:var(--teal)}}.actions{{display:flex;gap:10px;align-items:center;margin-top:16px}}button,.secondary{{border:0;border-radius:8px;padding:12px 20px;background:var(--teal);color:white;font-weight:700;cursor:pointer;text-decoration:none;font-size:14px}}.secondary{{background:white;color:var(--teal);border:1px solid #abd1c9}}.result-summary{{display:grid;grid-template-columns:repeat(3,1fr) 2fr;gap:10px;align-items:stretch;margin-top:20px}}.stat,.replacement-list{{background:white;border:1px solid var(--line);border-radius:12px;padding:14px}}.stat small{{display:block;color:var(--muted);font-size:12px;margin-bottom:8px}}.stat strong{{font-size:25px;color:var(--teal)}}.stat.accent{{background:#e8f6f1}}.replacement-list h3{{font-size:14px;margin:0 0 8px}}.replacement-list ul{{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:5px 16px;font-size:13px}}.replacement-list li{{display:flex;justify-content:space-between;border-bottom:1px solid #edf4f2;padding:3px 0}}.replacement-list b{{color:var(--teal)}}.download-box{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-top:16px;padding:15px 18px;background:#eaf7f3;border:1px solid #bfe0d8;border-radius:11px}}.download-box small{{display:block;color:var(--muted);font-weight:400;margin-top:4px}}.download-link{{padding:10px 14px;border-radius:8px;background:var(--teal);color:white;font-weight:700;text-decoration:none;white-space:nowrap}}footer{{margin-top:24px;color:var(--muted);font-size:12px;text-align:center}}@media(max-width:850px){{.shell{{padding:24px 14px}}header{{display:block}}.grid,.result-summary{{grid-template-columns:1fr}}.download-box{{display:block}}.download-link{{display:inline-block;margin-top:12px}}}}
 </style></head><body><main class='shell'><header><div><h1>履歷去識別化</h1><div class='subtitle'>獨立 Python 工具 · 不連接 TalentHub 後台 · 僅在本機處理</div></div><span class='badge'>安全工作區</span></header><div class='notice'>支援 PDF、DOCX、TXT 與直接貼上的純文字。掃描 PDF 若沒有可搜尋文字，系統會停止處理並告訴你原因，不會冒險產出未完整遮蔽的結果。</div>{error_html}<form method='post' enctype='multipart/form-data'><div class='grid'><section class='panel'><div class='panel-head'><label>原始履歷</label><span class='hint'>可上傳檔案或貼上文字</span></div><input type='file' name='file' accept='.pdf,.docx,.txt,.text,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain'><div class='hint'>PDF 請確認文字可以反白複製；掃描檔請先使用公司核准的本機 OCR。</div><textarea name='text' placeholder='請貼上履歷文字'>{html.escape(source)}</textarea></section><section class='panel'><div class='panel-head'><span class='panel-title'>去識別化結果</span><span class='hint'>可供人工覆核</span></div><textarea readonly placeholder='處理後結果會顯示在這裡'>{html.escape(result)}</textarea>{download_html}</section></div><div class='actions'><button type='submit'>開始去識別化</button><a class='secondary' href='/?reset=1'>重新開始</a></div></form>{summary_html}<footer>請在匯入人才庫前再次人工確認姓名、地址、電話、Email 與身分證等個資是否已完整遮蔽。</footer></main></body></html>"""
+        if download:
+            download_html = f"<div class='download-box'><div><strong>處理完成，可下載去識別化 PDF</strong><small>重新排版為可搜尋 PDF，可直接上傳人才庫；下載前請人工覆核。</small></div><a class='download-link' href='/download/{html.escape(download)}'>下載 {html.escape(filename)}</a></div>"
         if ocr_action:
             document = document.replace("</body>", ocr_action + "</body>")
         if ocr_info_html:
@@ -414,7 +506,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             filename, payload = item
             self.send_response(200)
-            content_type = DOCX_MIME if filename.casefold().endswith(".docx") else "text/plain; charset=utf-8"
+            if filename.casefold().endswith(".docx"):
+                content_type = DOCX_MIME
+            elif filename.casefold().endswith(".pdf"):
+                content_type = PDF_MIME
+            else:
+                content_type = "text/plain; charset=utf-8"
             self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
@@ -435,13 +532,22 @@ class WebHandler(BaseHTTPRequestHandler):
             filename, payload = item
             if filename.casefold().endswith(".docx"):
                 display_result = extract_docx(payload)
+            elif filename.casefold().endswith(".pdf"):
+                display_result = extract_pdf(payload)
             else:
                 display_result = payload.decode("utf-8")
             ocr_info = ""
             if query.get("ocr", [""])[0] == "1":
                 pages = query.get("pages", ["?"])[0]
                 chars = query.get("chars", ["?"])[0]
+                quality = query.get("quality", ["?"])[0]
                 ocr_info = f"已使用本機 OCR；頁數：{pages}；擷取字數：{chars}；引擎：Tesseract。"
+            if query.get("ocr", [""])[0] == "1":
+                try:
+                    if float(quality) < 0.75:
+                        ocr_info += " Low OCR confidence; please review each field manually."
+                except (TypeError, ValueError):
+                    pass
             self._send_page(200, self._page(result=display_result, download=token, filename=filename, ocr_info=ocr_info))
         else:
             self._send_page(200, self._page())
@@ -460,13 +566,13 @@ class WebHandler(BaseHTTPRequestHandler):
                 if fields.get("ocr_action", [""])[0] == "run" and source_item:
                     original_name, pdf_data = source_item
                     try:
-                        ocr_text, page_count, provider = _run_local_ocr(pdf_data)
+                        ocr_text, page_count, provider, quality = _run_local_ocr(pdf_data)
                         result, summary = anonymize(ocr_text)
                         token = secrets.token_urlsafe(18)
-                        filename = self._filename(original_name, ".txt")
-                        self._store_result(token, filename, result.encode("utf-8"))
+                        filename = self._filename(original_name, ".pdf")
+                        self._store_result(token, filename, render_pdf(result))
                         self.send_response(303)
-                        self.send_header("Location", f"/?token={token}&ocr=1&pages={page_count}&chars={len(ocr_text)}")
+                        self.send_header("Location", f"/?token={token}&ocr=1&pages={page_count}&chars={len(ocr_text)}&quality={quality}")
                         self.end_headers()
                         return
                     except Exception as exc:
@@ -495,9 +601,11 @@ class WebHandler(BaseHTTPRequestHandler):
                 source = parse_qs(raw.decode("utf-8"), keep_blank_values=True).get("text", [""])[0]
             result, summary = anonymize(source)
             token = secrets.token_urlsafe(18)
-            output_suffix = ".docx" if original_suffix == ".docx" else ".txt"
+            # Talent-pool import accepts PDF; always emit a new searchable PDF
+            # so PDF/DOCX/TXT uploads follow one predictable workflow.
+            output_suffix = ".pdf"
             filename = self._filename(original_name, output_suffix)
-            payload = render_docx(result) if output_suffix == ".docx" else result.encode("utf-8")
+            payload = render_pdf(result)
             self._store_result(token, filename, payload)
             self.send_response(303)
             self.send_header("Location", f"/?token={token}")
@@ -510,8 +618,8 @@ class WebHandler(BaseHTTPRequestHandler):
         return
 
 
-def serve_web(port: int) -> int:
-    server = ThreadingHTTPServer(("127.0.0.1", port), WebHandler)
+def serve_web(port: int, host: str = "127.0.0.1") -> int:
+    server = ThreadingHTTPServer((host, port), WebHandler)
     server.daemon_threads = True
     print(f"履歷去識別化工具：http://127.0.0.1:{port}")
     try:
