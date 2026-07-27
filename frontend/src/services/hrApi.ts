@@ -266,6 +266,13 @@ export type InterviewQuestionPlan = {
   questions: InterviewQuestionPlanItem[]
   personalization_basis: string[]
   guidance: string
+  generation_mode?: 'gemini' | 'rules' | 'not_generated'
+  generation_warning?: string | null
+  provider?: string | null
+  model_name?: string | null
+  version?: number | null
+  generated_at?: string | null
+  context_matches?: boolean
 }
 
 export type ResumeSource = 'p104' | 'p1111' | 'generic' | 'direct'
@@ -437,6 +444,10 @@ export const hrApi = {
     }),
   interviewQuestionPlan: (applicationId: number, stage: InterviewStage) =>
     apiRequest<InterviewQuestionPlan>(`/applications/${applicationId}/interview-question-plan?stage=${stage}`),
+  generateInterviewQuestionPlan: (applicationId: number, force = false) =>
+    apiRequest<InterviewQuestionPlan>(`/applications/${applicationId}/interview-question-plan/generate?force=${force}`, {
+      method: 'POST',
+    }),
   interviewRecords: (applicationId: number) =>
     apiRequest<InterviewRecordDto[]>(`/applications/${applicationId}/interview-records`),
   createInterviewRecord: (applicationId: number, payload: InterviewRecordWrite) =>

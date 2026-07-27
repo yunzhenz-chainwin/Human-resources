@@ -13,7 +13,6 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.dependencies.auth import (
     audit_pii_read,
-    candidate_scope_clause,
     enforce_candidate_scope,
     get_current_user,
     require_recruiting_manager,
@@ -140,11 +139,17 @@ def list_candidates(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiting_manager),
 ) -> list[Candidate]:
+    """Return the company-wide talent pool to HR administrators only.
+
+    Department managers must use ``/department/workspace`` or the scoped
+    applications API.  Filtering this endpoint by department is not sufficient:
+    it would still expose the talent-pool catalogue outside the hiring workflow.
+    """
     query = (
         select(Candidate)
-        .where(Candidate.deleted_at.is_(None), candidate_scope_clause(user))
+        .where(Candidate.deleted_at.is_(None))
         .order_by(Candidate.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)

@@ -243,6 +243,12 @@ def test_hr_has_global_recruiting_scope(secured_app_client) -> None:
         ids["sales_job"],
         ids["engineering_job"],
     }
+    talent_pool = client.get("/api/v1/candidates", headers=headers)
+    assert talent_pool.status_code == 200
+    assert {candidate["id"] for candidate in talent_pool.json()} == {
+        ids["candidate"],
+        ids["scoped_candidate"],
+    }
 
 
 def test_manager_is_department_scoped_and_read_only(secured_app_client) -> None:
@@ -254,9 +260,11 @@ def test_manager_is_department_scoped_and_read_only(secured_app_client) -> None:
     assert [job["id"] for job in client.get(
         "/api/v1/requisitions", headers=headers
     ).json()] == [ids["engineering_job"]]
-    assert [candidate["id"] for candidate in client.get(
+    # The company talent pool is an HR-only catalogue. Managers must enter
+    # through their department applications/workspace instead of enumerating it.
+    assert client.get(
         "/api/v1/candidates", headers=headers
-    ).json()] == [ids["scoped_candidate"]]
+    ).status_code == 403
     assert client.get(
         f"/api/v1/candidates/{ids['scoped_candidate']}", headers=headers
     ).status_code == 200

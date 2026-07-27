@@ -5,7 +5,7 @@ from app.models.candidate import (
     CandidateExperience,
     CandidateSkill,
 )
-from app.models.interview import InterviewRecord
+from app.models.interview import InterviewQuestionPlan, InterviewRecord
 from app.models.matching import MatchResult
 from app.models.organization import Department, User
 from app.models.recruitment import JobApplication, JobRequisition, ResumeFile
@@ -26,6 +26,7 @@ __all__ = [
     "CandidateExperience",
     "CandidateSkill",
     "InterviewRecord",
+    "InterviewQuestionPlan",
     "Department",
     "User",
     "JobApplication",

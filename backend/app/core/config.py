@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str | None = None
     bootstrap_admin_password: str | None = None
     bootstrap_admin_display_name: str = "System Administrator"
+    # Gemini is opt-in. Keep disabled by default so local/dev environments use the
+    # deterministic, auditable question generator when no key is configured.
+    gemini_enabled: bool = False
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.0-flash"
+    gemini_timeout_seconds: float = Field(default=20.0, ge=2.0, le=120.0)
 
     @property
     def cors_origin_list(self) -> list[str]:

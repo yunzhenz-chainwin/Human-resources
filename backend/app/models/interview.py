@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -65,3 +65,38 @@ class InterviewRecord(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
     updated_by_name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+class InterviewQuestionPlan(TimestampMixin, Base):
+    """Versioned manager-question plan generated for one job application."""
+
+    __tablename__ = "interview_question_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "generation_mode IN ('gemini','rules')",
+            name="valid_generation_mode",
+        ),
+        UniqueConstraint("application_id", "version", name="application_version"),
+        Index(
+            "ix_interview_question_plans_application_version",
+            "application_id",
+            "version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True)
+    application_id: Mapped[int] = mapped_column(
+        ForeignKey("job_applications.id", ondelete="CASCADE"), index=True
+    )
+    context_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    questions: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    personalization_basis: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    generation_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    model_name: Mapped[str | None] = mapped_column(String(100))
+    generation_warning: Mapped[str | None] = mapped_column(Text)
+    generated_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    generated_by_name: Mapped[str] = mapped_column(String(100), nullable=False)

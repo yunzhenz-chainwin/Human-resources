@@ -647,19 +647,34 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
     )
     assert design_resumes.status_code == 200
     assert reassigned_resume_ids.issubset({item["id"] for item in design_resumes.json()})
+    for reassigned_resume_id in reassigned_resume_ids:
+        assert client.get(
+            f"/api/v1/resumes/{reassigned_resume_id}",
+            headers=_headers(client, "engineering-manager"),
+        ).status_code == 403
+        assert client.get(
+            f"/api/v1/resumes/{reassigned_resume_id}",
+            headers=_headers(client, "design-manager"),
+        ).status_code == 200
 
     engineering_candidates = client.get(
         "/api/v1/candidates",
         headers=_headers(client, "engineering-manager"),
     )
-    assert engineering_candidates.status_code == 200
-    assert ids["alice"] not in {item["id"] for item in engineering_candidates.json()}
+    assert engineering_candidates.status_code == 403
     design_candidates = client.get(
         "/api/v1/candidates",
         headers=_headers(client, "design-manager"),
     )
-    assert design_candidates.status_code == 200
-    assert ids["alice"] in {item["id"] for item in design_candidates.json()}
+    assert design_candidates.status_code == 403
+    assert client.get(
+        f"/api/v1/candidates/{ids['alice']}",
+        headers=_headers(client, "engineering-manager"),
+    ).status_code == 403
+    assert client.get(
+        f"/api/v1/candidates/{ids['alice']}",
+        headers=_headers(client, "design-manager"),
+    ).status_code == 200
 
     with testing_session() as db:
         closed_job = JobRequisition(
@@ -743,12 +758,22 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         "/api/v1/candidates",
         headers=_headers(client, "engineering-manager"),
     )
-    assert ids["alice"] in {item["id"] for item in engineering_candidates.json()}
+    assert engineering_candidates.status_code == 403
+    assert client.get(
+        f"/api/v1/candidates/{ids['alice']}",
+        headers=_headers(client, "engineering-manager"),
+    ).status_code == 200
     engineering_resumes = client.get(
         "/api/v1/resumes?include_confirmed=true",
         headers=_headers(client, "engineering-manager"),
     )
+    assert engineering_resumes.status_code == 200
     assert reassigned_resume_ids.isdisjoint({item["id"] for item in engineering_resumes.json()})
+    for reassigned_resume_id in reassigned_resume_ids:
+        assert client.get(
+            f"/api/v1/resumes/{reassigned_resume_id}",
+            headers=_headers(client, "engineering-manager"),
+        ).status_code == 403
 
 
 def test_department_manager_updates_interview_with_status_sync_and_audit(
@@ -1288,13 +1313,39 @@ def test_hr_plan_is_fixed_and_manager_plan_uses_candidate_background(
     body = manager.json()
     assert body["stage"] == "manager"
     assert body["job_title"] == "Application Backend Engineer"
+    assert body["questions"] == []
+    assert body["generation_mode"] == "not_generated"
+
+    generated = client.post(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan/generate",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert generated.status_code == 200, generated.text
+    body = generated.json()
     assert len(body["questions"]) == 5
+    assert body["generation_mode"] == "rules"
+    assert body["version"] == 1
+    assert body["context_matches"] is True
     combined_questions = " ".join(item["question"] for item in body["questions"])
     assert "Application Backend Engineer" in combined_questions
     assert "Python API Developer" in combined_questions
     assert "Python" in combined_questions
-    assert "Example Systems" in combined_questions
     assert any("候選人技能：Python" in item for item in body["personalization_basis"])
+
+    cached = client.get(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=manager",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert cached.status_code == 200
+    assert cached.json()["version"] == 1
+    assert cached.json()["questions"] == body["questions"]
+
+    regenerated = client.post(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan/generate?force=true",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert regenerated.status_code == 200
+    assert regenerated.json()["version"] == 2
     assert (
         client.get(
             f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=manager",
@@ -1386,10 +1437,10 @@ def test_trait_questions_differ_for_two_resumes_on_the_same_job(
     assert [item["question"] for item in alice_questions] != [
         item["question"] for item in bob_questions
     ]
-    assert "API Works" in alice_questions[0]["question"]
-    assert "Design Lab" in bob_questions[0]["question"]
-    assert alice_questions[0]["source"] == "最近經歷：API Works／Backend Developer"
-    assert bob_questions[0]["source"] == "最近經歷：Design Lab／Product Designer"
+    assert "Backend Developer" in alice_questions[0]["question"]
+    assert "Product Designer" in bob_questions[0]["question"]
+    assert alice_questions[0]["source"] == "最近經歷：Backend Developer"
+    assert bob_questions[0]["source"] == "最近經歷：Product Designer"
     assert alice_body["application_id"] == ids["engineering_application"]
     assert bob_body["application_id"] == bob_application_id
     assert any("候選人技能：Python" in item for item in alice_body["personalization_basis"])

@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -5,11 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.core.config import get_settings
 from app.dependencies.auth import enforce_department_scope, require_recruiting_user
 from app.models import (
     Candidate,
     CandidateExperience,
     CandidateSkill,
+    InterviewQuestionPlan,
     InterviewRecord,
     JobApplication,
     JobRequisition,
@@ -27,7 +31,7 @@ from app.schemas.interviews import (
     InterviewStage,
 )
 from app.services.interview_questions import (
-    personalized_manager_question_plan,
+    gemini_manager_question_plan,
     personalized_trait_interview_questions,
     standard_hr_question_plan,
 )
@@ -163,7 +167,6 @@ def _candidate_resume_context(
     )
     experiences = [
         {
-            "company": item.company,
             "title": item.title,
             "description": item.description,
         }
@@ -174,6 +177,74 @@ def _candidate_resume_context(
         ).all()
     ]
     return skills, experiences
+
+
+def _question_context_hash(
+    candidate: Candidate,
+    requisition: JobRequisition,
+    skills: list[str],
+    experiences: list[dict[str, object | None]],
+) -> str:
+    """Hash only job-relevant, de-identified context used to generate questions."""
+    payload = {
+        "job_title": requisition.title,
+        "required_skills": requisition.skills or [],
+        "current_title": candidate.current_title,
+        "total_years": candidate.total_years,
+        "candidate_skills": skills,
+        "experiences": [
+            {"title": item.get("title"), "description": item.get("description")}
+            for item in experiences
+        ],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _latest_question_plan(db: Session, application_id: int) -> InterviewQuestionPlan | None:
+    return db.scalar(
+        select(InterviewQuestionPlan)
+        .where(InterviewQuestionPlan.application_id == application_id)
+        .order_by(InterviewQuestionPlan.version.desc(), InterviewQuestionPlan.id.desc())
+    )
+
+
+def _stored_plan_response(
+    application: JobApplication,
+    requisition: JobRequisition,
+    plan: InterviewQuestionPlan | None,
+    context_hash: str,
+) -> InterviewQuestionPlanResponse:
+    if plan is None:
+        return InterviewQuestionPlanResponse(
+            application_id=application.id,
+            stage="manager",
+            job_title=requisition.title,
+            questions=[],
+            personalization_basis=[],
+            guidance="尚未產生主管客製題目；請由 HR 或部門主管按下「產生客製題目」。",
+            generation_mode="not_generated",
+            provider=None,
+            model_name=None,
+            version=None,
+            generated_at=None,
+            context_matches=False,
+        )
+    return InterviewQuestionPlanResponse(
+        application_id=application.id,
+        stage="manager",
+        job_title=requisition.title,
+        questions=plan.questions,
+        personalization_basis=plan.personalization_basis,
+        guidance="已載入保存的主管客製題目；重新整理不會再次呼叫 AI。",
+        generation_mode=plan.generation_mode,
+        generation_warning=plan.generation_warning,
+        provider=plan.provider,
+        model_name=plan.model_name,
+        version=plan.version,
+        generated_at=plan.created_at,
+        context_matches=plan.context_hash == context_hash,
+    )
 
 
 @router.get(
@@ -195,28 +266,97 @@ def interview_question_plan(
         questions = standard_hr_question_plan()
         basis = ["全公司 HR 固定題庫（不因職位或個人背景改變）"]
         guidance = "HR 請依固定五題完成一致的初談紀錄，避免使用與工作無關的個人條件評估。"
-    else:
-        skills, experiences = _candidate_resume_context(db, candidate.id)
-        questions, basis = personalized_manager_question_plan(
+        return InterviewQuestionPlanResponse(
+            application_id=application.id,
+            stage=stage,
             job_title=requisition.title,
-            current_title=candidate.current_title,
-            total_years=candidate.total_years,
-            candidate_skills=skills,
-            required_skills=requisition.skills or [],
-            experiences=experiences,
+            questions=questions,
+            personalization_basis=basis,
+            guidance=guidance,
+            generation_mode="rules",
+            provider="internal",
+            model_name="HR 標準題庫",
+            version=1,
+            context_matches=True,
         )
-        guidance = (
-            "主管題目依應徵職位與目前履歷資料產生；請以實際行為與成果追問，"
-            "若背景資料不完整，面試時應先向候選人確認。"
-        )
-    return InterviewQuestionPlanResponse(
-        application_id=application.id,
-        stage=stage,
-        job_title=requisition.title,
-        questions=questions,
-        personalization_basis=basis,
-        guidance=guidance,
+
+    skills, experiences = _candidate_resume_context(db, candidate.id)
+    context_hash = _question_context_hash(candidate, requisition, skills, experiences)
+    return _stored_plan_response(
+        application,
+        requisition,
+        _latest_question_plan(db, application.id),
+        context_hash,
     )
+
+
+@router.post(
+    "/{application_id}/interview-question-plan/generate",
+    response_model=InterviewQuestionPlanResponse,
+)
+def generate_interview_question_plan(
+    application_id: int,
+    force: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_user),
+) -> InterviewQuestionPlanResponse:
+    application, requisition = _application_requisition(db, application_id, user)
+    candidate = db.get(Candidate, application.candidate_id)
+    if candidate is None or candidate.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    skills, experiences = _candidate_resume_context(db, candidate.id)
+    context_hash = _question_context_hash(candidate, requisition, skills, experiences)
+    latest = _latest_question_plan(db, application.id)
+    if latest is not None and latest.context_hash == context_hash and not force:
+        return _stored_plan_response(application, requisition, latest, context_hash)
+
+    questions, basis, generation_mode = gemini_manager_question_plan(
+        job_title=requisition.title,
+        current_title=candidate.current_title,
+        total_years=candidate.total_years,
+        candidate_skills=skills,
+        required_skills=requisition.skills or [],
+        experiences=experiences,
+    )
+    generation_warning = (
+        "Gemini API 已達目前使用上限，暫時改用規則式備援題目；請檢查 Google AI Studio 配額或計費設定。"
+        if "GEMINI_QUOTA_EXCEEDED" in basis else None
+    )
+    visible_basis = [item for item in basis if item != "GEMINI_QUOTA_EXCEEDED"]
+    settings = get_settings()
+    plan = InterviewQuestionPlan(
+        application_id=application.id,
+        context_hash=context_hash,
+        version=(latest.version + 1) if latest else 1,
+        questions=[item.model_dump() for item in questions],
+        personalization_basis=visible_basis,
+        generation_mode=generation_mode,
+        provider="gemini" if generation_mode == "gemini" else "rules",
+        model_name=settings.gemini_model if settings.gemini_enabled else None,
+        generation_warning=generation_warning,
+        generated_by_id=user.id,
+        generated_by_name=_actor_name(user),
+    )
+    db.add(plan)
+    db.flush()
+    write_audit(
+        db,
+        user,
+        "application.interview_question_plan.generate",
+        "interview_question_plan",
+        plan.id,
+        requisition.department_id,
+        details={
+            "application_id": application.id,
+            "version": plan.version,
+            "generation_mode": generation_mode,
+            "force": force,
+        },
+    )
+    db.commit()
+    db.refresh(plan)
+    return _stored_plan_response(application, requisition, plan, context_hash)
 
 
 @router.post(

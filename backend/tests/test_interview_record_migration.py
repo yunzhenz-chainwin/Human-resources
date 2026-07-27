@@ -82,6 +82,26 @@ def test_sqlite_interview_record_id_is_generated_after_migration(
             assert connection.execute(
                 "SELECT id FROM interview_records WHERE application_id = 9002"
             ).fetchone() == (42,)
+
+        command.upgrade(config, "head")
+        with closing(sqlite3.connect(database_path)) as connection:
+            plan_columns = {
+                column[1]
+                for column in connection.execute("PRAGMA table_info(interview_question_plans)")
+            }
+            assert {
+                "application_id",
+                "context_hash",
+                "version",
+                "questions",
+                "personalization_basis",
+                "generation_mode",
+                "provider",
+                "model_name",
+            }.issubset(plan_columns)
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
+                ("f6a2d4c8b901",)
+            ]
     finally:
         get_settings.cache_clear()
         database_path.unlink(missing_ok=True)

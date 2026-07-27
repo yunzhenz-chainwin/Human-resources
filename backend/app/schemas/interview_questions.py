@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -59,6 +60,13 @@ class InterviewQuestionPlanResponse(BaseModel):
     application_id: int
     stage: Literal["hr", "manager"]
     job_title: str
-    questions: list[InterviewQuestionPlanItem] = Field(min_length=5, max_length=5)
+    questions: list[InterviewQuestionPlanItem] = Field(default_factory=list, max_length=5)
     personalization_basis: list[str]
     guidance: str
+    generation_mode: Literal["gemini", "rules", "not_generated"] = "not_generated"
+    generation_warning: str | None = None
+    provider: str | None = None
+    model_name: str | None = None
+    version: int | None = None
+    generated_at: datetime | None = None
+    context_matches: bool = False
