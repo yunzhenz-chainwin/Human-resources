@@ -52,8 +52,9 @@ export type AuditLog = {
 }
 export type IssueSeverity = 'low' | 'medium' | 'high' | 'critical'
 export type IssueStatus = 'open' | 'investigating' | 'resolved' | 'closed'
+export type IssueCategory = 'feature' | 'optimization' | 'bug' | 'maintenance' | 'other'
 export type SystemIssue = {
-  id: number; title: string; description: string; page: string
+  id: number; title: string; description: string; page: string; category: IssueCategory
   severity: IssueSeverity; status: IssueStatus
   progress_percent: number; expected_completion_date: string | null
   reproduction_steps: string | null; resolution_notes: string | null
@@ -129,6 +130,7 @@ export const adminApi = {
   updateSystemIssue: (id: number, payload: Partial<SystemIssueWrite>) => apiRequest<SystemIssue>(`/admin/system-issues/${id}`, {
     method: 'PATCH', body: JSON.stringify(payload),
   }),
+  deleteSystemIssue: (id: number) => apiRequest<void>(`/admin/system-issues/${id}`, { method: 'DELETE' }),
   databaseOverview: () => apiRequest<DatabaseOverview>('/admin/database/overview'),
   databaseTableRows: (table: string, page = 1, search = '', revealPii = false, reason = '') => {
     const query = new URLSearchParams({ page: String(page), page_size: '20' })

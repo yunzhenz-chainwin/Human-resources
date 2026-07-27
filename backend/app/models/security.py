@@ -109,6 +109,9 @@ class SystemIssue(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     page: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="other", server_default="other", index=True
+    )
     severity: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     progress_percent: Mapped[int] = mapped_column(

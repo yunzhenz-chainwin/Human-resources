@@ -124,12 +124,14 @@ class AuditRead(BaseModel):
 
 IssueSeverity = Literal["low", "medium", "high", "critical"]
 IssueStatus = Literal["open", "investigating", "resolved", "closed"]
+IssueCategory = Literal["feature", "optimization", "bug", "maintenance", "other"]
 
 
 class SystemIssueCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=10000)
     page: str = Field(min_length=1, max_length=255)
+    category: IssueCategory = "other"
     severity: IssueSeverity = "medium"
     status: IssueStatus = "open"
     progress_percent: int = Field(default=0, ge=0, le=100)
@@ -142,6 +144,7 @@ class SystemIssueUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, min_length=1, max_length=10000)
     page: str | None = Field(default=None, min_length=1, max_length=255)
+    category: IssueCategory | None = None
     severity: IssueSeverity | None = None
     status: IssueStatus | None = None
     progress_percent: int | None = Field(default=None, ge=0, le=100)
@@ -156,6 +159,7 @@ class SystemIssueRead(BaseModel):
     title: str
     description: str
     page: str
+    category: str
     severity: str
     status: str
     progress_percent: int

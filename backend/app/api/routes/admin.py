@@ -1001,6 +1001,19 @@ def update_system_issue(
     return issue
 
 
+@router.delete("/system-issues/{issue_id}", status_code=204)
+def delete_system_issue(
+    issue_id: int,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> None:
+    issue = db.get(SystemIssue, issue_id)
+    if issue is None:
+        raise HTTPException(status_code=404, detail="System issue not found")
+    _commit_audit(db, actor, "delete", "system_issue", issue.id)
+    db.delete(issue)
+
+
 @router.get("/database/overview", response_model=DatabaseOverviewRead)
 def database_overview(
     _: User = Depends(admin_user), db: Session = Depends(get_db)
