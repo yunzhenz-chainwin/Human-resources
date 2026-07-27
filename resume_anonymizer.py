@@ -15,6 +15,7 @@ import json
 import re
 import secrets
 import sys
+import tempfile
 from datetime import datetime
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -186,6 +187,29 @@ def main() -> int:
 class WebHandler(BaseHTTPRequestHandler):
     _results: dict[str, tuple[str, bytes]] = {}
     _used_names: set[str] = set()
+    _result_dir = Path(tempfile.gettempdir()) / "talenthub-resume-anonymizer"
+
+    @classmethod
+    def _store_result(cls, token: str, filename: str, payload: bytes) -> None:
+        cls._results[token] = (filename, payload)
+        cls._result_dir.mkdir(parents=True, exist_ok=True)
+        (cls._result_dir / f"{token}.name").write_text(filename, encoding="utf-8")
+        (cls._result_dir / f"{token}.txt").write_bytes(payload)
+
+    @classmethod
+    def _get_result(cls, token: str) -> tuple[str, bytes] | None:
+        item = cls._results.get(token)
+        if item:
+            return item
+        if not re.fullmatch(r"[A-Za-z0-9_-]{12,80}", token):
+            return None
+        try:
+            filename = (cls._result_dir / f"{token}.name").read_text(encoding="utf-8")
+            payload = (cls._result_dir / f"{token}.txt").read_bytes()
+        except (FileNotFoundError, OSError, UnicodeError):
+            return None
+        cls._results[token] = (filename, payload)
+        return filename, payload
 
     @classmethod
     def _filename(cls, original: str = "") -> str:
@@ -206,9 +230,17 @@ class WebHandler(BaseHTTPRequestHandler):
         if summary:
             summary_html = f"<div class='summary'>共替換 {sum(summary.replacements.values())} 個欄位：{html.escape(str(summary.replacements))}</div>"
         error_html = f"<p class='error'>{html.escape(error)}</p>" if error else ""
-        download_html = f"<p><a href='/download/{html.escape(download)}'>下載去識別化檔案（{html.escape(filename)}）</a></p>" if download else ""
+        # The anonymizer deliberately exports a UTF-8 plain-text file for every
+        # input format (PDF, DOCX, TXT, or pasted text).  Make that contract
+        # explicit in the result panel so users do not mistake the download for
+        # a PDF/DOCX conversion.
+        download_html = (
+            "<div class='download-box'><strong>匯出格式：TXT（UTF-8 純文字）</strong>"
+            f"<br><a href='/download/{html.escape(download)}'>下載去識別化 TXT：{html.escape(filename)}</a></div>"
+            if download else ""
+        )
         document = f"""<!doctype html><html lang='zh-Hant'><meta charset='utf-8'><title>履歷去識別化</title>
-<style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:35px auto;padding:0 20px;color:#234}}h1{{color:#17685e}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}textarea{{width:100%;height:360px;padding:12px;box-sizing:border-box;border:1px solid #bdd4ce;border-radius:8px}}button{{margin-top:12px;padding:11px 20px;background:#087f70;color:white;border:0;border-radius:7px;cursor:pointer}}.summary{{margin:14px 0;padding:12px;background:#eaf7f2;border-radius:7px}}.error{{color:#a33}}small{{color:#607a73}}@media(max-width:800px){{.grid{{grid-template-columns:1fr}}}}</style>
+<style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:35px auto;padding:0 20px;color:#234}}h1{{color:#17685e}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}textarea{{width:100%;height:360px;padding:12px;box-sizing:border-box;border:1px solid #bdd4ce;border-radius:8px}}button{{margin-top:12px;padding:11px 20px;background:#087f70;color:white;border:0;border-radius:7px;cursor:pointer}}.summary{{margin:14px 0;padding:12px;background:#eaf7f2;border-radius:7px}}.download-box{{margin:14px 0;padding:12px;background:#eef8f5;border:1px solid #c4e2da;border-radius:7px}}.download-box a{{color:#087f70;font-weight:700}}.error{{color:#a33}}small{{color:#607a73}}@media(max-width:800px){{.grid{{grid-template-columns:1fr}}}}</style>
 <h1>履歷去識別化</h1><small>獨立 Python 工具，不連接 TalentHub 後台</small>{error_html}<form method='post' enctype='multipart/form-data'><div class='grid'><label>原始履歷<br><input type='file' name='file' accept='.pdf,.docx,.txt,.text,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain'><small>支援 PDF、DOCX、TXT；掃描型 PDF 請先使用核准的本機 OCR</small><textarea name='text' placeholder='請貼上履歷文字'>{html.escape(source)}</textarea></label><label>去識別化結果<br><textarea readonly>{html.escape(result)}</textarea></label></div><button type='submit'>開始去識別化</button></form>{summary_html}</html>"""
         document = document.replace("</textarea></label></div>", "</textarea></label>" + download_html + "</div>")
         return document.encode("utf-8")
@@ -216,27 +248,41 @@ class WebHandler(BaseHTTPRequestHandler):
     def _send_page(self, status_code: int, body: bytes) -> None:
         self.send_response(status_code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        # The page is a local, stateful tool.  Do not let the browser reuse a
+        # previous error/result when the user refreshes or starts a new file.
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path.startswith("/download/"):
-            item = self._results.get(path.rsplit("/", 1)[-1])
+            item = self._get_result(path.rsplit("/", 1)[-1])
             if not item:
                 self._send_page(404, self._page(error="下載連結已失效，請重新處理履歷。"))
                 return
             filename, payload = item
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
             return
-        token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
-        item = self._results.get(token)
+        query = parse_qs(parsed.query)
+        if query.get("reset", [""])[0] == "1":
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        token = query.get("token", [""])[0]
+        item = self._get_result(token)
         if item:
             filename, payload = item
             self._send_page(200, self._page(result=payload.decode("utf-8"), download=token, filename=filename))
@@ -264,7 +310,7 @@ class WebHandler(BaseHTTPRequestHandler):
             result, summary = anonymize(source)
             token = secrets.token_urlsafe(18)
             filename = self._filename(original_name)
-            self._results[token] = (filename, result.encode("utf-8"))
+            self._store_result(token, filename, result.encode("utf-8"))
             self.send_response(303)
             self.send_header("Location", f"/?token={token}")
             self.end_headers()

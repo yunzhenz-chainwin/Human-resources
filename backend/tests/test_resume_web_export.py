@@ -30,3 +30,16 @@ def test_result_page_contains_download_link() -> None:
     page = handler._page(result="[NAME]", download="token", filename="resume_20260727.txt").decode("utf-8")
     assert "/download/token" in page
     assert "resume_20260727.txt" in page
+
+
+def test_empty_page_does_not_show_scanned_pdf_error() -> None:
+    handler = object.__new__(module.WebHandler)
+    page = handler._page().decode("utf-8")
+    assert "偵測到掃描型 PDF" not in page
+    assert "支援 PDF、DOCX、TXT" in page
+
+
+def test_scanned_pdf_error_is_only_rendered_when_processing_fails() -> None:
+    handler = object.__new__(module.WebHandler)
+    page = handler._page(error="偵測到掃描型 PDF 或文字層不足").decode("utf-8")
+    assert "偵測到掃描型 PDF 或文字層不足" in page
