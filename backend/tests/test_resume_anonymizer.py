@@ -78,6 +78,35 @@ def test_selectable_pdf_text_is_returned(monkeypatch: pytest.MonkeyPatch) -> Non
     assert resume_anonymizer.extract_pdf(b"%PDF-test") == expected
 
 
+def test_scanned_pdf_error_reports_page_text_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Page:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        is_encrypted = False
+        pages = [Page("姓名"), Page(""), Page("電話 0912")]
+
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: Reader())
+    with pytest.raises(resume_anonymizer.ScannedPDFError) as captured:
+        resume_anonymizer.extract_pdf(b"%PDF-test")
+
+    error = captured.value
+    assert error.page_count == 3
+    assert error.page_characters == (2, 0, 6)
+    assert error.threshold == 20
+    message = str(error)
+    assert "PDF 共 3 頁" in message
+    assert "目前擷取 8 字，至少需要 20 字" in message
+    assert "第1頁 2 字" in message
+    assert "第2頁 0 字" in message
+    assert "第3頁 6 字" in message
+    assert "可能原因" in message
+
+
 def test_web_page_escapes_resume_and_error_content() -> None:
     handler = object.__new__(resume_anonymizer.WebHandler)
     page = handler._page(

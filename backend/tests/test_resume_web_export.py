@@ -25,6 +25,14 @@ def test_plain_text_filename_has_resume_prefix() -> None:
     assert module.WebHandler._filename().startswith("resume_")
 
 
+def test_docx_export_preserves_importable_format() -> None:
+    name = module.WebHandler._filename("candidate.docx", ".docx")
+    payload = module.render_docx("姓名：[NAME]\nEmail：[EMAIL]")
+    assert name.endswith(".docx")
+    assert payload.startswith(b"PK")
+    assert "[NAME]" in module.extract_docx(payload)
+
+
 def test_result_page_contains_download_link() -> None:
     handler = object.__new__(module.WebHandler)
     page = handler._page(result="[NAME]", download="token", filename="resume_20260727.txt").decode("utf-8")

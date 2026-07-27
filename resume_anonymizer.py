@@ -27,10 +27,28 @@ PDF_MAX_PAGES = 20
 PDF_MAX_TEXT_CHARACTERS = 250_000
 WEB_MAX_REQUEST_BYTES = PDF_MAX_BYTES + 1 * 1024 * 1024
 SUPPORTED_SUFFIXES = {".pdf", ".docx", ".txt", ".text"}
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 class ScannedPDFError(ValueError):
-    """A PDF has no trustworthy selectable text."""
+    """A PDF has no trustworthy selectable text.
+
+    The attributes are intentionally exposed so the web UI/CLI can explain
+    which pages failed extraction instead of showing only a generic warning.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        page_count: int = 0,
+        page_characters: tuple[int, ...] = (),
+        threshold: int = 20,
+    ) -> None:
+        super().__init__(message)
+        self.page_count = page_count
+        self.page_characters = page_characters
+        self.threshold = threshold
 
 
 @dataclass
@@ -85,16 +103,27 @@ def extract_pdf(data: bytes) -> str:
             raise ValueError("PDF 受密碼保護，無法安全讀取")
         if len(reader.pages) > PDF_MAX_PAGES:
             raise ValueError(f"PDF 頁數超過 {PDF_MAX_PAGES} 頁上限")
-        text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+        page_texts = [page.extract_text() or "" for page in reader.pages]
+        page_characters = tuple(len(re.sub(r"\s+", "", value)) for value in page_texts)
+        text = "\n".join(page_texts).strip()
     except ValueError:
         raise
     except Exception as exc:
         raise ValueError("PDF 無法解析，請確認檔案未損壞") from exc
-    if len(re.sub(r"\s+", "", text)) < 20:
+    extracted_characters = len(re.sub(r"\s+", "", text))
+    if extracted_characters < 20:
+        page_details = "、".join(
+            f"第{index}頁 {count} 字" for index, count in enumerate(page_characters, 1)
+        ) or "無頁面文字"
         raise ScannedPDFError(
-            "偵測到掃描型 PDF 或文字層不足。請先使用公司核准的本機 OCR，"
-            "再上傳可搜尋 PDF，並由人工確認；請勿使用未核准的第三方 OCR。"
-            "本工具不會直接產出去識別結果或送出履歷內容。"
+            f"偵測到掃描型 PDF 或文字層不足：PDF 共 {len(reader.pages)} 頁，"
+            f"目前擷取 {extracted_characters} 字，至少需要 {20} 字。各頁文字量：{page_details}。"
+            "可能原因：PDF 是掃描圖片、文字層損壞、頁面為空白或文字無法選取。"
+            "請使用公司核准的本機 OCR 重新產生可搜尋 PDF，確認每頁文字後再上傳，並由人工確認；"
+            "請勿使用未核准的第三方 OCR。本工具不會直接產出去識別結果或送出履歷內容。",
+            page_count=len(reader.pages),
+            page_characters=page_characters,
+            threshold=20,
         )
     if len(text) > PDF_MAX_TEXT_CHARACTERS:
         raise ValueError(f"PDF 文字不可超過 {PDF_MAX_TEXT_CHARACTERS} 字")
@@ -121,6 +150,20 @@ def extract_docx(data: bytes) -> str:
     if len(text) > PDF_MAX_TEXT_CHARACTERS:
         raise ValueError(f"DOCX 文字不可超過 {PDF_MAX_TEXT_CHARACTERS} 字")
     return text
+
+
+def render_docx(text: str) -> bytes:
+    """Create a sanitized DOCX for direct backend import."""
+    try:
+        from docx import Document
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("DOCX export requires python-docx") from exc
+    document = Document()
+    for line in text.splitlines() or [""]:
+        document.add_paragraph(line)
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
 
 
 def extract_text(data: bytes, suffix: str = ".txt") -> str:
@@ -176,7 +219,11 @@ def main() -> int:
     text = sys.stdin.read() if args.input == "-" else read_resume_input(Path(args.input))
     anonymized, summary = anonymize(text)
     if args.output:
-        Path(args.output).write_text(anonymized, encoding="utf-8")
+        output_path = Path(args.output)
+        if output_path.suffix.casefold() == ".docx":
+            output_path.write_bytes(render_docx(anonymized))
+        else:
+            output_path.write_text(anonymized, encoding="utf-8")
     else:
         sys.stdout.write(anonymized)
     if args.summary:
@@ -194,7 +241,7 @@ class WebHandler(BaseHTTPRequestHandler):
         cls._results[token] = (filename, payload)
         cls._result_dir.mkdir(parents=True, exist_ok=True)
         (cls._result_dir / f"{token}.name").write_text(filename, encoding="utf-8")
-        (cls._result_dir / f"{token}.txt").write_bytes(payload)
+        (cls._result_dir / f"{token}.bin").write_bytes(payload)
 
     @classmethod
     def _get_result(cls, token: str) -> tuple[str, bytes] | None:
@@ -205,44 +252,44 @@ class WebHandler(BaseHTTPRequestHandler):
             return None
         try:
             filename = (cls._result_dir / f"{token}.name").read_text(encoding="utf-8")
-            payload = (cls._result_dir / f"{token}.txt").read_bytes()
+            try:
+                payload = (cls._result_dir / f"{token}.bin").read_bytes()
+            except FileNotFoundError:
+                payload = (cls._result_dir / f"{token}.txt").read_bytes()
         except (FileNotFoundError, OSError, UnicodeError):
             return None
         cls._results[token] = (filename, payload)
         return filename, payload
 
     @classmethod
-    def _filename(cls, original: str = "") -> str:
+    def _filename(cls, original: str = "", suffix: str = ".txt") -> str:
         date = datetime.now().strftime("%Y%m%d")
         stem = Path(original).stem if original else "resume"
         stem = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff._-]+", "_", stem).strip("._") or "resume"
         base = f"{stem}_{date}"
-        name = f"{base}.txt"
+        suffix = suffix if suffix in {".txt", ".docx"} else ".txt"
+        name = f"{base}{suffix}"
         index = 1
         while name in cls._used_names:
-            name = f"{base}_{index:02d}.txt"
+            name = f"{base}_{index:02d}{suffix}"
             index += 1
         cls._used_names.add(name)
         return name
 
     def _page(self, source: str = "", result: str = "", summary: Summary | None = None, error: str = "", download: str = "", filename: str = "") -> bytes:
+        total = sum(summary.replacements.values()) if summary else 0
+        rows = "".join(f"<li><span>{html.escape(k)}</span><b>{v}</b></li>" for k, v in (summary.replacements.items() if summary else []) if v)
+        rows = rows or "<li><span>未偵測到可替換欄位</span><b>0</b></li>"
         summary_html = ""
         if summary:
-            summary_html = f"<div class='summary'>共替換 {sum(summary.replacements.values())} 個欄位：{html.escape(str(summary.replacements))}</div>"
-        error_html = f"<p class='error'>{html.escape(error)}</p>" if error else ""
-        # The anonymizer deliberately exports a UTF-8 plain-text file for every
-        # input format (PDF, DOCX, TXT, or pasted text).  Make that contract
-        # explicit in the result panel so users do not mistake the download for
-        # a PDF/DOCX conversion.
-        download_html = (
-            "<div class='download-box'><strong>匯出格式：TXT（UTF-8 純文字）</strong>"
-            f"<br><a href='/download/{html.escape(download)}'>下載去識別化 TXT：{html.escape(filename)}</a></div>"
-            if download else ""
-        )
-        document = f"""<!doctype html><html lang='zh-Hant'><meta charset='utf-8'><title>履歷去識別化</title>
-<style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:35px auto;padding:0 20px;color:#234}}h1{{color:#17685e}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}textarea{{width:100%;height:360px;padding:12px;box-sizing:border-box;border:1px solid #bdd4ce;border-radius:8px}}button{{margin-top:12px;padding:11px 20px;background:#087f70;color:white;border:0;border-radius:7px;cursor:pointer}}.summary{{margin:14px 0;padding:12px;background:#eaf7f2;border-radius:7px}}.download-box{{margin:14px 0;padding:12px;background:#eef8f5;border:1px solid #c4e2da;border-radius:7px}}.download-box a{{color:#087f70;font-weight:700}}.error{{color:#a33}}small{{color:#607a73}}@media(max-width:800px){{.grid{{grid-template-columns:1fr}}}}</style>
-<h1>履歷去識別化</h1><small>獨立 Python 工具，不連接 TalentHub 後台</small>{error_html}<form method='post' enctype='multipart/form-data'><div class='grid'><label>原始履歷<br><input type='file' name='file' accept='.pdf,.docx,.txt,.text,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain'><small>支援 PDF、DOCX、TXT；掃描型 PDF 請先使用核准的本機 OCR</small><textarea name='text' placeholder='請貼上履歷文字'>{html.escape(source)}</textarea></label><label>去識別化結果<br><textarea readonly>{html.escape(result)}</textarea></label></div><button type='submit'>開始去識別化</button></form>{summary_html}</html>"""
-        document = document.replace("</textarea></label></div>", "</textarea></label>" + download_html + "</div>")
+            summary_html = f"<section class='result-summary'><div class='stat'><small>原始字數</small><strong>{summary.input_characters:,}</strong></div><div class='stat'><small>處理後字數</small><strong>{summary.output_characters:,}</strong></div><div class='stat accent'><small>已替換欄位</small><strong>{total}</strong></div><div class='replacement-list'><h3>替換明細</h3><ul>{rows}</ul></div></section>"
+        error_html = f"<div class='alert'><strong>無法安全處理這份檔案</strong><p>{html.escape(error)}</p><ol><li>掃描 PDF 請先用公司核准的本機 OCR 轉成可搜尋 PDF。</li><li>確認文字可以反白複製，或改上傳 DOCX／TXT。</li><li>也可以直接貼上人工確認過的履歷文字。</li></ol></div>" if error else ""
+        download_html = f"<div class='download-box'><div><strong>處理完成，可下載去識別化檔案</strong><small>統一輸出為 UTF-8 純文字 TXT，方便人工覆核。</small></div><a class='download-link' href='/download/{html.escape(download)}'>下載 {html.escape(filename)}</a></div>" if download else ""
+        document = f"""<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>履歷去識別化｜TalentHub 工具</title><style>
+:root{{--ink:#173b3a;--muted:#64817d;--teal:#087f70;--line:#d7e8e4;--soft:#eff8f5;--gold:#d89b28}}*{{box-sizing:border-box}}body{{margin:0;background:#f6faf9;color:var(--ink);font-family:Arial,'Microsoft JhengHei',sans-serif}}.shell{{max-width:1240px;margin:0 auto;padding:34px 26px 56px}}header{{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}}h1{{font-size:32px;margin:0 0 8px;color:#086b62;letter-spacing:.04em}}.subtitle,.hint{{color:var(--muted);font-size:13px}}.badge{{padding:8px 12px;border-radius:999px;background:#e4f3ef;color:var(--teal);font-size:13px;font-weight:700}}.notice{{margin:16px 0;padding:13px 16px;border:1px solid #f1dcad;border-left:4px solid var(--gold);border-radius:9px;background:#fffaf0;color:#6e5625;font-size:13px;line-height:1.6}}.alert{{margin:16px 0;padding:16px 18px;border:1px solid #efb8b1;border-left:4px solid #c9574e;border-radius:9px;background:#fff3f1;color:#7e302a;line-height:1.6}}.alert p{{margin:6px 0}}.alert ol{{margin:8px 0 0 20px;padding:0}}form{{margin-top:20px}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:20px}}.panel{{background:white;border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 5px 18px rgba(20,80,70,.05)}}.panel-head{{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}}label,.panel-title{{font-weight:700;font-size:15px}}input[type=file]{{width:100%;padding:10px;border:1px dashed #a7cbc2;border-radius:8px;background:#fbfefd;margin:8px 0 10px}}textarea{{width:100%;height:330px;resize:vertical;padding:14px;border:1px solid #c4ddd8;border-radius:9px;font:14px/1.65 Consolas,'Microsoft JhengHei',monospace;color:#203d3a;background:#fcfefe}}textarea:focus{{outline:2px solid #a7ded4;border-color:var(--teal)}}.actions{{display:flex;gap:10px;align-items:center;margin-top:16px}}button,.secondary{{border:0;border-radius:8px;padding:12px 20px;background:var(--teal);color:white;font-weight:700;cursor:pointer;text-decoration:none;font-size:14px}}.secondary{{background:white;color:var(--teal);border:1px solid #abd1c9}}.result-summary{{display:grid;grid-template-columns:repeat(3,1fr) 2fr;gap:10px;align-items:stretch;margin-top:20px}}.stat,.replacement-list{{background:white;border:1px solid var(--line);border-radius:12px;padding:14px}}.stat small{{display:block;color:var(--muted);font-size:12px;margin-bottom:8px}}.stat strong{{font-size:25px;color:var(--teal)}}.stat.accent{{background:#e8f6f1}}.replacement-list h3{{font-size:14px;margin:0 0 8px}}.replacement-list ul{{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:5px 16px;font-size:13px}}.replacement-list li{{display:flex;justify-content:space-between;border-bottom:1px solid #edf4f2;padding:3px 0}}.replacement-list b{{color:var(--teal)}}.download-box{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-top:16px;padding:15px 18px;background:#eaf7f3;border:1px solid #bfe0d8;border-radius:11px}}.download-box small{{display:block;color:var(--muted);font-weight:400;margin-top:4px}}.download-link{{padding:10px 14px;border-radius:8px;background:var(--teal);color:white;font-weight:700;text-decoration:none;white-space:nowrap}}footer{{margin-top:24px;color:var(--muted);font-size:12px;text-align:center}}@media(max-width:850px){{.shell{{padding:24px 14px}}header{{display:block}}.grid,.result-summary{{grid-template-columns:1fr}}.download-box{{display:block}}.download-link{{display:inline-block;margin-top:12px}}}}
+</style></head><body><main class='shell'><header><div><h1>履歷去識別化</h1><div class='subtitle'>獨立 Python 工具 · 不連接 TalentHub 後台 · 僅在本機處理</div></div><span class='badge'>安全工作區</span></header><div class='notice'>支援 PDF、DOCX、TXT 與直接貼上的純文字。掃描 PDF 若沒有可搜尋文字，系統會停止處理並告訴你原因，不會冒險產出未完整遮蔽的結果。</div>{error_html}<form method='post' enctype='multipart/form-data'><div class='grid'><section class='panel'><div class='panel-head'><label>原始履歷</label><span class='hint'>可上傳檔案或貼上文字</span></div><input type='file' name='file' accept='.pdf,.docx,.txt,.text,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain'><div class='hint'>PDF 請確認文字可以反白複製；掃描檔請先使用公司核准的本機 OCR。</div><textarea name='text' placeholder='請貼上履歷文字'>{html.escape(source)}</textarea></section><section class='panel'><div class='panel-head'><span class='panel-title'>去識別化結果</span><span class='hint'>可供人工覆核</span></div><textarea readonly placeholder='處理後結果會顯示在這裡'>{html.escape(result)}</textarea>{download_html}</section></div><div class='actions'><button type='submit'>開始去識別化</button><a class='secondary' href='/?reset=1'>重新開始</a></div></form>{summary_html}<footer>請在匯入人才庫前再次人工確認姓名、地址、電話、Email 與身分證等個資是否已完整遮蔽。</footer></main></body></html>"""
+        if filename.casefold().endswith(".docx"):
+            document = document.replace("TXT", "DOCX")
         return document.encode("utf-8")
 
     def _send_page(self, status_code: int, body: bytes) -> None:
@@ -267,7 +314,8 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             filename, payload = item
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            content_type = DOCX_MIME if filename.casefold().endswith(".docx") else "text/plain; charset=utf-8"
+            self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
             self.send_header("Content-Length", str(len(payload)))
@@ -285,7 +333,11 @@ class WebHandler(BaseHTTPRequestHandler):
         item = self._get_result(token)
         if item:
             filename, payload = item
-            self._send_page(200, self._page(result=payload.decode("utf-8"), download=token, filename=filename))
+            if filename.casefold().endswith(".docx"):
+                display_result = extract_docx(payload)
+            else:
+                display_result = payload.decode("utf-8")
+            self._send_page(200, self._page(result=display_result, download=token, filename=filename))
         else:
             self._send_page(200, self._page())
 
@@ -298,19 +350,23 @@ class WebHandler(BaseHTTPRequestHandler):
             content_type = self.headers.get("Content-Type", "")
             source = ""
             original_name = ""
+            original_suffix = ".txt"
             if content_type.startswith("multipart/form-data"):
                 form = cgi.FieldStorage(fp=io.BytesIO(raw), headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type})
                 source = form.getfirst("text", "")
                 upload = form["file"] if "file" in form else (form["pdf"] if "pdf" in form else None)
                 if upload is not None and getattr(upload, "filename", "") and getattr(upload, "file", None):
                     original_name = upload.filename
+                    original_suffix = Path(original_name).suffix.casefold()
                     source = _extract_uploaded(upload.filename, upload.file.read())
             else:
                 source = parse_qs(raw.decode("utf-8"), keep_blank_values=True).get("text", [""])[0]
             result, summary = anonymize(source)
             token = secrets.token_urlsafe(18)
-            filename = self._filename(original_name)
-            self._store_result(token, filename, result.encode("utf-8"))
+            output_suffix = ".docx" if original_suffix == ".docx" else ".txt"
+            filename = self._filename(original_name, output_suffix)
+            payload = render_docx(result) if output_suffix == ".docx" else result.encode("utf-8")
+            self._store_result(token, filename, payload)
             self.send_response(303)
             self.send_header("Location", f"/?token={token}")
             self.end_headers()
