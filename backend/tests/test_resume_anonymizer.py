@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from pypdf import PdfWriter
+from docx import Document
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "resume_anonymizer.py"
@@ -88,3 +89,37 @@ def test_web_page_escapes_resume_and_error_content() -> None:
     assert "<script>" not in page
     assert "&lt;/textarea&gt;&lt;script&gt;" in page
     assert "&lt;b&gt;[NAME]&lt;/b&gt;" in page
+
+
+def test_docx_input_extracts_paragraphs_and_table_cells() -> None:
+    document = Document()
+    document.add_paragraph("姓名 王小名")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Email"
+    table.cell(0, 1).text = "person@example.com"
+    output = io.BytesIO()
+    document.save(output)
+
+    text = resume_anonymizer.extract_docx(output.getvalue())
+    anonymized, summary = resume_anonymizer.anonymize(text)
+    assert "姓名 [NAME]" in anonymized
+    assert "[EMAIL]" in anonymized
+    assert summary.replacements["name_label"] == 1
+
+
+def test_text_input_accepts_utf8_and_rejects_unknown_suffix() -> None:
+    class TextPath:
+        suffix = ".txt"
+
+        @staticmethod
+        def read_bytes() -> bytes:
+            return "姓名 王小名\n電話 0912-345-678".encode("utf-8")
+
+    assert "姓名 王小名" in resume_anonymizer.read_resume_input(TextPath())
+
+    class UnknownPath:
+        suffix = ".rtf"
+
+    unknown = UnknownPath()
+    with pytest.raises(ValueError, match="不支援的檔案格式"):
+        resume_anonymizer.read_resume_input(unknown)
