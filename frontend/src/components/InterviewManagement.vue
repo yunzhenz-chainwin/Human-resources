@@ -40,8 +40,9 @@ const recordEditorOpen = ref(false)
 const questionSuggestions = ref<InterviewQuestionSuggestions | null>(null)
 const questionLoading = ref(false)
 const cardInterviewLoading = ref(false)
-const questionPlanGenerating = ref<Record<number, boolean>>({})
+const questionPlanGenerating = ref<Record<string, boolean>>({})
 const cardInterviewErrors = ref<Record<number, string>>({})
+const cardQuestionErrors = ref<Record<string, string>>({})
 const recordsByApplication = ref<Record<number, InterviewRecordDto[]>>({})
 const plansByApplicationStage = ref<Record<string, InterviewQuestionPlan>>({})
 const inlineStageByApplication = reactive<Record<number, InterviewStage>>({})
@@ -101,6 +102,11 @@ function stageData(application: ApplicationDto, stage: InterviewStage): Intervie
 function canEditStage(stage: InterviewStage) {
   const role = authSession.state.user?.role
   return role === 'admin' || (stage === 'hr' ? role === 'hr' : role === 'manager')
+}
+
+function canGenerateQuestionStage(stage: InterviewStage) {
+  const role = authSession.state.user?.role
+  return stage === 'hr' ? role === 'hr' : role === 'manager'
 }
 
 function firstScheduledAt(application: ApplicationDto) {
@@ -266,23 +272,19 @@ async function loadCardInterviewData(items: ApplicationDto[]) {
     recordsByApplication.value = {}
     plansByApplicationStage.value = {}
     cardInterviewErrors.value = {}
+    cardQuestionErrors.value = {}
     return
   }
   cardInterviewLoading.value = true
   const nextRecords: Record<number, InterviewRecordDto[]> = {}
   const nextPlans: Record<string, InterviewQuestionPlan> = {}
   const nextErrors: Record<number, string> = {}
-
-  let hrTemplate: InterviewQuestionPlan | null = null
-  try {
-    hrTemplate = (await hrApi.interviewQuestionPlan(items[0].id, 'hr')).data
-  } catch {
-    // Each card remains usable even if the preview endpoint is temporarily unavailable.
-  }
+  const nextQuestionErrors: Record<string, string> = {}
 
   await Promise.all(items.map(async application => {
-    const [recordResult, managerPlanResult] = await Promise.allSettled([
+    const [recordResult, hrPlanResult, managerPlanResult] = await Promise.allSettled([
       hrApi.interviewRecords(application.id),
+      hrApi.interviewQuestionPlan(application.id, 'hr'),
       hrApi.interviewQuestionPlan(application.id, 'manager'),
     ])
     if (recordResult.status === 'fulfilled') {
@@ -293,18 +295,16 @@ async function loadCardInterviewData(items: ApplicationDto[]) {
         ? recordResult.reason.message
         : '無法載入面試進度'
     }
-    if (managerPlanResult.status === 'fulfilled') {
-      nextPlans[planKey(application.id, 'manager')] = managerPlanResult.value.data
-    } else if (!nextErrors[application.id]) {
-      nextErrors[application.id] = managerPlanResult.reason instanceof Error
-        ? managerPlanResult.reason.message
-        : '無法載入主管題目'
-    }
-    if (hrTemplate) {
-      nextPlans[planKey(application.id, 'hr')] = {
-        ...hrTemplate,
-        application_id: application.id,
-        job_title: application.requisition.title,
+    for (const [stage, result] of [
+      ['hr', hrPlanResult],
+      ['manager', managerPlanResult],
+    ] as const) {
+      if (result.status === 'fulfilled') {
+        nextPlans[planKey(application.id, stage)] = result.value.data
+      } else {
+        nextQuestionErrors[planKey(application.id, stage)] = result.reason instanceof Error
+          ? result.reason.message
+          : `無法載入${stage === 'hr' ? 'HR' : '主管'}題目`
       }
     }
   }))
@@ -312,6 +312,7 @@ async function loadCardInterviewData(items: ApplicationDto[]) {
   recordsByApplication.value = nextRecords
   plansByApplicationStage.value = nextPlans
   cardInterviewErrors.value = nextErrors
+  cardQuestionErrors.value = nextQuestionErrors
   cardInterviewLoading.value = false
 }
 
@@ -324,25 +325,45 @@ async function ensureQuestionPlan(application: ApplicationDto, stage: InterviewS
   return plan
 }
 
-async function generateManagerQuestionPlan(application: ApplicationDto, force = false) {
-  questionPlanGenerating.value = { ...questionPlanGenerating.value, [application.id]: true }
-  cardInterviewErrors.value = { ...cardInterviewErrors.value, [application.id]: '' }
+async function generateQuestionPlan(
+  application: ApplicationDto,
+  stage: InterviewStage,
+  force = false,
+) {
+  const key = planKey(application.id, stage)
+  if (!canGenerateQuestionStage(stage)) {
+    cardQuestionErrors.value = {
+      ...cardQuestionErrors.value,
+      [key]: stage === 'hr' ? '只有 HR 能產生 HR 題目' : '只有部門主管能產生主管題目',
+    }
+    return
+  }
+  questionPlanGenerating.value = { ...questionPlanGenerating.value, [key]: true }
+  cardQuestionErrors.value = { ...cardQuestionErrors.value, [key]: '' }
+  if (workspaceApplication.value?.id === application.id && workspaceQuestionStage.value === stage) {
+    workspaceError.value = ''
+  }
   try {
-    const plan = (await hrApi.generateInterviewQuestionPlan(application.id, force)).data
+    const plan = (await hrApi.generateInterviewQuestionPlan(application.id, stage, force)).data
     plansByApplicationStage.value = {
       ...plansByApplicationStage.value,
-      [planKey(application.id, 'manager')]: plan,
+      [key]: plan,
     }
+    const stageLabel = stage === 'hr' ? 'HR' : '主管'
     notice.value = plan.generation_mode === 'gemini'
-      ? '主管客製題目已由 Gemini 產生並保存。'
-      : '主管客製題目已使用規則式備援產生並保存。'
+      ? `${stageLabel} 五題已由 Gemini 產生並保存。`
+      : `${stageLabel} 五題已使用規則式備援產生並保存。`
   } catch (caught) {
-    cardInterviewErrors.value = {
-      ...cardInterviewErrors.value,
-      [application.id]: caught instanceof Error ? caught.message : '無法產生主管客製題目',
+    const message = caught instanceof Error ? caught.message : '無法產生面試題目'
+    cardQuestionErrors.value = {
+      ...cardQuestionErrors.value,
+      [key]: message,
+    }
+    if (workspaceApplication.value?.id === application.id && workspaceQuestionStage.value === stage) {
+      workspaceError.value = message
     }
   } finally {
-    questionPlanGenerating.value = { ...questionPlanGenerating.value, [application.id]: false }
+    questionPlanGenerating.value = { ...questionPlanGenerating.value, [key]: false }
   }
 }
 
@@ -363,6 +384,71 @@ function planQuestions(applicationId: number, stage: InterviewStage): InterviewR
   }))
 }
 
+const workspaceQuestionStage = computed<InterviewStage>(() => (
+  recordEditorOpen.value ? recordForm.stage : defaultRecordStage()
+))
+
+const workspaceQuestionPlan = computed(() => {
+  const application = workspaceApplication.value
+  return application
+    ? plansByApplicationStage.value[planKey(application.id, workspaceQuestionStage.value)] || null
+    : null
+})
+
+async function generateWorkspaceQuestionPlan() {
+  const application = workspaceApplication.value
+  if (!application) return
+  const stage = workspaceQuestionStage.value
+  const currentPlan = workspaceQuestionPlan.value
+  const originalPlanQuestions = currentPlan?.questions.map(question => question.question) || []
+  await generateQuestionPlan(
+    application,
+    stage,
+    Boolean(currentPlan?.questions.length && currentPlan.context_matches),
+  )
+
+  const key = planKey(application.id, stage)
+  if (cardQuestionErrors.value[key]) return
+
+  const generatedPlan = plansByApplicationStage.value[key]
+  if (!generatedPlan?.questions.length) return
+
+  const hasQuestionProgress = recordForm.questions.some(question => (
+    Boolean(question.response?.trim())
+    || Boolean(question.notes?.trim())
+    || (question.rating !== null && question.rating !== undefined)
+  ))
+  const hasQuestionEdits = recordForm.questions.length !== originalPlanQuestions.length
+    || recordForm.questions.some((question, index) => question.question !== originalPlanQuestions[index])
+  const hasDraftProgress = hasQuestionProgress
+    || hasQuestionEdits
+    || Boolean(recordForm.summary?.trim())
+    || Boolean(recordForm.private_notes?.trim())
+    || Boolean(recordForm.recommendation)
+    || (recordForm.overall_rating !== null && recordForm.overall_rating !== undefined)
+  if (recordEditorOpen.value && recordForm.stage === stage && canEditStage(stage)) {
+    if (!editingRecord.value && !hasDraftProgress) {
+      recordForm.questions = planQuestions(application.id, stage).slice(0, 5)
+    } else {
+      recordNotice.value = editingRecord.value
+        ? '新版題目已建立；這筆既有面試紀錄仍保留原題。新建紀錄時才會帶入新版。'
+        : '新版題目已建立；目前尚未儲存的內容已保留，未自動替換題目。'
+    }
+  }
+}
+
+function tokenSummary(plan: InterviewQuestionPlan | null | undefined) {
+  if (!plan?.total_tokens) return ''
+  const format = new Intl.NumberFormat('zh-TW').format
+  return `本次 ${format(plan.total_tokens)} tokens（輸入 ${format(plan.input_tokens)}、輸出 ${format(plan.output_tokens)}、思考 ${format(plan.thinking_tokens)}）`
+}
+
+function generationModeLabel(plan: InterviewQuestionPlan | null | undefined) {
+  if (plan?.generation_mode === 'gemini') return '產生方式：Gemini 動態生成'
+  if (plan?.generation_mode === 'rules') return '產生方式：規則式備援'
+  return '尚未產生'
+}
+
 function mergeQuestionsToFive(
   existing: InterviewRecordQuestion[],
   planned: InterviewRecordQuestion[],
@@ -377,7 +463,21 @@ function mergeQuestionsToFive(
 
 function fiveQuestionSet(applicationId: number, stage: InterviewStage) {
   const recordQuestions = latestStageRecord(applicationId, stage)?.questions || []
-  return mergeQuestionsToFive(recordQuestions, planQuestions(applicationId, stage))
+  const plannedQuestions = planQuestions(applicationId, stage).slice(0, 5)
+  if (!plannedQuestions.length) return recordQuestions.slice(0, 5).map(question => ({ ...question }))
+
+  return plannedQuestions.map(question => {
+    const recordedQuestion = recordQuestions.find(item => (
+      item.question.trim() === question.question.trim()
+    ))
+    if (!recordedQuestion) return question
+    return {
+      ...question,
+      response: recordedQuestion.response,
+      rating: recordedQuestion.rating,
+      notes: recordedQuestion.notes,
+    }
+  })
 }
 
 function inlineStage(applicationId: number): InterviewStage {
@@ -389,8 +489,7 @@ function questionIsAnswered(question: InterviewRecordQuestion) {
 }
 
 function stageAnsweredCount(applicationId: number, stage: InterviewStage) {
-  const record = latestStageRecord(applicationId, stage)
-  return record ? record.questions.slice(0, 5).filter(questionIsAnswered).length : 0
+  return fiveQuestionSet(applicationId, stage).filter(questionIsAnswered).length
 }
 
 function questionAnswer(question: InterviewRecordQuestion) {
@@ -805,7 +904,7 @@ onMounted(load)
         </div>
         <section class="question-progress" :data-testid="`interview-question-progress-${application.id}`">
           <header>
-            <div class="question-progress-title"><small>SHARED Q&amp;A · INDEPENDENT REVIEW</small><strong>雙方面試問答與進度</strong><span>問答內容即時共享；HR 採固定評估框架，部門主管依職位與候選人履歷產生客製題。評分與觀察維持獨立，雙方提交後才公開。</span></div>
+            <div class="question-progress-title"><small>INTERVIEW QUESTIONS</small><strong>面試問題</strong><span>切換 HR 或主管，即可查看目前五題、回答與完成進度。</span></div>
             <div class="question-stage-tabs" role="tablist" aria-label="切換 HR 或主管題目">
               <button
                 v-for="stage in interviewStages"
@@ -817,7 +916,7 @@ onMounted(load)
                 :data-testid="`question-stage-${application.id}-${stage.key}`"
                 @click="inlineStageByApplication[application.id] = stage.key"
               >
-                <small>{{ stage.owner }}</small><strong>{{ stageAnsweredCount(application.id, stage.key) }}/5</strong><span>{{ stage.key === 'hr' ? '固定標準題' : '職位 × 履歷客製題' }}</span><em>{{ stageSubmissionLabel(application.id, stage.key) }}</em>
+                <small>{{ stage.owner }}</small><strong>{{ stageAnsweredCount(application.id, stage.key) }}/5</strong><span>{{ stageSubmissionLabel(application.id, stage.key) }}</span>
               </button>
             </div>
           </header>
@@ -825,32 +924,43 @@ onMounted(load)
           <div v-if="cardInterviewLoading && !fiveQuestionSet(application.id, inlineStage(application.id)).length" class="question-progress-loading"><span class="spinner"></span>正在準備 5 題…</div>
           <template v-else>
             <div class="question-plan-meta">
-              <span :data-stage="inlineStage(application.id)">{{ inlineStage(application.id) === 'hr' ? 'HR｜固定評估框架' : '主管｜職位 × 個人履歷客製' }}</span>
-              <small class="question-plan-note">{{ inlineStage(application.id) === 'hr' ? '所有候選人相同評估面向，確保可比較' : '題目會讀取職務需求、技能、年資與專案經歷' }}</small>
-              <b v-if="inlineStage(application.id) === 'manager'" class="generation-mode-badge" :data-mode="plansByApplicationStage[planKey(application.id, 'manager')]?.generation_mode || 'rules'">
-                {{ plansByApplicationStage[planKey(application.id, 'manager')]?.generation_mode === 'gemini' ? 'Gemini 動態生成' : plansByApplicationStage[planKey(application.id, 'manager')]?.generation_mode === 'rules' ? '規則式備援' : '尚未產生' }}
-              </b>
+              <span :data-stage="inlineStage(application.id)">{{ inlineStage(application.id) === 'hr' ? 'HR 五題' : '主管五題' }}</span>
               <button
-                v-if="inlineStage(application.id) === 'manager'"
+                v-if="canGenerateQuestionStage(inlineStage(application.id))"
                 type="button"
                 class="button generation-button"
-                :disabled="questionPlanGenerating[application.id]"
-                @click="generateManagerQuestionPlan(application, Boolean(plansByApplicationStage[planKey(application.id, 'manager')]?.questions.length && plansByApplicationStage[planKey(application.id, 'manager')]?.context_matches))"
-              >{{ questionPlanGenerating[application.id] ? '產生中…' : plansByApplicationStage[planKey(application.id, 'manager')]?.questions.length ? '重新產生' : '產生客製題目' }}</button>
+                :disabled="questionPlanGenerating[planKey(application.id, inlineStage(application.id))]"
+                @click="generateQuestionPlan(application, inlineStage(application.id), Boolean(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions.length && plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.context_matches))"
+              >{{ questionPlanGenerating[planKey(application.id, inlineStage(application.id))] ? '產生中…' : plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.version ? '不喜歡？重新產生' : '使用 Gemini 產生 5 題' }}</button>
               <b class="evaluation-release-chip" :class="{ unlocked: peerEvaluationsReleased(application.id) }">{{ peerEvaluationsReleased(application.id) ? '雙方已提交 · 評分已公開' : '評分鎖定至雙方提交' }}</b>
-              <small v-if="latestStageRecord(application.id, inlineStage(application.id))">最後更新：{{ formatDate(latestStageRecord(application.id, inlineStage(application.id))?.updated_at || null) }}</small>
+              <small v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.version">題目版本 v{{ plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.version }} · {{ formatDate(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.generated_at || null) }}</small>
+              <small v-else-if="latestStageRecord(application.id, inlineStage(application.id))">紀錄更新：{{ formatDate(latestStageRecord(application.id, inlineStage(application.id))?.updated_at || null) }}</small>
               <small v-else>尚未開始填答</small>
             </div>
+            <details v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]" class="question-plan-details">
+              <summary>查看產生資訊</summary>
+              <span>
+                {{ generationModeLabel(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]) }}<template v-if="tokenSummary(plansByApplicationStage[planKey(application.id, inlineStage(application.id))])"> · {{ tokenSummary(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]) }}</template>
+              </span>
+            </details>
             <div
               v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.generation_warning"
               class="question-generation-warning"
               role="alert"
             >
-              <strong>⚠ Gemini API 額度提醒</strong>
+              <strong>⚠ Gemini 生成提醒</strong>
               <span>{{ plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.generation_warning }}</span>
             </div>
             <div
-              v-if="inlineStage(application.id) === 'manager' && plansByApplicationStage[planKey(application.id, 'manager')]?.questions.length && plansByApplicationStage[planKey(application.id, 'manager')]?.context_matches === false"
+              v-if="cardQuestionErrors[planKey(application.id, inlineStage(application.id))]"
+              class="question-generation-error"
+              role="alert"
+            >
+              <strong>無法更新題目</strong>
+              <span>{{ cardQuestionErrors[planKey(application.id, inlineStage(application.id))] }}；目前題目仍保留。</span>
+            </div>
+            <div
+              v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions.length && plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.context_matches === false"
               class="question-context-warning"
               role="status"
             >履歷或職缺內容已更新，現有題目仍可查看；按下「重新產生」才會呼叫 AI 並建立新版本。</div>
@@ -863,29 +973,32 @@ onMounted(load)
               >
                 <span>{{ questionIsAnswered(question) ? '✓' : index + 1 }}</span>
                 <div>
-                  <small v-if="question.source">設計依據｜{{ question.source }}</small>
                   <strong>{{ question.question }}</strong>
-                  <div v-if="question.purpose || question.follow_up" class="question-insights">
-                    <p v-if="question.purpose"><b>評估目的</b><span>{{ question.purpose }}</span></p>
-                    <p v-if="question.follow_up"><b>追問方向</b><span>{{ question.follow_up }}</span></p>
-                  </div>
+                  <details v-if="question.purpose || question.follow_up || question.source" class="question-prompt-details">
+                    <summary>需要時查看面試提示</summary>
+                    <div>
+                      <p v-if="question.purpose"><b>評估重點</b><span>{{ question.purpose }}</span></p>
+                      <p v-if="question.follow_up"><b>建議追問</b><span>{{ question.follow_up }}</span></p>
+                      <p v-if="question.source"><b>題目依據</b><span>{{ question.source }}</span></p>
+                    </div>
+                  </details>
                   <p :class="{ empty: !questionIsAnswered(question) }">{{ questionAnswer(question) }}</p>
                   <em v-if="question.rating">{{ question.rating }} / 5 分</em>
                   <em v-else-if="latestStageRecord(application.id, inlineStage(application.id)) && !latestStageRecord(application.id, inlineStage(application.id))?.evaluation_revealed" class="evaluation-locked">🔒 評分與觀察於雙方提交後顯示</em>
                 </div>
               </li>
             </ol>
-            <div v-else class="question-preview-error">{{ cardInterviewErrors[application.id] || (inlineStage(application.id) === 'manager' ? '尚未產生主管客製題目，請按上方「產生客製題目」。' : '目前無法載入題目，仍可開啟完整紀錄畫面。') }}</div>
+            <div v-else class="question-preview-error">{{ cardQuestionErrors[planKey(application.id, inlineStage(application.id))] || cardInterviewErrors[application.id] || '尚未產生五題，請由這一階段的面試官按上方按鈕。' }}</div>
 
             <footer>
               <span v-if="latestStageRecord(application.id, inlineStage(application.id))">
-                {{ inlineStage(application.id) === 'hr' ? 'HR' : '主管' }} 紀錄者：{{ latestStageRecord(application.id, inlineStage(application.id))?.interviewer_name }}。雙方可同步查看問答；只有紀錄者能修改自己的內容。
+                {{ inlineStage(application.id) === 'hr' ? 'HR' : '主管' }} 紀錄者：{{ latestStageRecord(application.id, inlineStage(application.id))?.interviewer_name }}。雙方可查看問答，由同階段授權人員維護。
               </span>
-              <span v-else>{{ inlineStage(application.id) === 'hr' ? '由 HR 維護固定題答案' : '由部門主管維護客製題答案' }}</span>
+              <span v-else>{{ inlineStage(application.id) === 'hr' ? '由 HR 維護五題與答案' : '由部門主管維護五題與答案' }}</span>
               <button
                 class="button primary"
                 type="button"
-                :disabled="(inlineStage(application.id) === 'manager' && !fiveQuestionSet(application.id, 'manager').length) || (!canEditStage(inlineStage(application.id)) && !latestStageRecord(application.id, inlineStage(application.id)))"
+                :disabled="!fiveQuestionSet(application.id, inlineStage(application.id)).length || (!canEditStage(inlineStage(application.id)) && !latestStageRecord(application.id, inlineStage(application.id)))"
                 :data-testid="`interview-workspace-${application.id}`"
                 @click="openInlineRecord(application)"
               >{{ inlineActionLabel(application.id, inlineStage(application.id)) }}</button>
@@ -907,11 +1020,14 @@ onMounted(load)
       <div v-if="workspaceError" class="workspace-message error" role="alert"><strong>!</strong><span>{{ workspaceError }}</span><button aria-label="關閉錯誤訊息" @click="workspaceError = ''">×</button></div>
       <div v-if="recordNotice" class="workspace-message success" role="status"><strong>✓</strong><span>{{ recordNotice }}</span><button aria-label="關閉成功訊息" @click="recordNotice = ''">×</button></div>
 
-      <section class="interview-sharing-policy" aria-label="面試資料共享規則">
-        <div><span>✓</span><p><strong>問答即時共享</strong><small>HR 與主管都能看到彼此問了什麼、候選人如何回答及目前進度。</small></p></div>
-        <div><span>🔒</span><p><strong>評分獨立作答</strong><small>單題評分、觀察、總結與錄用建議，等雙方都提交後才互相公開。</small></p></div>
-        <div v-if="authSession.state.user?.role === 'hr' || authSession.state.user?.role === 'admin'"><span>HR</span><p><strong>HR 私密備註</strong><small>敏感資訊只提供 HR／管理員查看，部門主管無法取得。</small></p></div>
-      </section>
+      <details class="interview-sharing-policy">
+        <summary><strong>問答共享、評分分開</strong><span>查看資料規則</span></summary>
+        <div class="sharing-policy-details">
+          <p><b>問答</b><span>HR 與主管都能查看問題、回答與目前進度。</span></p>
+          <p><b>評分</b><span>雙方都提交後，才互相公開評分、觀察與錄用建議。</span></p>
+          <p v-if="authSession.state.user?.role === 'hr' || authSession.state.user?.role === 'admin'"><b>HR 備註</b><span>敏感資訊只提供 HR／管理員查看。</span></p>
+        </div>
+      </details>
 
       <div class="record-workspace-body">
         <aside class="record-history">
@@ -929,6 +1045,32 @@ onMounted(load)
         </aside>
 
         <main class="record-workspace-main">
+          <section class="workspace-gemini-panel" data-testid="workspace-gemini-generator">
+            <div class="workspace-gemini-copy">
+              <small>{{ workspaceQuestionStage === 'hr' ? 'HR 五題' : '主管五題' }}</small>
+              <strong>目前面試題目</strong>
+              <span>重新產生只會建立新版題庫；既有面試紀錄與正在填寫的內容都會保留。</span>
+            </div>
+            <div class="workspace-gemini-actions">
+              <button
+                v-if="canGenerateQuestionStage(workspaceQuestionStage)"
+                class="button primary"
+                type="button"
+                :disabled="questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)]"
+                @click="generateWorkspaceQuestionPlan"
+              >{{ questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)] ? 'Gemini 產生中…' : workspaceQuestionPlan?.version ? '不喜歡？重新產生 5 題' : '使用 Gemini 產生 5 題' }}</button>
+            </div>
+            <p v-if="workspaceQuestionPlan?.generation_warning" class="workspace-gemini-warning">⚠ {{ workspaceQuestionPlan.generation_warning }}</p>
+            <details v-if="workspaceQuestionPlan" class="workspace-generation-details">
+              <summary>查看產生資訊</summary>
+              <p>{{ generationModeLabel(workspaceQuestionPlan) }}<template v-if="tokenSummary(workspaceQuestionPlan)"> · {{ tokenSummary(workspaceQuestionPlan) }}</template></p>
+            </details>
+            <details v-if="workspaceQuestionPlan?.questions.length" class="workspace-gemini-preview">
+              <summary>預覽目前 {{ workspaceQuestionPlan.questions.length }} 題</summary>
+              <ol><li v-for="question in workspaceQuestionPlan.questions" :key="question.question">{{ question.question }}</li></ol>
+            </details>
+          </section>
+
           <details class="question-builder">
             <summary><div><small>OPTIONAL QUESTION TOOL</small><h3>需要加問時，再展開題目工具</h3><p>面試紀錄已帶入所屬階段題目；只有需要額外的人格特質或履歷追問時才使用這裡。</p></div><span>展開工具 · 已選 {{ selectedTraits.length }}/10</span></summary>
             <div class="question-builder-body">
@@ -1055,6 +1197,7 @@ onMounted(load)
 /* 面試工作區採漸進式揭露：面試中先記回答，其餘欄位需要時才展開。 */
 .question-builder{padding:0}.question-builder>summary,.record-basic-details>summary,.question-evaluation-details>summary,.record-conclusion-details>summary,.hr-private-notes>summary{list-style:none;cursor:pointer}.question-builder>summary::-webkit-details-marker,.record-basic-details>summary::-webkit-details-marker,.question-evaluation-details>summary::-webkit-details-marker,.record-conclusion-details>summary::-webkit-details-marker,.hr-private-notes>summary::-webkit-details-marker{display:none}
 .question-builder>summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 17px}.question-builder>summary>div{min-width:0}.question-builder>summary small{color:#ae761d;font-size:10px;font-weight:800;letter-spacing:1px}.question-builder>summary h3{margin:4px 0;font-size:15px}.question-builder>summary p{margin:0;color:#6b7e79;font-size:11px;line-height:1.55}.question-builder>summary>span{flex:0 0 auto;padding:7px 10px;border-radius:99px;background:#eef5f3;color:#386b63;font-size:11px;font-weight:700}.question-builder[open]>summary{border-bottom:1px solid #e1ebe7}.question-builder-body{padding:0 16px 16px}
+.workspace-gemini-panel{position:sticky;z-index:4;top:0;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;margin-bottom:14px;padding:14px 16px;border:2px solid #2a8b7d;border-radius:12px;background:#fff;box-shadow:0 8px 22px rgba(24,91,80,.13)}.workspace-gemini-copy small,.workspace-gemini-copy strong,.workspace-gemini-copy span{display:block}.workspace-gemini-copy small{color:#a76f16;font-size:10px;font-weight:800;letter-spacing:1px}.workspace-gemini-copy strong{margin-top:3px;color:#244f48;font-size:15px}.workspace-gemini-copy span{margin-top:4px;color:#657a74;font-size:11px;line-height:1.55}.workspace-gemini-actions{display:flex;align-items:center;gap:9px}.workspace-gemini-actions .button{min-height:42px;padding:9px 14px;font-size:13px;white-space:nowrap}.workspace-gemini-panel>.workspace-gemini-warning,.workspace-gemini-panel>.workspace-token-usage,.workspace-gemini-preview{grid-column:1/-1}.workspace-token-usage{margin:0;padding:7px 10px;border-radius:7px;background:#eef7f4;color:#326d63;font-size:11px;line-height:1.5}.workspace-gemini-warning{margin:0;padding:8px 10px;border-radius:7px;background:#fff5df;color:#805b19;font-size:11px;line-height:1.5}.workspace-gemini-preview{border-top:1px solid #e0e9e6;padding-top:9px}.workspace-gemini-preview>summary{cursor:pointer;color:#2f7166;font-size:11px;font-weight:700}.workspace-gemini-preview ol{display:grid;gap:6px;margin:9px 0 0;padding-left:22px}.workspace-gemini-preview li{color:#496860;font-size:11px;line-height:1.55}.generation-mode-badge[data-mode="none"]{background:#eef2f1;color:#657873}.question-token-usage{color:#2f766a!important;font-weight:700}
 .record-editor>header{align-items:center;padding:16px 18px}.record-editor>header>div:first-child{min-width:0;flex:1}.record-editor>header h3{font-size:16px}.record-editor>header p{font-size:11px;line-height:1.55}.record-answer-progress{flex:0 0 auto;display:grid;justify-items:center;min-width:70px;padding:8px 12px;border-radius:9px;background:#eaf6f2;color:#236b60}.record-answer-progress strong{font-size:18px}.record-answer-progress span{font-size:10px}
 .record-basic-details{margin:13px 16px 4px;border:1px solid #dce7e3;border-radius:9px;background:#fbfdfc}.record-basic-details>summary,.record-conclusion-details>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px}.record-basic-details>summary strong,.record-basic-details>summary span,.record-conclusion-details>summary strong,.record-conclusion-details>summary span{display:block}.record-basic-details>summary strong,.record-conclusion-details>summary strong{color:#315d55;font-size:12px}.record-basic-details>summary span,.record-conclusion-details>summary span{margin-top:3px;color:#748681;font-size:10px}.record-basic-details>summary em,.record-conclusion-details>summary em{color:#287469;font-size:10px;font-style:normal;font-weight:700}.record-basic-details[open]>summary,.record-conclusion-details[open]>summary{border-bottom:1px solid #e1e9e6}.record-basic-details .record-meta-grid{padding:13px 14px}.record-meta-grid label,.record-conclusion label,.record-answer-grid label,.record-question-card>header label,.record-quick-answer label{font-size:11px}.record-meta-grid input,.record-meta-grid select,.record-conclusion select,.record-conclusion textarea,.record-answer-grid input,.record-answer-grid select,.record-answer-grid textarea,.record-question-card>header input,.record-quick-answer textarea{font-size:13px}
 .record-question-section{padding-top:5px}.record-question-section>header strong{font-size:14px}.record-question-section>header span{font-size:10px}.record-question-card{margin-bottom:12px}.record-question-card>header{align-items:center;padding:12px}.record-question-card>header>span{width:32px;height:32px;font-size:12px}.record-question-card>header input{font-weight:650}.record-question-context{display:block;padding:0;background:#f5f9f7}.record-question-context>summary{padding:8px 12px;color:#3b7168;font-size:10px;font-weight:700}.record-question-context>summary:before,.question-evaluation-details>summary:before,.record-basic-details>summary:before,.record-conclusion-details>summary:before,.question-builder>summary:before{content:'＋';margin-right:7px}.record-question-context[open]>summary:before,.question-evaluation-details[open]>summary:before,.record-basic-details[open]>summary:before,.record-conclusion-details[open]>summary:before,.question-builder[open]>summary:before{content:'－'}.record-question-context>div{display:grid;gap:5px;padding:0 12px 10px}.record-question-context small{font-size:10px}
@@ -1062,5 +1205,32 @@ onMounted(load)
 .question-evaluation-details{margin:0 12px 12px;border:1px solid #e1e9e6;border-radius:8px;background:#fff}.question-evaluation-details>summary{display:flex;align-items:center;padding:9px 11px;color:#60756f;font-size:10px}.question-evaluation-details>summary span{flex:1}.question-evaluation-details>summary em{color:#2e756a;font-size:10px;font-style:normal}.question-evaluation-details[open]>summary{border-bottom:1px solid #e4ebe9}.evaluation-lock-inline.compact{margin:0 12px 12px;padding:8px 10px}.evaluation-lock-inline.compact strong{font-size:10px}.evaluation-lock-inline.compact small{font-size:9px}
 .record-conclusion-details{margin:0 16px 14px;border:1px solid #d8e5e1;border-radius:9px;background:#fbfdfc}.record-conclusion-details .record-conclusion{grid-template-columns:1fr 1fr;padding:13px 14px}.record-conclusion .wide{grid-column:1/-1}.record-conclusion-details textarea{width:100%}.record-conclusion-locked{margin-top:10px}
 .hr-private-notes{padding:0}.hr-private-notes>summary{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;padding:12px 13px}.hr-private-notes>summary>span{padding:5px 7px;border-radius:6px;background:#6f5799;color:#fff;font-size:8px;font-weight:800;letter-spacing:.7px}.hr-private-notes>summary strong,.hr-private-notes>summary small{display:block}.hr-private-notes>summary strong{color:#54416f;font-size:11px}.hr-private-notes>summary small{margin-top:2px;color:#81728f;font-size:9px}.hr-private-notes>summary em{color:#705c86;font-size:9px;font-style:normal}.hr-private-notes>label{margin:0 13px 13px}.record-editor>footer{position:sticky;z-index:2;bottom:0;padding:13px 16px;box-shadow:0 -5px 14px rgba(26,71,63,.06)}.record-editor>footer>span{font-size:10px}.record-editor>footer .button{min-height:39px;font-size:12px}
-@media(max-width:680px){.question-builder>summary,.record-editor>header{align-items:flex-start;flex-direction:column}.record-answer-progress{justify-items:start}.record-basic-details{margin-inline:10px}.record-conclusion-details,.hr-private-notes{margin-inline:10px}.record-conclusion-details .record-conclusion{grid-template-columns:1fr}.record-conclusion .wide{grid-column:auto}.record-editor>footer{position:static}}
+@media(max-width:680px){.workspace-gemini-panel{position:static;grid-template-columns:1fr}.workspace-gemini-actions{align-items:stretch;flex-direction:column}.workspace-gemini-actions .button{width:100%}.question-builder>summary,.record-editor>header{align-items:flex-start;flex-direction:column}.record-answer-progress{justify-items:start}.record-basic-details{margin-inline:10px}.record-conclusion-details,.hr-private-notes{margin-inline:10px}.record-conclusion-details .record-conclusion{grid-template-columns:1fr}.record-conclusion .wide{grid-column:auto}.record-editor>footer{position:static}}
+
+/* 面試題主畫面只保留題目與回答；產生資訊和面試提示按需展開。 */
+.question-plan-meta{flex-wrap:wrap}
+.question-plan-meta>small{margin-left:auto}
+.question-plan-details{margin:0 16px 10px;border:1px solid #e0e9e6;border-radius:8px;background:#fafcfb}
+.question-plan-details>summary{cursor:pointer;padding:8px 10px;color:#3a7067;font-size:11px;font-weight:700}
+.question-plan-details>span{display:block;padding:0 10px 9px;color:#647b75;font-size:11px;line-height:1.55}
+.question-generation-error{display:flex;align-items:flex-start;gap:8px;margin:0 12px 10px;padding:9px 10px;border:1px solid #e5b9b5;border-radius:8px;background:#fff1f0;color:#8c403b;font-size:12px;line-height:1.55}
+.question-generation-error strong{white-space:nowrap}
+.question-prompt-details{margin-top:9px;border:1px solid #e0e9e6;border-radius:7px;background:#fafcfb}
+.question-prompt-details>summary{cursor:pointer;padding:8px 10px;color:#3a7067;font-size:11px;font-weight:700}
+.question-prompt-details>div{display:grid;gap:7px;padding:0 10px 10px}
+.question-preview-list .question-prompt-details p{display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;margin:0;padding:0;border:0;background:transparent;color:#627873;font-size:11px;line-height:1.55}
+.question-prompt-details b{color:#397268}
+.workspace-gemini-panel{position:static;border:1px solid #cfe0db;box-shadow:none}
+.workspace-gemini-panel>.workspace-gemini-warning,.workspace-generation-details,.workspace-gemini-preview{grid-column:1/-1}
+.workspace-generation-details{border-top:1px solid #e0e9e6;padding-top:9px}
+.workspace-generation-details>summary{cursor:pointer;color:#2f7166;font-size:11px;font-weight:700}
+.workspace-generation-details p{margin:7px 0 0;color:#5d756f;font-size:11px}
+.interview-sharing-policy{display:block;grid-template-columns:none;padding:0}
+.interview-sharing-policy>summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:9px 14px;color:#315a53;font-size:11px}
+.interview-sharing-policy>summary span{color:#39776d;font-size:10px}
+.interview-sharing-policy>.sharing-policy-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0 14px 10px;border:0;border-radius:0;background:transparent}
+.sharing-policy-details p{display:grid;gap:3px;padding:8px 10px;border:1px solid #dbe7e3;border-radius:8px;background:#fff}
+.sharing-policy-details b{color:#2e6d62;font-size:10px}
+.sharing-policy-details span{color:#71817d;font-size:9px;line-height:1.45}
+@media(max-width:900px){.interview-sharing-policy>.sharing-policy-details{grid-template-columns:1fr}}
 </style>

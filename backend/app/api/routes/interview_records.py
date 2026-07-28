@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
 from app.core.config import get_settings
+from app.db.session import get_db
 from app.dependencies.auth import enforce_department_scope, require_recruiting_user
 from app.models import (
     Candidate,
@@ -31,6 +31,9 @@ from app.schemas.interviews import (
     InterviewStage,
 )
 from app.services.interview_questions import (
+    HR_QUESTION_PROMPT_VERSION,
+    MANAGER_QUESTION_PROMPT_VERSION,
+    gemini_hr_question_plan,
     gemini_manager_question_plan,
     personalized_trait_interview_questions,
     standard_hr_question_plan,
@@ -67,6 +70,21 @@ def _enforce_stage_write(user: User, stage: InterviewStage) -> None:
             status_code=403,
             detail="Only the department manager can record the manager interview",
         )
+
+
+def _enforce_question_plan_generate(user: User, stage: InterviewStage) -> None:
+    if stage == "hr" and user.role == "hr":
+        return
+    if stage == "manager" and user.role == "manager":
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Only HR can generate HR interview questions"
+            if stage == "hr"
+            else "Only the department manager can generate manager interview questions"
+        ),
+    )
 
 
 def _enforce_private_notes_write(
@@ -168,6 +186,7 @@ def _candidate_resume_context(
     experiences = [
         {
             "title": item.title,
+            "years": item.years,
             "description": item.description,
         }
         for item in db.scalars(
@@ -184,16 +203,28 @@ def _question_context_hash(
     requisition: JobRequisition,
     skills: list[str],
     experiences: list[dict[str, object | None]],
+    stage: InterviewStage,
 ) -> str:
     """Hash only job-relevant, de-identified context used to generate questions."""
     payload = {
+        "prompt_version": (
+            HR_QUESTION_PROMPT_VERSION
+            if stage == "hr"
+            else MANAGER_QUESTION_PROMPT_VERSION
+        ),
+        "stage": stage,
         "job_title": requisition.title,
+        "job_description": requisition.jd,
         "required_skills": requisition.skills or [],
         "current_title": candidate.current_title,
         "total_years": candidate.total_years,
         "candidate_skills": skills,
         "experiences": [
-            {"title": item.get("title"), "description": item.get("description")}
+            {
+                "title": item.get("title"),
+                "years": item.get("years"),
+                "description": item.get("description"),
+            }
             for item in experiences
         ],
     }
@@ -201,10 +232,17 @@ def _question_context_hash(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _latest_question_plan(db: Session, application_id: int) -> InterviewQuestionPlan | None:
+def _latest_question_plan(
+    db: Session,
+    application_id: int,
+    stage: InterviewStage,
+) -> InterviewQuestionPlan | None:
     return db.scalar(
         select(InterviewQuestionPlan)
-        .where(InterviewQuestionPlan.application_id == application_id)
+        .where(
+            InterviewQuestionPlan.application_id == application_id,
+            InterviewQuestionPlan.stage == stage,
+        )
         .order_by(InterviewQuestionPlan.version.desc(), InterviewQuestionPlan.id.desc())
     )
 
@@ -214,11 +252,28 @@ def _stored_plan_response(
     requisition: JobRequisition,
     plan: InterviewQuestionPlan | None,
     context_hash: str,
+    stage: InterviewStage,
 ) -> InterviewQuestionPlanResponse:
     if plan is None:
+        if stage == "hr":
+            return InterviewQuestionPlanResponse(
+                application_id=application.id,
+                stage="hr",
+                job_title=requisition.title,
+                questions=standard_hr_question_plan(),
+                personalization_basis=["HR 固定五個評估面向；可由 HR 重新產生不同問法"],
+                guidance=(
+                    "HR 題目維持相同評估面向與難度；若問法不適合，可按下重新產生。"
+                ),
+                generation_mode="rules",
+                provider="internal",
+                model_name="HR 標準題庫",
+                version=None,
+                context_matches=True,
+            )
         return InterviewQuestionPlanResponse(
             application_id=application.id,
-            stage="manager",
+            stage=stage,
             job_title=requisition.title,
             questions=[],
             personalization_basis=[],
@@ -232,11 +287,14 @@ def _stored_plan_response(
         )
     return InterviewQuestionPlanResponse(
         application_id=application.id,
-        stage="manager",
+        stage=stage,
         job_title=requisition.title,
         questions=plan.questions,
         personalization_basis=plan.personalization_basis,
-        guidance="已載入保存的主管客製題目；重新整理不會再次呼叫 AI。",
+        guidance=(
+            f"已載入保存的{'HR' if stage == 'hr' else '主管'}五題；"
+            "重新整理不會再次呼叫 AI，不滿意可建立新版本。"
+        ),
         generation_mode=plan.generation_mode,
         generation_warning=plan.generation_warning,
         provider=plan.provider,
@@ -244,6 +302,10 @@ def _stored_plan_response(
         version=plan.version,
         generated_at=plan.created_at,
         context_matches=plan.context_hash == context_hash,
+        input_tokens=plan.input_tokens,
+        output_tokens=plan.output_tokens,
+        thinking_tokens=plan.thinking_tokens,
+        total_tokens=plan.total_tokens,
     )
 
 
@@ -262,31 +324,14 @@ def interview_question_plan(
     if candidate is None or candidate.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    if stage == "hr":
-        questions = standard_hr_question_plan()
-        basis = ["全公司 HR 固定題庫（不因職位或個人背景改變）"]
-        guidance = "HR 請依固定五題完成一致的初談紀錄，避免使用與工作無關的個人條件評估。"
-        return InterviewQuestionPlanResponse(
-            application_id=application.id,
-            stage=stage,
-            job_title=requisition.title,
-            questions=questions,
-            personalization_basis=basis,
-            guidance=guidance,
-            generation_mode="rules",
-            provider="internal",
-            model_name="HR 標準題庫",
-            version=1,
-            context_matches=True,
-        )
-
     skills, experiences = _candidate_resume_context(db, candidate.id)
-    context_hash = _question_context_hash(candidate, requisition, skills, experiences)
+    context_hash = _question_context_hash(candidate, requisition, skills, experiences, stage)
     return _stored_plan_response(
         application,
         requisition,
-        _latest_question_plan(db, application.id),
+        _latest_question_plan(db, application.id, stage),
         context_hash,
+        stage,
     )
 
 
@@ -296,6 +341,7 @@ def interview_question_plan(
 )
 def generate_interview_question_plan(
     application_id: int,
+    stage: InterviewStage = Query(default="manager"),
     force: bool = Query(default=False),
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
@@ -304,29 +350,50 @@ def generate_interview_question_plan(
     candidate = db.get(Candidate, application.candidate_id)
     if candidate is None or candidate.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    _enforce_question_plan_generate(user, stage)
 
     skills, experiences = _candidate_resume_context(db, candidate.id)
-    context_hash = _question_context_hash(candidate, requisition, skills, experiences)
-    latest = _latest_question_plan(db, application.id)
+    context_hash = _question_context_hash(candidate, requisition, skills, experiences, stage)
+    latest = _latest_question_plan(db, application.id, stage)
     if latest is not None and latest.context_hash == context_hash and not force:
-        return _stored_plan_response(application, requisition, latest, context_hash)
+        return _stored_plan_response(application, requisition, latest, context_hash, stage)
 
-    questions, basis, generation_mode = gemini_manager_question_plan(
+    generator = gemini_hr_question_plan if stage == "hr" else gemini_manager_question_plan
+    questions, basis, generation_mode, token_usage = generator(
         job_title=requisition.title,
+        job_description=requisition.jd,
         current_title=candidate.current_title,
         total_years=candidate.total_years,
         candidate_skills=skills,
         required_skills=requisition.skills or [],
         experiences=experiences,
+        bypass_cache=force,
     )
-    generation_warning = (
-        "Gemini API 已達目前使用上限，暫時改用規則式備援題目；請檢查 Google AI Studio 配額或計費設定。"
-        if "GEMINI_QUOTA_EXCEEDED" in basis else None
+    warning_by_marker = {
+        "GEMINI_QUOTA_EXCEEDED": (
+            "Gemini API 已達目前使用上限，暫時改用規則式備援題目；"
+            "請檢查 Google AI Studio 配額或計費設定。"
+        ),
+        "GEMINI_MODEL_UNAVAILABLE": (
+            "目前設定的 Gemini 模型無法使用，已改用規則式備援題目；"
+            "請由系統管理員確認 GEMINI_MODEL 設定。"
+        ),
+        "GEMINI_INVALID_RESPONSE": (
+            "Gemini 有回覆，但未產生完整的五個客製化評估面向，已改用規則式備援題目。"
+        ),
+        "GEMINI_SERVICE_UNAVAILABLE": (
+            "Gemini 目前無法連線或服務異常，已改用規則式備援題目，稍後可重新產生。"
+        ),
+    }
+    generation_warning = next(
+        (warning for marker, warning in warning_by_marker.items() if marker in basis),
+        None,
     )
-    visible_basis = [item for item in basis if item != "GEMINI_QUOTA_EXCEEDED"]
+    visible_basis = [item for item in basis if item not in warning_by_marker]
     settings = get_settings()
     plan = InterviewQuestionPlan(
         application_id=application.id,
+        stage=stage,
         context_hash=context_hash,
         version=(latest.version + 1) if latest else 1,
         questions=[item.model_dump() for item in questions],
@@ -335,6 +402,10 @@ def generate_interview_question_plan(
         provider="gemini" if generation_mode == "gemini" else "rules",
         model_name=settings.gemini_model if settings.gemini_enabled else None,
         generation_warning=generation_warning,
+        input_tokens=token_usage.input_tokens,
+        output_tokens=token_usage.output_tokens,
+        thinking_tokens=token_usage.thinking_tokens,
+        total_tokens=token_usage.total_tokens,
         generated_by_id=user.id,
         generated_by_name=_actor_name(user),
     )
@@ -349,14 +420,16 @@ def generate_interview_question_plan(
         requisition.department_id,
         details={
             "application_id": application.id,
+            "stage": stage,
             "version": plan.version,
             "generation_mode": generation_mode,
             "force": force,
+            "total_tokens": token_usage.total_tokens,
         },
     )
     db.commit()
     db.refresh(plan)
-    return _stored_plan_response(application, requisition, plan, context_hash)
+    return _stored_plan_response(application, requisition, plan, context_hash, stage)
 
 
 @router.post(

@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -12,6 +13,100 @@ from app.schemas.interview_questions import (
     SuggestedInterviewQuestion,
     TraitQuestionSuggestion,
 )
+
+MANAGER_QUESTION_PROMPT_VERSION = "manager-personalized-v2-2026-07"
+HR_QUESTION_PROMPT_VERSION = "hr-structured-v1-2026-07"
+MANAGER_QUESTION_CATEGORIES = (
+    "經驗轉移",
+    "專業能力",
+    "成果深挖",
+    "能力風險",
+    "到職情境",
+)
+HR_QUESTION_CATEGORIES = (
+    "求職動機",
+    "職務期待",
+    "合作溝通",
+    "壓力應對",
+    "到職條件",
+)
+
+_GEMINI_CATEGORY_ALIASES = {
+    "職務轉移": "經驗轉移",
+    "核心技能": "專業能力",
+    "核心專業": "專業能力",
+    "實際成果": "成果深挖",
+    "成果驗證": "成果深挖",
+    "問題解決/風險": "能力風險",
+    "問題解決與風險": "能力風險",
+    "風險補強": "能力風險",
+    "情境判斷": "到職情境",
+    "職務理解": "職務期待",
+    "任用條件": "到職條件",
+}
+
+def _gemini_question_response_schema(categories: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "minItems": 5,
+        "maxItems": 5,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "propertyOrdering": ["category", "question", "purpose", "follow_up", "source"],
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": list(categories),
+                    "description": "固定評估面向；五個面向各使用一次。",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "引用履歷或職缺依據的主要面試題。",
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": "面試官要驗證的能力、行為或風險。",
+                },
+                "follow_up": {
+                    "type": "string",
+                    "description": "要求補充行動、取捨或可驗證結果的追問。",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "題目依據的履歷事實與職缺需求；不可捏造。",
+                },
+            },
+            "required": ["category", "question", "purpose", "follow_up", "source"],
+        },
+    }
+
+
+@dataclass(frozen=True)
+class GeminiTokenUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thinking_tokens: int = 0
+    total_tokens: int = 0
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "GeminiTokenUsage":
+        if not isinstance(payload, dict):
+            return cls()
+        usage = payload.get("usageMetadata")
+        if not isinstance(usage, dict):
+            return cls()
+
+        def token_count(key: str) -> int:
+            value = usage.get(key, 0)
+            return value if isinstance(value, int) and value >= 0 else 0
+
+        return cls(
+            input_tokens=token_count("promptTokenCount"),
+            output_tokens=token_count("candidatesTokenCount"),
+            thinking_tokens=token_count("thoughtsTokenCount"),
+            total_tokens=token_count("totalTokenCount"),
+        )
 
 HR_STANDARD_QUESTIONS = (
     (
@@ -227,63 +322,200 @@ def _redact_resume_context(value: object | None, limit: int = 500) -> str | None
     if not clean:
         return None
     clean = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[EMAIL]", clean)
-    clean = re.sub(r"(?<!\d)(?:\+?886[-\s]?)?0?9\d{2}[-\s]?\d{3}[-\s]?\d{3}(?!\d)", "[PHONE]", clean)
+    clean = re.sub(
+        r"(?<!\d)(?:\+?886[-\s]?)?0?9\d{2}[-\s]?\d{3}[-\s]?\d{3}(?!\d)",
+        "[PHONE]",
+        clean,
+    )
     return clean
 
 
 def _gemini_prompt(
     *,
     job_title: str,
+    job_description: str | None,
     current_title: str | None,
     total_years: object | None,
     candidate_skills: list[str],
     required_skills: list[str],
     experiences: list[dict[str, object | None]],
 ) -> str:
+    job = {
+        "title": _redact_resume_context(job_title, 120),
+        "description": _redact_resume_context(job_description, 1600),
+        "required_skills": [
+            value
+            for item in required_skills[:12]
+            if (value := _redact_resume_context(item, 80))
+        ],
+    }
     resume = {
         "current_title": _redact_resume_context(current_title, 100),
         "total_years": _redact_resume_context(total_years, 30),
-        "skills": [_redact_resume_context(item, 80) for item in candidate_skills[:12]],
+        "skills": [
+            value
+            for item in candidate_skills[:12]
+            if (value := _redact_resume_context(item, 80))
+        ],
         "experiences": [
             {
                 "title": _redact_resume_context(item.get("title"), 100),
+                "years": _redact_resume_context(item.get("years"), 30),
                 "description": _redact_resume_context(item.get("description"), 500),
             }
             for item in experiences[:6]
         ],
     }
     return (
-        "你是資深面試設計師。請根據職位與候選人去識別化履歷，設計部門主管面試題。\n"
-        "固定評估框架（每個面向一題）：職務轉移、核心技能、實際成果、問題解決/風險、情境判斷。\n"
-        "題目必須以履歷中的具體經歷為依據；不同履歷應產生不同情境，但評估面向與難度保持一致。\n"
-        "不得詢問年齡、性別、婚姻、宗教、健康、住址、國籍等非工作必要資訊。\n"
-        "只輸出 JSON 陣列，不要 Markdown。每個元素包含 category、question、purpose、follow_up、source。\n"
-        f"應徵職位：{_redact_resume_context(job_title, 120)}\n"
-        f"職務必要技能：{json.dumps(required_skills[:12], ensure_ascii=False)}\n"
+        "你是資深招募主管與結構化面試設計師。請設計 5 題繁體中文的部門主管客製化面試題。\n"
+        "目標不是重述履歷，而是用履歷中的具體證據，驗證候選人能否勝任這個職缺。\n\n"
+        "固定評估面向與順序（每個面向恰好一題）：\n"
+        "1. 經驗轉移：把目前職稱或一段經歷連到新職務，確認可轉移能力與責任邊界。\n"
+        "2. 專業能力：從職缺必要技能選一項，結合履歷中的實際使用情境，追問技術或專業判斷與取捨。\n"
+        "3. 成果深挖：鎖定一項履歷成果或專案，釐清本人責任、具體行動、量化或可驗證結果。\n"
+        "4. 能力風險：找出職缺需求與履歷未明確證明之處，以中性方式確認經驗落差、學習與風險控管。\n"
+        "5. 到職情境：根據職務內容設計真實工作情境，確認前 90 天優先順序、協作與交付判斷。\n\n"
+        "客製化與公平性規則：\n"
+        "- 履歷資料足夠時，至少 4 題要直接點出一個真實職稱、技能、專案或成果；"
+        "不同履歷不得只替換人名。\n"
+        "- 每題只問一個核心能力，主要問題保持清楚可口述；細節放在 follow_up。\n"
+        "- source 必須同時說明『履歷依據』與『職缺依據』；履歷沒有的內容要明寫『履歷未載明』。\n"
+        "- 不得捏造公司、專案、數字、工具或責任；不得把推測寫成事實。\n"
+        "- 不得詢問年齡、性別、婚姻、家庭、宗教、健康、住址、國籍等非工作必要資訊。\n"
+        "- purpose 要寫出面試官應觀察的能力證據，follow_up 要追問行動、取捨、數據或驗證方式。\n"
+        "- 只輸出符合指定 schema 的 JSON，不要 Markdown 或額外說明。\n\n"
+        f"職缺資料：{json.dumps(job, ensure_ascii=False)}\n"
         f"候選人履歷摘要：{json.dumps(resume, ensure_ascii=False)}"
     )
 
 
-def _parse_gemini_questions(payload: dict[str, Any]) -> list[InterviewQuestionPlanItem] | None:
+def _gemini_hr_prompt(
+    *,
+    job_title: str,
+    job_description: str | None,
+    current_title: str | None,
+    total_years: object | None,
+    candidate_skills: list[str],
+    required_skills: list[str],
+    experiences: list[dict[str, object | None]],
+) -> str:
+    job = {
+        "title": _redact_resume_context(job_title, 120),
+        "description": _redact_resume_context(job_description, 1600),
+        "required_skills": [
+            value
+            for item in required_skills[:12]
+            if (value := _redact_resume_context(item, 80))
+        ],
+    }
+    resume = {
+        "current_title": _redact_resume_context(current_title, 100),
+        "total_years": _redact_resume_context(total_years, 30),
+        "skills": [
+            value
+            for item in candidate_skills[:12]
+            if (value := _redact_resume_context(item, 80))
+        ],
+        "experiences": [
+            {
+                "title": _redact_resume_context(item.get("title"), 100),
+                "years": _redact_resume_context(item.get("years"), 30),
+                "description": _redact_resume_context(item.get("description"), 500),
+            }
+            for item in experiences[:6]
+        ],
+    }
+    return (
+        "你是資深 HR 與結構化面試設計師。請設計 5 題繁體中文的 HR 初談題目。\n"
+        "五題要維持所有候選人可比較的相同評估面向，但可引用去識別化履歷與職缺內容，"
+        "讓問題具體而不是制式套話。\n\n"
+        "固定評估面向與順序（每個面向恰好一題）：\n"
+        "1. 求職動機：連結目前職涯與這次職務選擇，確認動機及職涯方向。\n"
+        "2. 職務期待：確認候選人對職務內容的理解、期待與可能落差。\n"
+        "3. 合作溝通：從履歷經歷設計行為題，確認傾聽、分歧處理與共同交付。\n"
+        "4. 壓力應對：從真實工作經歷追問優先排序、求援、復盤與責任感。\n"
+        "5. 到職條件：只確認到職時間、工作地點或型態等工作必要條件。\n\n"
+        "公平與安全規則：\n"
+        "- 五個評估面向與難度必須固定；客製化只能用來提供具體情境，不能改變錄用標準。\n"
+        "- 履歷資料足夠時，前四題至少三題引用真實職稱、技能、專案或工作成果。\n"
+        "- 不得捏造履歷沒有的公司、專案、數字、工具或責任。\n"
+        "- 不得詢問年齡、性別、婚姻、家庭、宗教、健康、住址、國籍等資訊。\n"
+        "- 到職條件不得追問家庭安排、健康狀況或其他非工作必要的個人原因。\n"
+        "- source 必須分別標示履歷依據與職缺依據；沒有履歷依據時明寫『履歷未載明』。\n"
+        "- purpose 寫出觀察證據，follow_up 只追問行動、取捨或可驗證結果。\n"
+        "- 只輸出符合指定 schema 的 JSON，不要 Markdown 或額外說明。\n\n"
+        f"職缺資料：{json.dumps(job, ensure_ascii=False)}\n"
+        f"候選人履歷摘要：{json.dumps(resume, ensure_ascii=False)}"
+    )
+
+
+def _parse_gemini_questions(
+    payload: dict[str, Any],
+    expected_categories: tuple[str, ...] = MANAGER_QUESTION_CATEGORIES,
+) -> list[InterviewQuestionPlanItem] | None:
     try:
-        candidates = payload["candidates"]
-        text = candidates[0]["content"]["parts"][0]["text"]
-        data = json.loads(text.strip().removeprefix("```json").removesuffix("```").strip())
+        parts = payload["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+    for part in parts:
+        text = part.get("text") if isinstance(part, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            continue
+        clean_text = text.strip()
+        clean_text = re.sub(r"^```(?:json)?\s*", "", clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(r"\s*```$", "", clean_text).strip()
+        try:
+            data = json.loads(clean_text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            data = data.get("questions")
         if not isinstance(data, list) or len(data) != 5:
-            return None
-        result: list[InterviewQuestionPlanItem] = []
+            continue
+
+        normalized: dict[str, dict[str, Any]] = {}
         for item in data:
             if not isinstance(item, dict):
-                return None
-            values = {key: _clean_context(item.get(key), 1000 if key == "question" else 400) for key in (
-                "category", "question", "purpose", "follow_up", "source"
-            )}
-            if not all(values.values()):
-                return None
-            result.append(InterviewQuestionPlanItem(**values, source=f"Gemini 動態題目｜{values['source']}"))
+                normalized = {}
+                break
+            raw_category = _clean_context(item.get("category"), 40)
+            category = _GEMINI_CATEGORY_ALIASES.get(raw_category or "", raw_category)
+            if category not in expected_categories or category in normalized:
+                normalized = {}
+                break
+            normalized[category] = item
+        if set(normalized) != set(expected_categories):
+            continue
+
+        result: list[InterviewQuestionPlanItem] = []
+        seen_questions: set[str] = set()
+        try:
+            for category in expected_categories:
+                item = normalized[category]
+                values = {
+                    key: _clean_context(item.get(key), 1000 if key == "question" else 500)
+                    for key in ("question", "purpose", "follow_up", "source")
+                }
+                if not all(values.values()):
+                    raise ValueError("Gemini question fields must not be blank")
+                question_key = values["question"].casefold()
+                if question_key in seen_questions:
+                    raise ValueError("Gemini questions must be unique")
+                seen_questions.add(question_key)
+                result.append(
+                    InterviewQuestionPlanItem(
+                        category=category,
+                        question=values["question"],
+                        purpose=values["purpose"],
+                        follow_up=values["follow_up"],
+                        source=f"Gemini 客製題目｜{values['source']}",
+                    )
+                )
+        except (KeyError, TypeError, ValueError):
+            continue
         return result
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-        return None
+    return None
 
 
 _GEMINI_PLAN_CACHE: dict[str, tuple[float, list[InterviewQuestionPlanItem]]] = {}
@@ -293,32 +525,142 @@ _GEMINI_QUOTA_COOLDOWN_SECONDS = 15 * 60
 
 
 def _gemini_plan_cache_key(
-    *, model: str, job_title: str, current_title: str | None, total_years: object | None,
-    candidate_skills: list[str], required_skills: list[str], experiences: list[dict[str, object | None]],
+    *,
+    model: str,
+    stage: str,
+    prompt_version: str,
+    prompt: str,
 ) -> str:
-    payload = json.dumps({
-        "model": model, "job_title": job_title, "current_title": current_title,
-        "total_years": total_years, "candidate_skills": candidate_skills,
-        "required_skills": required_skills, "experiences": experiences,
-    }, ensure_ascii=False, sort_keys=True, default=str)
+    payload = json.dumps(
+        {
+            "model": model,
+            "stage": stage,
+            "prompt_version": prompt_version,
+            "prompt": prompt,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _generate_gemini_question_plan(
+    *,
+    stage: str,
+    prompt_version: str,
+    expected_categories: tuple[str, ...],
+    prompt: str,
+    fallback: list[InterviewQuestionPlanItem],
+    basis: list[str],
+    bypass_cache: bool,
+) -> tuple[list[InterviewQuestionPlanItem], list[str], str, GeminiTokenUsage]:
+    global _GEMINI_QUOTA_COOLDOWN_UNTIL
+    settings = get_settings()
+    if not settings.gemini_enabled or not settings.gemini_api_key:
+        return fallback, basis, "rules", GeminiTokenUsage()
+    if time.time() < _GEMINI_QUOTA_COOLDOWN_UNTIL:
+        return (
+            fallback,
+            basis + ["GEMINI_QUOTA_EXCEEDED"],
+            "rules",
+            GeminiTokenUsage(),
+        )
+    cache_key = _gemini_plan_cache_key(
+        model=settings.gemini_model,
+        stage=stage,
+        prompt_version=prompt_version,
+        prompt=prompt,
+    )
+    cached = _GEMINI_PLAN_CACHE.get(cache_key)
+    if (
+        not bypass_cache
+        and cached
+        and time.time() - cached[0] < _GEMINI_PLAN_CACHE_TTL_SECONDS
+    ):
+        return (
+            list(cached[1]),
+            basis + ["Gemini：使用 24 小時快取，未重複呼叫 API"],
+            "gemini",
+            GeminiTokenUsage(),
+        )
+    if cached:
+        _GEMINI_PLAN_CACHE.pop(cache_key, None)
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{settings.gemini_model}:generateContent"
+    )
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": _gemini_question_response_schema(expected_categories),
+            "maxOutputTokens": settings.gemini_max_output_tokens,
+        },
+    }
+    try:
+        with httpx.Client(timeout=settings.gemini_timeout_seconds) as client:
+            response = client.post(
+                endpoint,
+                json=body,
+                headers={"x-goog-api-key": settings.gemini_api_key},
+            )
+            response.raise_for_status()
+            response_payload = response.json()
+            usage = GeminiTokenUsage.from_payload(response_payload)
+            questions = _parse_gemini_questions(response_payload, expected_categories)
+            if questions:
+                _GEMINI_PLAN_CACHE[cache_key] = (time.time(), list(questions))
+                return (
+                    questions,
+                    basis + ["Gemini：依職缺內容與去識別化履歷客製生成"],
+                    "gemini",
+                    usage,
+                )
+            return fallback, basis + ["GEMINI_INVALID_RESPONSE"], "rules", usage
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            _GEMINI_QUOTA_COOLDOWN_UNTIL = time.time() + _GEMINI_QUOTA_COOLDOWN_SECONDS
+            return (
+                fallback,
+                basis + ["GEMINI_QUOTA_EXCEEDED"],
+                "rules",
+                GeminiTokenUsage(),
+            )
+        if exc.response.status_code in {400, 404}:
+            return (
+                fallback,
+                basis + ["GEMINI_MODEL_UNAVAILABLE"],
+                "rules",
+                GeminiTokenUsage(),
+            )
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError):
+        return (
+            fallback,
+            basis + ["GEMINI_SERVICE_UNAVAILABLE"],
+            "rules",
+            GeminiTokenUsage(),
+        )
+    return (
+        fallback,
+        basis + ["GEMINI_SERVICE_UNAVAILABLE"],
+        "rules",
+        GeminiTokenUsage(),
+    )
 
 
 def gemini_manager_question_plan(
     *,
     job_title: str,
+    job_description: str | None = None,
     current_title: str | None = None,
     total_years: object | None = None,
     candidate_skills: list[str] | None = None,
     required_skills: list[str] | None = None,
     experiences: list[dict[str, object | None]] | None = None,
-) -> tuple[list[InterviewQuestionPlanItem], list[str], str]:
-    """Generate per-candidate manager questions with Gemini, falling back safely.
+    bypass_cache: bool = False,
+) -> tuple[list[InterviewQuestionPlanItem], list[str], str, GeminiTokenUsage]:
+    """Generate five candidate-specific manager questions with a safe fallback."""
 
-    Returns questions, personalization basis and generation mode (``gemini`` or
-    ``rules``). Gemini is opt-in via GEMINI_ENABLED=true and GEMINI_API_KEY.
-    """
-    global _GEMINI_QUOTA_COOLDOWN_UNTIL
     skills = candidate_skills or []
     wanted = required_skills or []
     experience_rows = experiences or []
@@ -330,55 +672,65 @@ def gemini_manager_question_plan(
         required_skills=wanted,
         experiences=experience_rows,
     )
-    settings = get_settings()
-    if not settings.gemini_enabled or not settings.gemini_api_key:
-        return fallback, basis, "rules"
-    if time.time() < _GEMINI_QUOTA_COOLDOWN_UNTIL:
-        return fallback, basis + ["GEMINI_QUOTA_EXCEEDED"], "rules"
-    cache_key = _gemini_plan_cache_key(
-        model=settings.gemini_model,
+    prompt = _gemini_prompt(
         job_title=job_title,
+        job_description=job_description,
         current_title=current_title,
         total_years=total_years,
         candidate_skills=skills,
         required_skills=wanted,
         experiences=experience_rows,
     )
-    cached = _GEMINI_PLAN_CACHE.get(cache_key)
-    if cached and time.time() - cached[0] < _GEMINI_PLAN_CACHE_TTL_SECONDS:
-        return list(cached[1]), basis + ["Gemini：使用 24 小時快取，未重複呼叫 API"], "gemini"
-    if cached:
-        _GEMINI_PLAN_CACHE.pop(cache_key, None)
-    endpoint = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
-        f"?key={settings.gemini_api_key}"
+    return _generate_gemini_question_plan(
+        stage="manager",
+        prompt_version=MANAGER_QUESTION_PROMPT_VERSION,
+        expected_categories=MANAGER_QUESTION_CATEGORIES,
+        prompt=prompt,
+        fallback=fallback,
+        basis=basis,
+        bypass_cache=bypass_cache,
     )
-    body = {
-        "contents": [{"parts": [{"text": _gemini_prompt(
-            job_title=job_title,
-            current_title=current_title,
-            total_years=total_years,
-            candidate_skills=skills,
-            required_skills=wanted,
-            experiences=experience_rows,
-        )}]}],
-        "generationConfig": {"temperature": 0.25, "responseMimeType": "application/json"},
-    }
-    try:
-        with httpx.Client(timeout=settings.gemini_timeout_seconds) as client:
-            response = client.post(endpoint, json=body)
-            response.raise_for_status()
-            questions = _parse_gemini_questions(response.json())
-            if questions:
-                _GEMINI_PLAN_CACHE[cache_key] = (time.time(), list(questions))
-                return questions, basis + ["Gemini：依去識別化履歷與職位動態生成"], "gemini"
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 429:
-            _GEMINI_QUOTA_COOLDOWN_UNTIL = time.time() + _GEMINI_QUOTA_COOLDOWN_SECONDS
-            return fallback, basis + ["GEMINI_QUOTA_EXCEEDED"], "rules"
-    except (httpx.HTTPError, ValueError, json.JSONDecodeError):
-        pass
-    return fallback, basis + ["Gemini：服務不可用，已使用規則式備援"], "rules"
+
+
+def gemini_hr_question_plan(
+    *,
+    job_title: str,
+    job_description: str | None = None,
+    current_title: str | None = None,
+    total_years: object | None = None,
+    candidate_skills: list[str] | None = None,
+    required_skills: list[str] | None = None,
+    experiences: list[dict[str, object | None]] | None = None,
+    bypass_cache: bool = False,
+) -> tuple[list[InterviewQuestionPlanItem], list[str], str, GeminiTokenUsage]:
+    """Generate five fair HR questions while preserving fixed evaluation dimensions."""
+
+    skills = candidate_skills or []
+    wanted = required_skills or []
+    experience_rows = experiences or []
+    fallback = standard_hr_question_plan()
+    basis = [
+        "HR 固定評估面向：求職動機、職務期待、合作溝通、壓力應對、到職條件",
+        f"應徵職位：{_clean_context(job_title, 100) or '此職位'}",
+    ]
+    prompt = _gemini_hr_prompt(
+        job_title=job_title,
+        job_description=job_description,
+        current_title=current_title,
+        total_years=total_years,
+        candidate_skills=skills,
+        required_skills=wanted,
+        experiences=experience_rows,
+    )
+    return _generate_gemini_question_plan(
+        stage="hr",
+        prompt_version=HR_QUESTION_PROMPT_VERSION,
+        expected_categories=HR_QUESTION_CATEGORIES,
+        prompt=prompt,
+        fallback=fallback,
+        basis=basis,
+        bypass_cache=bypass_cache,
+    )
 
 _CATEGORY_KEYWORDS = {
     "conscientiousness": (

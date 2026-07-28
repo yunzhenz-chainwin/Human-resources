@@ -74,11 +74,15 @@ def application_client(
         "bootstrap_admin_username": settings.bootstrap_admin_username,
         "bootstrap_admin_email": settings.bootstrap_admin_email,
         "bootstrap_admin_password": settings.bootstrap_admin_password,
+        "gemini_enabled": settings.gemini_enabled,
+        "gemini_api_key": settings.gemini_api_key,
     }
     settings.auth_secret_key = "application-test-secret-key-with-at-least-32-bytes"
     settings.bootstrap_admin_username = None
     settings.bootstrap_admin_email = None
     settings.bootstrap_admin_password = None
+    settings.gemini_enabled = False
+    settings.gemini_api_key = None
 
     with testing_session() as db:
         engineering = Department(name="Application Engineering")
@@ -1255,7 +1259,7 @@ def test_interview_answers_are_shared_but_peer_evaluations_wait_for_both_submiss
     assert manager_view_after_both_submit["private_notes_visible"] is False
 
 
-def test_hr_plan_is_fixed_and_manager_plan_uses_candidate_background(
+def test_hr_and_manager_have_independent_five_question_versions(
     application_client,
 ) -> None:
     client, testing_session, ids = application_client
@@ -1305,6 +1309,32 @@ def test_hr_plan_is_fixed_and_manager_plan_uses_candidate_background(
     ]
     assert all(item["source"] == "全公司 HR 固定題" for item in engineering_hr.json()["questions"])
 
+    generated_hr = client.post(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan/generate"
+        "?stage=hr",
+        headers=hr_headers,
+    )
+    assert generated_hr.status_code == 200, generated_hr.text
+    hr_body = generated_hr.json()
+    assert hr_body["stage"] == "hr"
+    assert len(hr_body["questions"]) == 5
+    assert hr_body["version"] == 1
+    assert hr_body["total_tokens"] == 0
+    manager_can_view_hr = client.get(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=hr",
+        headers=_headers(client, "engineering-manager"),
+    )
+    assert manager_can_view_hr.status_code == 200
+    assert manager_can_view_hr.json()["questions"] == hr_body["questions"]
+
+    regenerated_hr = client.post(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan/generate"
+        "?stage=hr&force=true",
+        headers=hr_headers,
+    )
+    assert regenerated_hr.status_code == 200
+    assert regenerated_hr.json()["version"] == 2
+
     manager = client.get(
         f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=manager",
         headers=_headers(client, "engineering-manager"),
@@ -1325,12 +1355,19 @@ def test_hr_plan_is_fixed_and_manager_plan_uses_candidate_background(
     assert len(body["questions"]) == 5
     assert body["generation_mode"] == "rules"
     assert body["version"] == 1
+    assert body["total_tokens"] == 0
     assert body["context_matches"] is True
     combined_questions = " ".join(item["question"] for item in body["questions"])
     assert "Application Backend Engineer" in combined_questions
     assert "Python API Developer" in combined_questions
     assert "Python" in combined_questions
     assert any("候選人技能：Python" in item for item in body["personalization_basis"])
+    hr_can_view_manager = client.get(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=manager",
+        headers=hr_headers,
+    )
+    assert hr_can_view_manager.status_code == 200
+    assert hr_can_view_manager.json()["questions"] == body["questions"]
 
     cached = client.get(
         f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=manager",
@@ -1346,6 +1383,27 @@ def test_hr_plan_is_fixed_and_manager_plan_uses_candidate_background(
     )
     assert regenerated.status_code == 200
     assert regenerated.json()["version"] == 2
+    assert client.post(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan/generate"
+        "?stage=hr&force=true",
+        headers=_headers(client, "engineering-manager"),
+    ).status_code == 403
+    assert client.post(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan/generate"
+        "?stage=manager&force=true",
+        headers=hr_headers,
+    ).status_code == 403
+    admin_headers = _headers(client, "admin")
+    assert client.post(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan/generate"
+        "?stage=hr&force=true",
+        headers=admin_headers,
+    ).status_code == 403
+    assert client.post(
+        f"/api/v1/applications/{engineering_application}/interview-question-plan/generate"
+        "?stage=manager&force=true",
+        headers=admin_headers,
+    ).status_code == 403
     assert (
         client.get(
             f"/api/v1/applications/{engineering_application}/interview-question-plan?stage=manager",

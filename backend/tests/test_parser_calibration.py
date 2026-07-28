@@ -140,7 +140,7 @@ def test_ocr_name_without_colon_is_recovered() -> None:
     assert result.payload["name"] == "王小明"
 
 
-def test_talenthub_pdf_metadata_restores_exact_fields() -> None:
+def test_talenthub_pdf_metadata_restores_exact_fields(monkeypatch) -> None:
     expected = {
         "schema": "talenthub.resume.v1",
         "name": "王小明",
@@ -159,9 +159,15 @@ def test_talenthub_pdf_metadata_restores_exact_fields() -> None:
     ).decode("ascii")
     # Sign the payload the way a genuine TalentHub export must: only an HMAC over the
     # base64 body (keyed by auth_secret_key) earns the trusted, no-review fast path.
+    settings = get_settings()
+    monkeypatch.setattr(
+        settings,
+        "auth_secret_key",
+        "parser-calibration-test-secret-at-least-32-bytes",
+    )
     signature = base64.urlsafe_b64encode(
         hmac.new(
-            get_settings().auth_secret_key.encode(), encoded.encode("ascii"), hashlib.sha256
+            settings.auth_secret_key.encode(), encoded.encode("ascii"), hashlib.sha256
         ).digest()
     ).decode("ascii")
     path = Path("storage") / f"metadata-test-{uuid4().hex}.pdf"

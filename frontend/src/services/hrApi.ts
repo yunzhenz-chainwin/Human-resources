@@ -273,6 +273,10 @@ export type InterviewQuestionPlan = {
   version?: number | null
   generated_at?: string | null
   context_matches?: boolean
+  input_tokens: number
+  output_tokens: number
+  thinking_tokens: number
+  total_tokens: number
 }
 
 export type ResumeSource = 'p104' | 'p1111' | 'generic' | 'direct'
@@ -444,8 +448,8 @@ export const hrApi = {
     }),
   interviewQuestionPlan: (applicationId: number, stage: InterviewStage) =>
     apiRequest<InterviewQuestionPlan>(`/applications/${applicationId}/interview-question-plan?stage=${stage}`),
-  generateInterviewQuestionPlan: (applicationId: number, force = false) =>
-    apiRequest<InterviewQuestionPlan>(`/applications/${applicationId}/interview-question-plan/generate?force=${force}`, {
+  generateInterviewQuestionPlan: (applicationId: number, stage: InterviewStage, force = false) =>
+    apiRequest<InterviewQuestionPlan>(`/applications/${applicationId}/interview-question-plan/generate?stage=${stage}&force=${force}`, {
       method: 'POST',
     }),
   interviewRecords: (applicationId: number) =>

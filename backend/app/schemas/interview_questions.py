@@ -70,3 +70,7 @@ class InterviewQuestionPlanResponse(BaseModel):
     version: int | None = None
     generated_at: datetime | None = None
     context_matches: bool = False
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    thinking_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)

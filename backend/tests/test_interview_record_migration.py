@@ -91,6 +91,7 @@ def test_sqlite_interview_record_id_is_generated_after_migration(
             }
             assert {
                 "application_id",
+                "stage",
                 "context_hash",
                 "version",
                 "questions",
@@ -98,9 +99,13 @@ def test_sqlite_interview_record_id_is_generated_after_migration(
                 "generation_mode",
                 "provider",
                 "model_name",
+                "input_tokens",
+                "output_tokens",
+                "thinking_tokens",
+                "total_tokens",
             }.issubset(plan_columns)
             assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-                ("f6a2d4c8b901",)
+                ("a8f4c2d9e710",)
             ]
     finally:
         get_settings.cache_clear()

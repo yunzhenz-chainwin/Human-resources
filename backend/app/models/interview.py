@@ -68,7 +68,7 @@ class InterviewRecord(TimestampMixin, Base):
 
 
 class InterviewQuestionPlan(TimestampMixin, Base):
-    """Versioned manager-question plan generated for one job application."""
+    """Versioned HR or manager question plan generated for one job application."""
 
     __tablename__ = "interview_question_plans"
     __table_args__ = (
@@ -76,10 +76,17 @@ class InterviewQuestionPlan(TimestampMixin, Base):
             "generation_mode IN ('gemini','rules')",
             name="valid_generation_mode",
         ),
-        UniqueConstraint("application_id", "version", name="application_version"),
-        Index(
-            "ix_interview_question_plans_application_version",
+        CheckConstraint("stage IN ('hr','manager')", name="valid_stage"),
+        UniqueConstraint(
             "application_id",
+            "stage",
+            "version",
+            name="uq_interview_question_plans_application_stage_version",
+        ),
+        Index(
+            "ix_interview_question_plans_application_stage_version",
+            "application_id",
+            "stage",
             "version",
         ),
     )
@@ -87,6 +94,9 @@ class InterviewQuestionPlan(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True)
     application_id: Mapped[int] = mapped_column(
         ForeignKey("job_applications.id", ondelete="CASCADE"), index=True
+    )
+    stage: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="manager", server_default="manager"
     )
     context_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -96,6 +106,18 @@ class InterviewQuestionPlan(TimestampMixin, Base):
     provider: Mapped[str] = mapped_column(String(30), nullable=False)
     model_name: Mapped[str | None] = mapped_column(String(100))
     generation_warning: Mapped[str | None] = mapped_column(Text)
+    input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    thinking_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    total_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     generated_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
