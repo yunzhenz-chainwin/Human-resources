@@ -7,6 +7,7 @@ Revises: f6a2d4c8b901
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "a8f4c2d9e710"
@@ -61,6 +62,10 @@ def downgrade() -> None:
         "ix_interview_question_plans_application_stage_version",
         table_name="interview_question_plans",
     )
+    # The previous schema stored manager plans only and required version numbers
+    # to be unique per application.  HR and manager plans may both have version
+    # 1 now, so retain the manager history when returning to that schema.
+    op.execute(sa.text("DELETE FROM interview_question_plans WHERE stage = 'hr'"))
     with op.batch_alter_table("interview_question_plans") as batch_op:
         batch_op.drop_constraint(
             "uq_interview_question_plans_application_stage_version",

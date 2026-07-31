@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.main as main_module
+from app.api.routes import interview_records as interview_routes
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_db
@@ -26,6 +27,7 @@ from app.models import (
     User,
 )
 from app.models.security import AuditLog
+from app.services.interview_questions import GeminiTokenUsage
 from app.services.security import hash_password
 
 PASSWORDS = {
@@ -297,6 +299,9 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
     }
 
     class FixtureStorageProvider:
+        def exists(self, key: str) -> bool:
+            return key in stored_paths
+
         def materialize(self, key: str):
             path = stored_paths.get(key)
             if path is None:
@@ -305,6 +310,10 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
 
     monkeypatch.setattr(
         "app.api.routes.resumes.get_storage_provider",
+        lambda: FixtureStorageProvider(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.candidates.get_storage_provider",
         lambda: FixtureStorageProvider(),
     )
     engineering_bytes = stored_paths["scoped/engineering.pdf"].read_bytes()
@@ -419,6 +428,19 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
     assert own_download.content == engineering_bytes
     assert own_download.headers["cache-control"] == "private, no-store"
     assert "engineering.pdf" in own_download.headers["content-disposition"]
+
+    own_preview = client.get(
+        f"/api/v1/resumes/{engineering_resume_id}/preview",
+        headers={**engineering_headers, "User-Agent": "candidate-preview-test"},
+    )
+    assert own_preview.status_code == 200
+    assert own_preview.content == engineering_bytes
+    assert own_preview.headers["content-type"] == "application/pdf"
+    assert own_preview.headers["cache-control"] == "private, no-store"
+    assert own_preview.headers["x-content-type-options"] == "nosniff"
+    assert own_preview.headers["x-frame-options"] == "SAMEORIGIN"
+    assert own_preview.headers["content-disposition"].startswith("inline;")
+    assert "engineering.pdf" in own_preview.headers["content-disposition"]
     assert (
         client.get(
             f"/api/v1/resumes/{design_resume_id}/file",
@@ -426,18 +448,71 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
         ).status_code
         == 403
     )
+    assert (
+        client.get(
+            f"/api/v1/resumes/{design_resume_id}/preview",
+            headers=engineering_headers,
+        ).status_code
+        == 403
+    )
 
     with testing_session() as db:
-        audit = db.scalar(
+        missing_resume = ResumeFile(
+            candidate_id=ids["alice"],
+            target_requisition_id=ids["engineering_job"],
+            original_filename="missing.pdf",
+            storage_key="scoped/missing.pdf",
+            mime="application/pdf",
+            source_platform="direct",
+            source_review_required=False,
+            parse_status="confirmed",
+        )
+        db.add(missing_resume)
+        db.commit()
+        missing_resume_id = missing_resume.id
+
+    missing_preview = client.get(
+        f"/api/v1/resumes/{missing_resume_id}/preview",
+        headers=engineering_headers,
+    )
+    assert missing_preview.status_code == 404
+    assert missing_preview.json()["detail"] == "Stored resume file was not found"
+
+    with testing_session() as db:
+        download_audit = db.scalar(
             select(AuditLog).where(
                 AuditLog.action == "resume.download",
                 AuditLog.resource_id == str(engineering_resume_id),
             )
         )
-        assert audit is not None
-        assert audit.department_id == ids["engineering"]
-        assert audit.details["candidate_id"] == ids["alice"]
-        assert audit.ip_address is not None
+        assert download_audit is not None
+        assert download_audit.department_id == ids["engineering"]
+        assert download_audit.details["candidate_id"] == ids["alice"]
+        assert download_audit.ip_address is not None
+
+        preview_audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "resume.preview",
+                AuditLog.resource_id == str(engineering_resume_id),
+            )
+        )
+        assert preview_audit is not None
+        assert preview_audit.department_id == ids["engineering"]
+        assert preview_audit.details == {
+            "candidate_id": ids["alice"],
+            "target_requisition_id": ids["engineering_job"],
+            "format": "pdf",
+        }
+        assert preview_audit.ip_address is not None
+        assert (
+            db.scalar(
+                select(AuditLog).where(
+                    AuditLog.action == "resume.preview",
+                    AuditLog.resource_id == str(missing_resume_id),
+                )
+            )
+            is None
+        )
 
 
 def test_hr_assignment_returns_full_dto_and_rejects_duplicates(application_client) -> None:
@@ -921,6 +996,23 @@ def test_hr_and_manager_interview_records_are_separate_and_role_owned(
         ).status_code
         == 403
     )
+    admin_headers = _headers(client, "admin")
+    assert (
+        client.patch(
+            hr_endpoint,
+            headers=admin_headers,
+            json={"interview_notes": "Admin is not an interview author"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            manager_endpoint,
+            headers=admin_headers,
+            json={"interview_notes": "Admin is not an interview author"},
+        ).status_code
+        == 403
+    )
     assert (
         client.patch(
             manager_endpoint,
@@ -1079,14 +1171,21 @@ def test_structured_interview_records_preserve_session_and_actor_history(
             == 422
         )
 
-    updated = client.patch(
+    admin_update = client.patch(
         f"{endpoint}/{record_id}",
         headers=_headers(client, "admin"),
         json={"status": "completed", "summary": "Final HR interview summary"},
     )
+    assert admin_update.status_code == 403
+
+    updated = client.patch(
+        f"{endpoint}/{record_id}",
+        headers=hr_headers,
+        json={"status": "completed", "summary": "Final HR interview summary"},
+    )
     assert updated.status_code == 200, updated.text
     assert updated.json()["interviewer_name"] == "Application HR"
-    assert updated.json()["updated_by_name"] == "Application Admin"
+    assert updated.json()["updated_by_name"] == "Application HR"
     assert updated.json()["summary"] == "Final HR interview summary"
 
     manager_created = client.post(
@@ -1418,6 +1517,106 @@ def test_hr_and_manager_have_independent_five_question_versions(
         ).status_code
         == 422
     )
+
+
+def test_interview_record_is_linked_to_exact_question_plan_version(
+    application_client,
+) -> None:
+    client, _, ids = application_client
+    application_id = ids["engineering_application"]
+    hr_headers = _headers(client, "hr")
+    manager_headers = _headers(client, "engineering-manager")
+    plan_response = client.post(
+        f"/api/v1/applications/{application_id}/interview-question-plan/generate?stage=hr",
+        headers=hr_headers,
+    )
+    assert plan_response.status_code == 200, plan_response.text
+    plan = plan_response.json()
+    assert plan["id"] is not None
+
+    payload = {
+        "stage": "hr",
+        "question_plan_id": plan["id"],
+        "interviewed_at": "2030-08-20T09:30:00+08:00",
+        "duration_minutes": 45,
+        "mode": "video",
+        "status": "in_progress",
+        "questions": [
+            {
+                "question": item["question"],
+                "trait": item["category"],
+                "purpose": item["purpose"],
+                "follow_up": item["follow_up"],
+                "source": item["source"],
+            }
+            for item in plan["questions"]
+        ],
+    }
+    created = client.post(
+        f"/api/v1/applications/{application_id}/interview-records",
+        headers=hr_headers,
+        json=payload,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["question_plan_id"] == plan["id"]
+    assert created.json()["question_plan_version"] == plan["version"]
+
+    wrong_stage = client.post(
+        f"/api/v1/applications/{application_id}/interview-records",
+        headers=manager_headers,
+        json={**payload, "stage": "manager"},
+    )
+    assert wrong_stage.status_code == 422
+    missing_plan = client.post(
+        f"/api/v1/applications/{application_id}/interview-records",
+        headers=hr_headers,
+        json={**payload, "question_plan_id": 999_999},
+    )
+    assert missing_plan.status_code == 422
+
+    immutable_link = client.patch(
+        f"/api/v1/applications/{application_id}/interview-records/{created.json()['id']}",
+        headers=hr_headers,
+        json={"question_plan_id": None},
+    )
+    assert immutable_link.status_code == 422
+
+
+def test_gemini_daily_generation_limit_is_enforced(
+    application_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, ids = application_client
+    settings = get_settings()
+    monkeypatch.setattr(settings, "gemini_enabled", True)
+    monkeypatch.setattr(settings, "gemini_api_key", "daily-limit-test-key")
+    monkeypatch.setattr(settings, "gemini_daily_generation_limit_per_user", 1)
+    calls = 0
+
+    def fake_generate(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return (
+            interview_routes.standard_hr_question_plan(),
+            ["Test Gemini plan"],
+            "gemini",
+            GeminiTokenUsage(total_tokens=100),
+        )
+
+    monkeypatch.setattr(interview_routes, "gemini_hr_question_plan", fake_generate)
+    endpoint = (
+        f"/api/v1/applications/{ids['engineering_application']}"
+        "/interview-question-plan/generate?stage=hr"
+    )
+    headers = _headers(client, "hr")
+    first = client.post(endpoint, headers=headers)
+    assert first.status_code == 200, first.text
+    assert calls == 1
+
+    limited = client.post(f"{endpoint}&force=true", headers=headers)
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) > 0
+    assert calls == 1
 
 
 def test_trait_questions_differ_for_two_resumes_on_the_same_job(

@@ -91,6 +91,18 @@ def test_sqlite_interview_record_id_is_generated_after_migration(
             }
             assert {
                 "application_id",
+                "question_plan_id",
+                "question_plan_version",
+                "stage",
+                "interviewed_at",
+            }.issubset(
+                {
+                    column[1]
+                    for column in connection.execute("PRAGMA table_info(interview_records)")
+                }
+            )
+            assert {
+                "application_id",
                 "stage",
                 "context_hash",
                 "version",
@@ -105,7 +117,68 @@ def test_sqlite_interview_record_id_is_generated_after_migration(
                 "total_tokens",
             }.issubset(plan_columns)
             assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-                ("a8f4c2d9e710",)
+                ("e63b1f8a2d40",)
+            ]
+    finally:
+        get_settings.cache_clear()
+        database_path.unlink(missing_ok=True)
+
+
+def test_question_plan_stage_migration_can_downgrade_with_parallel_versions(
+    monkeypatch,
+) -> None:
+    backend_root = Path(__file__).resolve().parents[1]
+    database_path = backend_root / "tests" / f".question-plan-downgrade-{uuid4().hex}.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path.as_posix()}")
+    get_settings.cache_clear()
+    config = _alembic_config(backend_root)
+    try:
+        command.upgrade(config, "head")
+        with closing(sqlite3.connect(database_path)) as connection:
+            plan_values = (
+                9001,
+                "a" * 64,
+                1,
+                "[]",
+                "[]",
+                "rules",
+                "internal",
+                "Migration fixture",
+            )
+            connection.execute(
+                """
+                INSERT INTO interview_question_plans (
+                    application_id, stage, context_hash, version, questions,
+                    personalization_basis, generation_mode, provider,
+                    generated_by_name
+                ) VALUES (?, 'hr', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                plan_values,
+            )
+            connection.execute(
+                """
+                INSERT INTO interview_question_plans (
+                    application_id, stage, context_hash, version, questions,
+                    personalization_basis, generation_mode, provider,
+                    generated_by_name
+                ) VALUES (?, 'manager', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                plan_values,
+            )
+            connection.commit()
+
+        command.downgrade(config, "f6a2d4c8b901")
+        with closing(sqlite3.connect(database_path)) as connection:
+            columns = {
+                column[1]
+                for column in connection.execute("PRAGMA table_info(interview_question_plans)")
+            }
+            assert "stage" not in columns
+            assert connection.execute(
+                "SELECT application_id, version FROM interview_question_plans"
+            ).fetchall() == [(9001, 1)]
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
+                ("f6a2d4c8b901",)
             ]
     finally:
         get_settings.cache_clear()

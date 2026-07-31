@@ -5,8 +5,14 @@ from app.models.candidate import (
     CandidateExperience,
     CandidateSkill,
 )
+from app.models.deidentified_resume import DeidentifiedResumeDocument
 from app.models.interview import InterviewQuestionPlan, InterviewRecord
 from app.models.matching import MatchResult
+from app.models.matching_benchmark import (
+    MatchingBenchmarkCase,
+    MatchingBenchmarkRating,
+    MatchingBenchmarkSuite,
+)
 from app.models.organization import Department, User
 from app.models.recruitment import JobApplication, JobRequisition, ResumeFile
 from app.models.security import (
@@ -18,6 +24,7 @@ from app.models.security import (
     SystemSetting,
     Tag,
 )
+from app.models.semantic_shadow import SemanticShadowEvaluation
 
 __all__ = [
     "Candidate",
@@ -25,6 +32,7 @@ __all__ = [
     "CandidateEducation",
     "CandidateExperience",
     "CandidateSkill",
+    "DeidentifiedResumeDocument",
     "InterviewRecord",
     "InterviewQuestionPlan",
     "Department",
@@ -33,6 +41,10 @@ __all__ = [
     "JobRequisition",
     "ResumeFile",
     "MatchResult",
+    "MatchingBenchmarkSuite",
+    "MatchingBenchmarkCase",
+    "MatchingBenchmarkRating",
+    "SemanticShadowEvaluation",
     "RefreshToken",
     "RetentionStorageDeletion",
     "SkillCatalog",

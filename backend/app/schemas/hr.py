@@ -225,6 +225,7 @@ class CandidateResumeSummaryRead(BaseModel):
     parse_status: str
     resume_url: str | None
     has_file: bool
+    document_origin: Literal["applicant_upload", "system_generated"]
 
 
 class CandidateApplicationDetailRead(BaseModel):
@@ -346,6 +347,7 @@ class ResumeRead(BaseModel):
     file_hash: str | None
     file_size: int | None
     mime: str | None
+    document_origin: Literal["applicant_upload", "system_generated"]
     resume_url: str | None
     uploaded_at: datetime
     updated_at: datetime

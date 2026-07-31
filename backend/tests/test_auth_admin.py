@@ -556,6 +556,14 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
     resumes_table = next(item for item in overview["tables"] if item["name"] == "resume_files")
     assert resumes_table["display_name"] == "履歷檔案與解析紀錄"
     assert "解析內容" in resumes_table["description"]
+    deidentified_table = next(
+        item
+        for item in overview["tables"]
+        if item["name"] == "deidentified_resume_documents"
+    )
+    assert deidentified_table["display_name"] == "去識別化履歷版本"
+    assert deidentified_table["can_create"] is False
+    assert deidentified_table["protection_reason"]
     assert isinstance(users_table["row_count"], int)
     assert {column["name"] for column in users_table["columns"]} >= {"id", "username"}
     assert "database_url" not in overview
@@ -605,6 +613,14 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
             "parsed_payload",
             "source_evidence",
             "resume_text",
+        },
+        "deidentified_resume_documents": {
+            "anonymous_ref",
+            "storage_key",
+            "file_hash",
+            "source_file_hash",
+            "analysis_payload",
+            "validation_summary",
         },
         "system_settings": {"value", "is_secret"},
     }.items():

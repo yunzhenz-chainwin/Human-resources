@@ -133,63 +133,81 @@ def _local_ocr_pdf(data: bytes, page_count: int) -> tuple[str, tuple[int, ...], 
         def __exit__(self, *_args):
             return False
     with _WorkspaceScratch() as work:
-        pdf = Path(work) / f".resume-ocr-{token}.pdf"; prefix = Path(work) / f".resume-ocr-{token}-page"; pdf.write_bytes(data)
+        pdf = Path(work) / f".resume-ocr-{token}.pdf"
+        prefix = Path(work) / f".resume-ocr-{token}-page"
         try:
-            subprocess.run([pdftoppm, "-f", "1", "-l", str(page_count), "-r", str(OCR_DPI), "-png", str(pdf), str(prefix)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=OCR_TIMEOUT_SECONDS, shell=False)
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError(f"本機 OCR 超過 {OCR_TIMEOUT_SECONDS} 秒，已停止處理。") from exc
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise RuntimeError("Poppler 無法將 PDF 轉成影像，請確認 PDF 未損壞。") from exc
-        parts, counts, confidences = [], [], []
-        for index in range(1, page_count + 1):
-            image = Path(f"{prefix}-{index}.png")
-            if not image.exists(): parts.append(""); counts.append(0); continue
-            ocr_image = image
             try:
-                from PIL import Image, ImageEnhance, ImageOps
-                prepared = image.with_name(f"{image.stem}-prepared.png")
-                with Image.open(image) as source:
-                    gray = ImageOps.autocontrast(ImageOps.grayscale(source))
-                    gray = ImageEnhance.Sharpness(gray).enhance(1.35)
-                    gray.save(prepared, dpi=(OCR_DPI, OCR_DPI))
-                ocr_image = prepared
-            except (ImportError, OSError):
-                pass
-            try:
-                out = subprocess.run([tesseract, str(ocr_image), "stdout", "-l", "chi_tra+eng", "--psm", "6", "tsv"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(5, OCR_TIMEOUT_SECONDS - int(time.monotonic() - started)), shell=False)
+                pdf.write_bytes(data)
+                subprocess.run([pdftoppm, "-f", "1", "-l", str(page_count), "-r", str(OCR_DPI), "-png", str(pdf), str(prefix)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=OCR_TIMEOUT_SECONDS, shell=False)
             except subprocess.TimeoutExpired as exc:
                 raise TimeoutError(f"本機 OCR 超過 {OCR_TIMEOUT_SECONDS} 秒，已停止處理。") from exc
             except (OSError, subprocess.CalledProcessError) as exc:
-                raise RuntimeError("Tesseract 無法辨識頁面，請確認已安裝 chi_tra 語言包。") from exc
-            raw = out.stdout.decode("utf-8", errors="replace")
-            words, page_conf = [], []
-            for row in raw.splitlines()[1:]:
-                fields = row.split("\t")
-                if len(fields) < 12 or not fields[10].strip():
-                    continue
+                raise RuntimeError("Poppler 無法將 PDF 轉成影像，請確認 PDF 未損壞。") from exc
+            parts, counts, confidences = [], [], []
+            for index in range(1, page_count + 1):
+                image = Path(f"{prefix}-{index}.png")
+                if not image.exists(): parts.append(""); counts.append(0); continue
+                ocr_image = image
                 try:
-                    confidence = float(fields[10])
-                except ValueError:
-                    continue
-                token_text = fields[11].strip()
-                if token_text:
-                    words.append(token_text)
-                    if confidence >= 0:
-                        page_conf.append(confidence)
-            value = " ".join(words).strip(); parts.append(value); counts.append(len(re.sub(r"\s+", "", value))); confidences.extend(page_conf)
-            if ocr_image != image:
-                ocr_image.unlink(missing_ok=True)
-        result = "\n".join(parts).strip()
-        # Best-effort cleanup; OCR output is never retained in the result.
-        for candidate in [pdf, *(Path(f"{prefix}-{i}.png") for i in range(1, page_count + 1)), *(Path(f"{prefix}-{i}-prepared.png") for i in range(1, page_count + 1))]:
-            try:
-                candidate.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return result, tuple(counts), _ocr_quality(confidences, result)
+                    from PIL import Image, ImageEnhance, ImageOps
+                    prepared = image.with_name(f"{image.stem}-prepared.png")
+                    with Image.open(image) as source:
+                        gray = ImageOps.autocontrast(ImageOps.grayscale(source))
+                        gray = ImageEnhance.Sharpness(gray).enhance(1.35)
+                        gray.save(prepared, dpi=(OCR_DPI, OCR_DPI))
+                    ocr_image = prepared
+                except (ImportError, OSError):
+                    pass
+                try:
+                    out = subprocess.run([tesseract, str(ocr_image), "stdout", "-l", "chi_tra+eng", "--psm", "6", "tsv"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(5, OCR_TIMEOUT_SECONDS - int(time.monotonic() - started)), shell=False)
+                except subprocess.TimeoutExpired as exc:
+                    raise TimeoutError(f"本機 OCR 超過 {OCR_TIMEOUT_SECONDS} 秒，已停止處理。") from exc
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    raise RuntimeError("Tesseract 無法辨識頁面，請確認已安裝 chi_tra 語言包。") from exc
+                raw = out.stdout.decode("utf-8", errors="replace")
+                words, page_conf = [], []
+                for row in raw.splitlines()[1:]:
+                    fields = row.split("\t")
+                    if len(fields) < 12 or not fields[10].strip():
+                        continue
+                    try:
+                        confidence = float(fields[10])
+                    except ValueError:
+                        continue
+                    token_text = fields[11].strip()
+                    if token_text:
+                        words.append(token_text)
+                        if confidence >= 0:
+                            page_conf.append(confidence)
+                value = " ".join(words).strip(); parts.append(value); counts.append(len(re.sub(r"\s+", "", value))); confidences.extend(page_conf)
+                if ocr_image != image:
+                    ocr_image.unlink(missing_ok=True)
+            result = "\n".join(parts).strip()
+            return result, tuple(counts), _ocr_quality(confidences, result)
+        finally:
+            # OCR inputs contain raw personal data. Clean every failure path as well
+            # as the successful one; an ignore rule is only a secondary safeguard.
+            candidates = [
+                pdf,
+                *(Path(f"{prefix}-{i}.png") for i in range(1, page_count + 1)),
+                *(Path(f"{prefix}-{i}-prepared.png") for i in range(1, page_count + 1)),
+            ]
+            for candidate in candidates:
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
-def extract_pdf(data: bytes) -> str:
+def extract_pdf(data: bytes, *, minimum_text_characters: int = 20) -> str:
+    """Extract PDF text, failing closed when an input has too little text.
+
+    ``minimum_text_characters`` is the safety threshold for an original resume.
+    A PDF generated by this tool has already passed through anonymization, so the
+    result page may set it to zero when it only needs to display a short result.
+    """
+    if minimum_text_characters < 0:
+        raise ValueError("PDF minimum text characters cannot be negative")
     if len(data) > PDF_MAX_BYTES:
         raise ValueError(f"PDF 檔案超過 {PDF_MAX_BYTES // (1024 * 1024)} MB 上限")
     try:
@@ -210,26 +228,26 @@ def extract_pdf(data: bytes) -> str:
     except Exception as exc:
         raise ValueError("PDF 無法解析，請確認檔案未損壞") from exc
     extracted_characters = len(re.sub(r"\s+", "", text))
-    if extracted_characters < 20:
+    if extracted_characters < minimum_text_characters:
         try:
             ocr_text, _ocr_pages, _ocr_quality_score = _local_ocr_pdf(data, len(reader.pages))
         except (RuntimeError, TimeoutError) as exc:
             details = "、".join(f"第{i}頁 {count} 字" for i, count in enumerate(page_characters, 1))
-            raise ScannedPDFError(f"PDF 共 {len(reader.pages)} 頁，目前擷取 {extracted_characters} 字，至少需要 20 字。各頁文字量：{details}。可能原因：掃描圖片、空白頁或文字層損壞。本機 OCR 未完成：{exc}。請使用本機 OCR 後重新上傳，或貼上人工確認文字。", page_count=len(reader.pages), page_characters=page_characters, threshold=20) from exc
-        if len(re.sub(r"\s+", "", ocr_text)) >= 20:
+            raise ScannedPDFError(f"PDF 共 {len(reader.pages)} 頁，目前擷取 {extracted_characters} 字，至少需要 {minimum_text_characters} 字。各頁文字量：{details}。可能原因：掃描圖片、空白頁或文字層損壞。本機 OCR 未完成：{exc}。請使用本機 OCR 後重新上傳，或貼上人工確認文字。", page_count=len(reader.pages), page_characters=page_characters, threshold=minimum_text_characters) from exc
+        if len(re.sub(r"\s+", "", ocr_text)) >= minimum_text_characters:
             return ocr_text
         page_details = "、".join(
             f"第{index}頁 {count} 字" for index, count in enumerate(page_characters, 1)
         ) or "無頁面文字"
         raise ScannedPDFError(
             f"偵測到掃描型 PDF 或文字層不足：PDF 共 {len(reader.pages)} 頁，"
-            f"目前擷取 {extracted_characters} 字，至少需要 {20} 字。各頁文字量：{page_details}。"
+            f"目前擷取 {extracted_characters} 字，至少需要 {minimum_text_characters} 字。各頁文字量：{page_details}。"
             "可能原因：PDF 是掃描圖片、文字層損壞、頁面為空白或文字無法選取。"
             "請使用公司核准的本機 OCR 重新產生可搜尋 PDF，確認每頁文字後再上傳，並由人工確認；"
             "請勿使用未核准的第三方 OCR。本工具不會直接產出去識別結果或送出履歷內容。",
             page_count=len(reader.pages),
             page_characters=page_characters,
-            threshold=20,
+            threshold=minimum_text_characters,
         )
     if len(text) > PDF_MAX_TEXT_CHARACTERS:
         raise ValueError(f"PDF 文字不可超過 {PDF_MAX_TEXT_CHARACTERS} 字")
@@ -533,7 +551,11 @@ class WebHandler(BaseHTTPRequestHandler):
             if filename.casefold().endswith(".docx"):
                 display_result = extract_docx(payload)
             elif filename.casefold().endswith(".pdf"):
-                display_result = extract_pdf(payload)
+                # This is a PDF generated from text already anonymized by this
+                # process. Do not reapply the original-resume 20-character guard:
+                # a valid short result (for example only a name field) must still
+                # render instead of terminating the HTTP response thread.
+                display_result = extract_pdf(payload, minimum_text_characters=0)
             else:
                 display_result = payload.decode("utf-8")
             ocr_info = ""

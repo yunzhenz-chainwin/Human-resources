@@ -1,9 +1,13 @@
 import hashlib
 import json
-from datetime import UTC
+import threading
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -42,6 +46,28 @@ from app.services.security import write_audit
 
 router = APIRouter(prefix="/applications")
 
+_QUESTION_GENERATION_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+@contextmanager
+def _question_generation_scope(
+    application_id: int,
+    stage: InterviewStage,
+    user_id: int,
+) -> Iterator[None]:
+    """Serialize matching generation requests without an unbounded lock registry."""
+    lock_count = len(_QUESTION_GENERATION_LOCKS)
+    lock_indexes = sorted(
+        {
+            (application_id * 2 + (stage == "manager")) % lock_count,
+            (user_id * 31 + 17) % lock_count,
+        }
+    )
+    with ExitStack() as stack:
+        for index in lock_indexes:
+            stack.enter_context(_QUESTION_GENERATION_LOCKS[index])
+        yield
+
 
 def _application_requisition(
     db: Session,
@@ -62,10 +88,10 @@ def _application_requisition(
 
 def _enforce_stage_write(user: User, stage: InterviewStage) -> None:
     if stage == "hr":
-        if user.role not in {"admin", "hr"}:
+        if user.role != "hr":
             raise HTTPException(status_code=403, detail="Only HR can record the HR interview")
         return
-    if user.role not in {"admin", "manager"}:
+    if user.role != "manager":
         raise HTTPException(
             status_code=403,
             detail="Only the department manager can record the manager interview",
@@ -94,7 +120,7 @@ def _enforce_private_notes_write(
 ) -> None:
     if "private_notes" not in fields_set:
         return
-    if stage != "hr" or user.role not in {"admin", "hr"}:
+    if stage != "hr" or user.role != "hr":
         raise HTTPException(
             status_code=403,
             detail="HR private notes can only be maintained by HR",
@@ -102,8 +128,8 @@ def _enforce_private_notes_write(
 
 
 def _owns_stage(user: User, stage: str) -> bool:
-    return user.role == "admin" or (
-        (stage == "hr" and user.role == "hr") or (stage == "manager" and user.role == "manager")
+    return (stage == "hr" and user.role == "hr") or (
+        stage == "manager" and user.role == "manager"
     )
 
 
@@ -124,7 +150,7 @@ def _record_read(
 ) -> InterviewRecordRead:
     result = InterviewRecordRead.model_validate(record)
     evaluation_revealed = _owns_stage(user, record.stage) or peer_evaluations_released
-    private_notes_visible = user.role == "admin" or (user.role == "hr" and record.stage == "hr")
+    private_notes_visible = user.role == "hr" and record.stage == "hr"
     updates: dict[str, object] = {
         "evaluation_revealed": evaluation_revealed,
         "private_notes_visible": private_notes_visible,
@@ -257,6 +283,7 @@ def _stored_plan_response(
     if plan is None:
         if stage == "hr":
             return InterviewQuestionPlanResponse(
+                id=None,
                 application_id=application.id,
                 stage="hr",
                 job_title=requisition.title,
@@ -272,6 +299,7 @@ def _stored_plan_response(
                 context_matches=True,
             )
         return InterviewQuestionPlanResponse(
+            id=None,
             application_id=application.id,
             stage=stage,
             job_title=requisition.title,
@@ -286,6 +314,7 @@ def _stored_plan_response(
             context_matches=False,
         )
     return InterviewQuestionPlanResponse(
+        id=plan.id,
         application_id=application.id,
         stage=stage,
         job_title=requisition.title,
@@ -307,6 +336,142 @@ def _stored_plan_response(
         thinking_tokens=plan.thinking_tokens,
         total_tokens=plan.total_tokens,
     )
+
+
+def _generate_question_plan_locked(
+    *,
+    db: Session,
+    user: User,
+    application: JobApplication,
+    requisition: JobRequisition,
+    candidate: Candidate,
+    stage: InterviewStage,
+    force: bool,
+) -> InterviewQuestionPlanResponse:
+    # PostgreSQL row locks protect against duplicate API calls across workers.
+    # SQLite ignores FOR UPDATE, so the fixed in-process locks remain necessary.
+    db.execute(select(User.id).where(User.id == user.id).with_for_update()).scalar_one()
+    db.execute(
+        select(JobApplication.id)
+        .where(JobApplication.id == application.id)
+        .with_for_update()
+    ).scalar_one()
+
+    skills, experiences = _candidate_resume_context(db, candidate.id)
+    context_hash = _question_context_hash(candidate, requisition, skills, experiences, stage)
+    latest = _latest_question_plan(db, application.id, stage)
+    if latest is not None and latest.context_hash == context_hash and not force:
+        return _stored_plan_response(application, requisition, latest, context_hash, stage)
+
+    settings = get_settings()
+    if settings.gemini_enabled and settings.gemini_api_key:
+        now = datetime.now(UTC)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        generated_today = db.scalar(
+            select(func.count(InterviewQuestionPlan.id)).where(
+                InterviewQuestionPlan.generated_by_id == user.id,
+                InterviewQuestionPlan.created_at >= day_start,
+            )
+        )
+        if (generated_today or 0) >= settings.gemini_daily_generation_limit_per_user:
+            retry_after = max(
+                1,
+                int((day_start + timedelta(days=1) - now).total_seconds()),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Daily Gemini question generation limit reached",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    generator = gemini_hr_question_plan if stage == "hr" else gemini_manager_question_plan
+    questions, basis, generation_mode, token_usage = generator(
+        job_title=requisition.title,
+        job_description=requisition.jd,
+        current_title=candidate.current_title,
+        total_years=candidate.total_years,
+        candidate_skills=skills,
+        required_skills=requisition.skills or [],
+        experiences=experiences,
+        bypass_cache=force,
+    )
+    warning_by_marker = {
+        "GEMINI_QUOTA_EXCEEDED": (
+            "Gemini API 已達目前使用上限，暫時改用規則式備援題目；"
+            "請檢查 Google AI Studio 配額或計費設定。"
+        ),
+        "GEMINI_MODEL_UNAVAILABLE": (
+            "目前設定的 Gemini 模型無法使用，已改用規則式備援題目；"
+            "請由系統管理員確認 GEMINI_MODEL 設定。"
+        ),
+        "GEMINI_INVALID_RESPONSE": (
+            "Gemini 有回覆，但未產生完整的五個客製化評估面向，已改用規則式備援題目。"
+        ),
+        "GEMINI_SERVICE_UNAVAILABLE": (
+            "Gemini 目前無法連線或服務異常，已改用規則式備援題目，稍後可重新產生。"
+        ),
+    }
+    generation_warning = next(
+        (warning for marker, warning in warning_by_marker.items() if marker in basis),
+        None,
+    )
+    visible_basis = [item for item in basis if item not in warning_by_marker]
+    next_version = (latest.version + 1) if latest else 1
+    plan = InterviewQuestionPlan(
+        application_id=application.id,
+        stage=stage,
+        context_hash=context_hash,
+        version=next_version,
+        questions=[item.model_dump() for item in questions],
+        personalization_basis=visible_basis,
+        generation_mode=generation_mode,
+        provider="gemini" if generation_mode == "gemini" else "rules",
+        model_name=settings.gemini_model if settings.gemini_enabled else None,
+        generation_warning=generation_warning,
+        input_tokens=token_usage.input_tokens,
+        output_tokens=token_usage.output_tokens,
+        thinking_tokens=token_usage.thinking_tokens,
+        total_tokens=token_usage.total_tokens,
+        generated_by_id=user.id,
+        generated_by_name=_actor_name(user),
+    )
+    try:
+        db.add(plan)
+        db.flush()
+        write_audit(
+            db,
+            user,
+            "application.interview_question_plan.generate",
+            "interview_question_plan",
+            plan.id,
+            requisition.department_id,
+            details={
+                "application_id": application.id,
+                "stage": stage,
+                "version": plan.version,
+                "generation_mode": generation_mode,
+                "force": force,
+                "total_tokens": token_usage.total_tokens,
+            },
+        )
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        current_application, current_requisition = _application_requisition(
+            db, application.id, user
+        )
+        concurrent_plan = _latest_question_plan(db, application.id, stage)
+        if concurrent_plan is not None and concurrent_plan.version >= next_version:
+            return _stored_plan_response(
+                current_application,
+                current_requisition,
+                concurrent_plan,
+                context_hash,
+                stage,
+            )
+        raise
+    db.refresh(plan)
+    return _stored_plan_response(application, requisition, plan, context_hash, stage)
 
 
 @router.get(
@@ -351,85 +516,16 @@ def generate_interview_question_plan(
     if candidate is None or candidate.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Candidate not found")
     _enforce_question_plan_generate(user, stage)
-
-    skills, experiences = _candidate_resume_context(db, candidate.id)
-    context_hash = _question_context_hash(candidate, requisition, skills, experiences, stage)
-    latest = _latest_question_plan(db, application.id, stage)
-    if latest is not None and latest.context_hash == context_hash and not force:
-        return _stored_plan_response(application, requisition, latest, context_hash, stage)
-
-    generator = gemini_hr_question_plan if stage == "hr" else gemini_manager_question_plan
-    questions, basis, generation_mode, token_usage = generator(
-        job_title=requisition.title,
-        job_description=requisition.jd,
-        current_title=candidate.current_title,
-        total_years=candidate.total_years,
-        candidate_skills=skills,
-        required_skills=requisition.skills or [],
-        experiences=experiences,
-        bypass_cache=force,
-    )
-    warning_by_marker = {
-        "GEMINI_QUOTA_EXCEEDED": (
-            "Gemini API 已達目前使用上限，暫時改用規則式備援題目；"
-            "請檢查 Google AI Studio 配額或計費設定。"
-        ),
-        "GEMINI_MODEL_UNAVAILABLE": (
-            "目前設定的 Gemini 模型無法使用，已改用規則式備援題目；"
-            "請由系統管理員確認 GEMINI_MODEL 設定。"
-        ),
-        "GEMINI_INVALID_RESPONSE": (
-            "Gemini 有回覆，但未產生完整的五個客製化評估面向，已改用規則式備援題目。"
-        ),
-        "GEMINI_SERVICE_UNAVAILABLE": (
-            "Gemini 目前無法連線或服務異常，已改用規則式備援題目，稍後可重新產生。"
-        ),
-    }
-    generation_warning = next(
-        (warning for marker, warning in warning_by_marker.items() if marker in basis),
-        None,
-    )
-    visible_basis = [item for item in basis if item not in warning_by_marker]
-    settings = get_settings()
-    plan = InterviewQuestionPlan(
-        application_id=application.id,
-        stage=stage,
-        context_hash=context_hash,
-        version=(latest.version + 1) if latest else 1,
-        questions=[item.model_dump() for item in questions],
-        personalization_basis=visible_basis,
-        generation_mode=generation_mode,
-        provider="gemini" if generation_mode == "gemini" else "rules",
-        model_name=settings.gemini_model if settings.gemini_enabled else None,
-        generation_warning=generation_warning,
-        input_tokens=token_usage.input_tokens,
-        output_tokens=token_usage.output_tokens,
-        thinking_tokens=token_usage.thinking_tokens,
-        total_tokens=token_usage.total_tokens,
-        generated_by_id=user.id,
-        generated_by_name=_actor_name(user),
-    )
-    db.add(plan)
-    db.flush()
-    write_audit(
-        db,
-        user,
-        "application.interview_question_plan.generate",
-        "interview_question_plan",
-        plan.id,
-        requisition.department_id,
-        details={
-            "application_id": application.id,
-            "stage": stage,
-            "version": plan.version,
-            "generation_mode": generation_mode,
-            "force": force,
-            "total_tokens": token_usage.total_tokens,
-        },
-    )
-    db.commit()
-    db.refresh(plan)
-    return _stored_plan_response(application, requisition, plan, context_hash, stage)
+    with _question_generation_scope(application.id, stage, user.id):
+        return _generate_question_plan_locked(
+            db=db,
+            user=user,
+            application=application,
+            requisition=requisition,
+            candidate=candidate,
+            stage=stage,
+            force=force,
+        )
 
 
 @router.post(
@@ -506,9 +602,23 @@ def create_interview_record(
     _, requisition = _application_requisition(db, application_id, user)
     _enforce_stage_write(user, payload.stage)
     _enforce_private_notes_write(user, payload.stage, payload.model_fields_set)
+    question_plan: InterviewQuestionPlan | None = None
+    if payload.question_plan_id is not None:
+        question_plan = db.get(InterviewQuestionPlan, payload.question_plan_id)
+        if (
+            question_plan is None
+            or question_plan.application_id != application_id
+            or question_plan.stage != payload.stage
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Question plan does not belong to this application and interview stage",
+            )
     actor_name = _actor_name(user)
     record = InterviewRecord(
         application_id=application_id,
+        question_plan_id=question_plan.id if question_plan else None,
+        question_plan_version=question_plan.version if question_plan else None,
         stage=payload.stage,
         interviewed_at=payload.interviewed_at.astimezone(UTC),
         duration_minutes=payload.duration_minutes,
@@ -536,6 +646,8 @@ def create_interview_record(
         details={
             "application_id": application_id,
             "stage": record.stage,
+            "question_plan_id": record.question_plan_id,
+            "question_plan_version": record.question_plan_version,
             "status": record.status,
             "question_count": len(record.questions),
         },

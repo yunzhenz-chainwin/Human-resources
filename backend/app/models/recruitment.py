@@ -137,6 +137,13 @@ class ResumeFile(Base):
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
+    @property
+    def document_origin(self) -> str:
+        payload = self.parsed_payload or {}
+        if payload.get("_document_origin") == "system_generated_profile":
+            return "system_generated"
+        return "applicant_upload"
+
 
 class JobApplication(TimestampMixin, Base):
     __tablename__ = "job_applications"

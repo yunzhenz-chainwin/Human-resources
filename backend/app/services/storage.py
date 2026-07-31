@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile
 from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
+from botocore.exceptions import ClientError
 from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import Settings, get_settings
@@ -47,6 +48,9 @@ class StorageProvider(ABC):
     def delete(self, key: str) -> None: ...
 
     @abstractmethod
+    def exists(self, key: str) -> bool: ...
+
+    @abstractmethod
     def materialize(self, key: str) -> Iterator[Path]: ...
 
 
@@ -70,6 +74,9 @@ class LocalStorageProvider(StorageProvider):
 
     def delete(self, key: str) -> None:
         self.path_for(key).unlink(missing_ok=True)
+
+    def exists(self, key: str) -> bool:
+        return self.path_for(key).is_file()
 
     @contextmanager
     def materialize(self, key: str) -> Iterator[Path]:
@@ -114,6 +121,17 @@ class S3StorageProvider(StorageProvider):
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=validate_storage_key(key))
+
+    def exists(self, key: str) -> bool:
+        safe_key = validate_storage_key(key)
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=safe_key)
+        except ClientError as exc:
+            error_code = str(exc.response.get("Error", {}).get("Code", ""))
+            if error_code in {"404", "NoSuchKey", "NotFound"}:
+                return False
+            raise
+        return True
 
     @contextmanager
     def materialize(self, key: str) -> Iterator[Path]:

@@ -139,7 +139,10 @@ def test_score_is_deterministic_and_gates_hard_requirements(matching_client) -> 
         missing = score_candidate(requisition, candidates[2], [])
         assert missing.gate_passed is False
         assert 0 <= missing.total_score <= 100
-        assert "required_skills" in missing.breakdown["gate"]["miss"]
+        assert "required_skills_unknown" in missing.breakdown["gate"]["miss"]
+        assert missing.breakdown["skill"]["known"] is False
+        assert missing.breakdown["skill"]["score"] == 0.5
+        assert missing.breakdown["data_quality"]["confidence"] == "medium"
         assert missing.breakdown["highlights"][0]["text"].startswith(
             "未通過必要條件：必要技能"
         )
@@ -239,6 +242,114 @@ def test_candidate_match_overview_includes_uncomputed_people(matching_client) ->
     assert after.json()["computed_count"] == 3
     assert after.json()["uncomputed_count"] == 0
     assert all(item["match"] is not None for item in after.json()["items"])
+
+
+def test_candidate_sources_are_separate_and_counted_by_backend(matching_client) -> None:
+    client, testing_session = matching_client
+    with testing_session() as db:
+        application = JobApplication(
+            requisition_id=1,
+            candidate_id=1,
+            status="submitted",
+            source="career_site",
+        )
+        db.add(application)
+        db.commit()
+        application_id = application.id
+
+    applicants = client.get(
+        "/api/v1/requisitions/1/candidate-match-overview",
+        params={"source": "applicants"},
+    )
+    assert applicants.status_code == 200
+    assert applicants.json()["source"] == "applicants"
+    assert applicants.json()["total_candidates"] == 1
+    assert applicants.json()["applicants_count"] == 1
+    assert applicants.json()["talent_pool_count"] == 3
+    assert {item["source"] for item in applicants.json()["items"]} == {"applicant"}
+    assert applicants.json()["items"][0]["application_id"] == application_id
+
+    talent_pool = client.get(
+        "/api/v1/requisitions/1/candidate-match-overview",
+        params={"source": "talent_pool"},
+    )
+    assert talent_pool.status_code == 200
+    assert talent_pool.json()["total_candidates"] == 3
+    assert {item["candidate"]["id"] for item in talent_pool.json()["items"]} == {2, 3, 4}
+    assert {item["source"] for item in talent_pool.json()["items"]} == {"talent_pool"}
+    assert all(item["application_id"] is None for item in talent_pool.json()["items"])
+
+
+def test_manager_talent_pool_is_limited_to_candidates_visible_in_own_department(
+    matching_client,
+) -> None:
+    client, testing_session = matching_client
+    with testing_session() as db:
+        own_department = Department(name="Talent Pool Owner")
+        other_department = Department(name="Talent Pool Other")
+        db.add_all([own_department, other_department])
+        db.flush()
+        selected = db.get(JobRequisition, 1)
+        selected.department_id = own_department.id
+        own_other_job = JobRequisition(
+            req_no="MATCH-OWN-2",
+            title="Platform Engineer",
+            department_id=own_department.id,
+            employment_type="full_time",
+            work_city="台北市",
+            jd="Platform",
+            status="sourcing",
+        )
+        other_job = JobRequisition(
+            req_no="MATCH-OTHER-2",
+            title="Sales",
+            department_id=other_department.id,
+            employment_type="full_time",
+            work_city="台北市",
+            jd="Sales",
+            status="sourcing",
+        )
+        db.add_all([own_other_job, other_job])
+        db.flush()
+        db.add_all(
+            [
+                JobApplication(
+                    requisition_id=selected.id,
+                    candidate_id=1,
+                    status="submitted",
+                    source="career_site",
+                ),
+                JobApplication(
+                    requisition_id=own_other_job.id,
+                    candidate_id=2,
+                    status="submitted",
+                    source="career_site",
+                ),
+                JobApplication(
+                    requisition_id=other_job.id,
+                    candidate_id=3,
+                    status="submitted",
+                    source="career_site",
+                ),
+            ]
+        )
+        db.commit()
+        own_department_id = own_department.id
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=10, role="manager", department_id=own_department_id, is_active=True
+    )
+    applicants = client.get(
+        "/api/v1/requisitions/1/candidate-match-overview",
+        params={"source": "applicants"},
+    )
+    assert {item["candidate"]["id"] for item in applicants.json()["items"]} == {1}
+    recommended = client.get(
+        "/api/v1/requisitions/1/candidate-match-overview",
+        params={"source": "talent_pool"},
+    )
+    assert recommended.status_code == 200
+    assert {item["candidate"]["id"] for item in recommended.json()["items"]} == {2}
 
 
 def test_manager_match_overview_only_exposes_actual_applicants(
@@ -414,6 +525,120 @@ def test_hr_can_update_matching_criteria_and_recalculate(matching_client) -> Non
     assert response.json()["preferred_skills"] == ["SQL", "Git"]
     overview = client.get("/api/v1/requisitions/1/candidate-match-overview").json()
     assert overview["computed_count"] == 4
+
+
+def test_matching_criteria_preview_shows_ratio_impact_without_mutating(
+    matching_client,
+) -> None:
+    client, _ = matching_client
+    original = client.get("/api/v1/requisitions/1/matching-criteria").json()
+    relaxed = {
+        **original,
+        "required_skills": ["Python", "Go"],
+        "preferred_skills": [],
+        "required_skill_ratio": 0.5,
+        "require_years": False,
+        "require_education": False,
+        "require_location": False,
+    }
+    response = client.post(
+        "/api/v1/requisitions/1/matching-criteria/preview",
+        params={"source": "talent_pool"},
+        json=relaxed,
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "source": "talent_pool",
+        "total_candidates": 4,
+        "current_passed": 2,
+        "preview_passed": 3,
+        "preview_excluded": 1,
+        "changed_count": 1,
+    }
+
+    strict = client.post(
+        "/api/v1/requisitions/1/matching-criteria/preview",
+        params={"source": "talent_pool"},
+        json={**relaxed, "required_skill_ratio": 1.0},
+    )
+    assert strict.status_code == 200
+    assert strict.json()["preview_passed"] == 0
+    # Preview is read-only; the stored criteria remain unchanged.
+    assert client.get("/api/v1/requisitions/1/matching-criteria").json() == original
+
+
+def test_failed_gate_requires_audited_override_and_survives_rematch(
+    matching_client,
+) -> None:
+    client, _ = matching_client
+    assert client.post("/api/v1/requisitions/1/rematch").status_code == 200
+    all_matches = client.get(
+        "/api/v1/requisitions/1/matches",
+        params={"include_ineligible": True},
+    ).json()["items"]
+    failed = next(item for item in all_matches if item["candidate_id"] == 3)
+    assert failed["gate_passed"] is False
+    assert client.post(
+        f"/api/v1/matches/{failed['id']}/status",
+        json={"status": "shortlisted"},
+    ).status_code == 409
+
+    missing_other_note = client.post(
+        f"/api/v1/matches/{failed['id']}/manual-override",
+        json={"reason_category": "other", "target_stage": "shortlisted"},
+    )
+    assert missing_other_note.status_code == 422
+    override = client.post(
+        f"/api/v1/matches/{failed['id']}/manual-override",
+        json={
+            "reason_category": "data_incomplete",
+            "note": "技能尚未完整登錄，先由面談確認。",
+            "target_stage": "shortlisted",
+        },
+    )
+    assert override.status_code == 200
+    body = override.json()
+    assert body["gate_passed"] is False
+    assert body["status"] == body["recruitment_stage"] == "shortlisted"
+    assert body["manual_override_category"] == "data_incomplete"
+    assert body["manual_override_by"] == 1
+    assert body["manual_override_at"]
+    assert body["stage_updated_at"]
+
+    rerun = client.post("/api/v1/requisitions/1/rematch")
+    assert rerun.status_code == 200
+    preserved = client.get(
+        "/api/v1/requisitions/1/matches",
+        params={"include_ineligible": True},
+    ).json()["items"]
+    failed_after = next(item for item in preserved if item["id"] == failed["id"])
+    assert failed_after["gate_passed"] is False
+    assert failed_after["status"] == "shortlisted"
+    assert failed_after["manual_override_note"] == "技能尚未完整登錄，先由面談確認。"
+    assert client.post(
+        f"/api/v1/matches/{failed['id']}/status",
+        json={"status": "interview"},
+    ).status_code == 200
+
+
+def test_structured_rejection_keeps_category_note_and_actor(matching_client) -> None:
+    client, _ = matching_client
+    match = client.post("/api/v1/requisitions/1/rematch").json()["items"][0]
+    response = client.post(
+        f"/api/v1/matches/{match['id']}/feedback",
+        json={
+            "status": "rejected_by_manager",
+            "reason_category": "role_fit",
+            "note": "職務方向與目前需求不同。",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["feedback_category"] == "role_fit"
+    assert body["feedback_note"] == "職務方向與目前需求不同。"
+    assert body["feedback_reason"] == "職務方向與目前需求不同。"
+    assert body["feedback_by"] == body["stage_updated_by"] == 1
+    assert body["feedback_at"] and body["stage_updated_at"]
 
 
 def test_relative_weights_are_normalized_validated_and_used(matching_client) -> None:

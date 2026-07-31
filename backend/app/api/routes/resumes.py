@@ -18,7 +18,7 @@ from fastapi import (
     status,
 )
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
@@ -69,6 +69,35 @@ def _stored_path(resume: ResumeFile) -> Iterator[Path]:
             yield path
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="Stored resume file was not found") from exc
+
+
+def _stored_resume_response(
+    resume: ResumeFile,
+    *,
+    disposition: Literal["attachment", "inline"],
+    media_type: str | None = None,
+) -> Response:
+    # Resume uploads are capped at 10 MiB. Read the object before creating the
+    # response so a missing file returns a real 404 instead of failing after a
+    # streaming 200 has started and leaving the browser waiting indefinitely.
+    with _stored_path(resume) as path:
+        content = path.read_bytes()
+
+    filename = resume.original_filename or f"resume-{resume.id}"
+    headers = {
+        "Content-Disposition": (
+            f"{disposition}; filename*=UTF-8''{quote(filename, safe='')}"
+        ),
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+    }
+    if disposition == "inline":
+        headers["X-Frame-Options"] = "SAMEORIGIN"
+    return Response(
+        content=content,
+        media_type=media_type or resume.mime or "application/octet-stream",
+        headers=headers,
+    )
 
 
 def _apply_parse(resume: ResumeFile, path: Path, requested: str) -> None:
@@ -347,19 +376,20 @@ def list_resumes(
     return list(db.scalars(statement).all())
 
 
-@router.get("/{resume_id}/file", response_class=StreamingResponse)
+@router.get("/{resume_id}/file", response_class=Response)
 def download_resume_file(
     resume_id: int,
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
-) -> StreamingResponse:
+) -> Response:
     resume = db.get(ResumeFile, resume_id)
     if resume is None:
         raise HTTPException(status_code=404, detail="Resume not found")
     _enforce_targeted_resume_scope(db, user, resume)
     if not resume.storage_key:
         raise HTTPException(status_code=404, detail="This resume has no downloadable file")
+    response = _stored_resume_response(resume, disposition="attachment")
     write_audit(
         db,
         user,
@@ -375,22 +405,53 @@ def download_resume_file(
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
+    return response
 
-    def chunks() -> Iterator[bytes]:
-        with _stored_path(resume) as path, path.open("rb") as stored_file:
-            while chunk := stored_file.read(1024 * 1024):
-                yield chunk
 
-    filename = resume.original_filename or f"resume-{resume.id}"
-    return StreamingResponse(
-        chunks(),
-        media_type=resume.mime or "application/octet-stream",
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}",
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, no-store",
-        },
+@router.get("/{resume_id}/preview", response_class=Response)
+def preview_resume_file(
+    resume_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_user),
+) -> Response:
+    resume = db.get(ResumeFile, resume_id)
+    if resume is None:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    _enforce_targeted_resume_scope(db, user, resume)
+    if not resume.storage_key:
+        raise HTTPException(status_code=404, detail="This resume has no previewable file")
+
+    filename = (resume.original_filename or "").lower()
+    mime = (resume.mime or "").lower()
+    if not (filename.endswith(".pdf") or mime == "application/pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Browser preview is available for PDF resumes only",
+        )
+    response = _stored_resume_response(
+        resume,
+        disposition="inline",
+        media_type="application/pdf",
     )
+
+    write_audit(
+        db,
+        user,
+        "resume.preview",
+        "resume",
+        resume.id,
+        user.department_id,
+        details={
+            "candidate_id": resume.candidate_id,
+            "target_requisition_id": resume.target_requisition_id,
+            "format": "pdf",
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    db.commit()
+    return response
 
 
 @router.get("/{resume_id}", response_model=ResumeRead)

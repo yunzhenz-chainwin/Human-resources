@@ -121,6 +121,16 @@ _TABLE_REDACTED_COLUMNS: dict[str, frozenset[str]] = {
             "blacklist_reason",
         }
     ),
+    "deidentified_resume_documents": frozenset(
+        {
+            "anonymous_ref",
+            "storage_key",
+            "file_hash",
+            "source_file_hash",
+            "analysis_payload",
+            "validation_summary",
+        }
+    ),
     "retention_storage_deletions": frozenset({"locator", "last_error"}),
 }
 
@@ -171,6 +181,10 @@ _TABLE_PRESENTATION: dict[str, tuple[str, str]] = {
     "candidate_skills": ("人才技能", "人才具備的技能與熟練度"),
     "candidates": ("人才主檔", "人才基本資料與聯絡資訊"),
     "departments": ("部門資料", "公司部門與組織歸屬"),
+    "deidentified_resume_documents": (
+        "去識別化履歷版本",
+        "原始履歷衍生的版本化去識別檔案、驗證狀態與分析白名單資料",
+    ),
     "job_applications": ("職缺應徵紀錄", "人才、職缺與使用履歷的關聯"),
     "job_requisitions": ("職缺資料", "招募職缺、需求條件與媒合權重"),
     "match_results": ("人才媒合結果", "人才與職缺的媒合分數及評分明細"),
@@ -298,6 +312,9 @@ _TABLE_PROTECTION_REASONS: dict[str, str] = {
     "refresh_tokens": "登入權杖由認證系統管理。",
     "retention_storage_deletions": "由人才保存期限清理工作自動管理，禁止人工修改。",
     "resume_files": "履歷必須經由上傳與履歷辨識流程建立，避免檔案與資料列不同步。",
+    "deidentified_resume_documents": (
+        "去識別化版本必須經由產生與人工核准流程維護，避免繞過個資檢查。"
+    ),
     "system_issues": "請由本頁的問題紀錄功能維護，以保留日期與進度驗證。",
     "system_settings": "系統設定可能包含秘密值，請由系統設定功能維護。",
     "users": "帳號必須由帳號與權限功能維護，確保密碼正確雜湊。",

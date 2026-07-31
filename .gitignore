@@ -3,11 +3,17 @@
 __pycache__/
 .pytest_cache/
 pytest-cache-files-*/
+.pytest-tmp-*/
 *.log
 *.py[cod]
 backend/.coverage
 backend/*.db
+backend/*.bak
+backend/.resume-ocr-*
 backend/storage/
+docs/*.before-*.docx
+.resume-ocr-*/
+.resume_ocr_tmp/
 frontend/node_modules/
 frontend/dist/
 frontend/src/*.js

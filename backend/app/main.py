@@ -9,13 +9,14 @@ from app.api.router import api_router
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.services.retention_worker import run_retention_worker
-from app.services.security import bootstrap_admin
+from app.services.security import bootstrap_admin, validate_auth_secret
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    validate_auth_secret(settings)
     with SessionLocal() as db:
         bootstrap_admin(db)
     retention_stop = asyncio.Event()

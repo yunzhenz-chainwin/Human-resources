@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.models import (
     Candidate,
+    DeidentifiedResumeDocument,
     JobApplication,
     ResumeFile,
     RetentionStorageDeletion,
@@ -363,7 +364,23 @@ def purge_expired_candidates(
             _resume_cleanup_clause(candidate_ids)
         )
     ).all()
+    resume_ids = [row.id for row in resume_rows]
+    deidentified_keys = (
+        list(
+            db.scalars(
+                select(DeidentifiedResumeDocument.storage_key).where(
+                    DeidentifiedResumeDocument.source_resume_id.in_(resume_ids),
+                    DeidentifiedResumeDocument.storage_key.is_not(None),
+                )
+            ).all()
+        )
+        if resume_ids
+        else []
+    )
+    # A de-identified PDF is a separately stored derivative, so cascading its
+    # database row must also enqueue its object for physical deletion.
     resume_keys = [row.storage_key for row in resume_rows if row.storage_key]
+    resume_keys.extend(key for key in deidentified_keys if key)
     photo_paths = [row.photo_path for row in rows if row.photo_path]
     queued = _queue_storage_deletions(db, resume_keys, photo_paths)
 
@@ -386,6 +403,7 @@ def purge_expired_candidates(
             "retention_years": policy.retention_years,
             "deleted_candidates": len(candidate_ids),
             "deleted_resume_files": len(resume_rows),
+            "deleted_deidentified_resume_files": len(deidentified_keys),
             "queued_storage_deletions": queued,
         },
     )

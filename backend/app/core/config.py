@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.6-flash"
     gemini_timeout_seconds: float = Field(default=45.0, ge=2.0, le=120.0)
     gemini_max_output_tokens: int = Field(default=4096, ge=512, le=65_536)
+    gemini_daily_generation_limit_per_user: int = Field(default=50, ge=1, le=10_000)
 
     @property
     def cors_origin_list(self) -> list[str]:

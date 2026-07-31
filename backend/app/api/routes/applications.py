@@ -157,10 +157,8 @@ def _enforce_interview_stage_scope(
 ) -> None:
     _enforce_application_scope(user, requisition)
     if stage == "hr":
-        if user.role not in GLOBAL_RECRUITING_ROLES:
+        if user.role != "hr":
             raise HTTPException(status_code=403, detail="Only HR can update the first interview")
-        return
-    if user.role == "admin":
         return
     if user.role != "manager":
         raise HTTPException(

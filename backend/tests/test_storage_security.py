@@ -40,6 +40,9 @@ class FakeProvider(StorageProvider):
     def delete(self, key: str) -> None:
         self.objects.pop(validate_storage_key(key), None)
 
+    def exists(self, key: str) -> bool:
+        return validate_storage_key(key) in self.objects
+
     @contextmanager
     def materialize(self, key: str):
         raise NotImplementedError
@@ -183,6 +186,11 @@ def test_s3_provider_upload_download_and_delete(monkeypatch, security_root: Path
         def download_file(self, bucket, key, destination):
             Path(destination).write_bytes(self.objects[(bucket, key)])
 
+        def head_object(self, Bucket, Key):
+            if (Bucket, Key) not in self.objects:
+                raise KeyError((Bucket, Key))
+            return {"ContentLength": len(self.objects[(Bucket, Key)])}
+
         def delete_object(self, Bucket, Key):
             self.objects.pop((Bucket, Key), None)
 
@@ -199,6 +207,7 @@ def test_s3_provider_upload_download_and_delete(monkeypatch, security_root: Path
     source = security_root / "source.pdf"
     source.write_bytes(b"%PDF-1.4 provider test")
     provider.put_file(source, "resumes/one.pdf", "application/pdf")
+    assert provider.exists("resumes/one.pdf") is True
     with provider.materialize("resumes/one.pdf") as downloaded:
         assert downloaded.read_bytes() == source.read_bytes()
     assert list((security_root / "temporary").glob("*")) == []

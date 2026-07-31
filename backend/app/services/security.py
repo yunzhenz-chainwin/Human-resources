@@ -11,13 +11,20 @@ from fastapi import HTTPException, Request, status
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.models.organization import User
 from app.models.security import AuditLog, RefreshToken
 
 SCRYPT_N = 2**14
 SCRYPT_R = 8
 SCRYPT_P = 1
+
+_UNSAFE_AUTH_SECRET_KEYS = frozenset(
+    {
+        "change-me-to-at-least-32-random-characters",
+        "replace-with-at-least-32-random-characters",
+    }
+)
 
 
 def hash_password(password: str) -> str:
@@ -56,11 +63,20 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def _secret() -> bytes:
-    secret = get_settings().auth_secret_key.encode()
+def validate_auth_secret(settings: Settings | None = None) -> bytes:
+    """Fail fast when JWT signing would be unavailable or predictably configured."""
+
+    configured = (settings or get_settings()).auth_secret_key.strip()
+    secret = configured.encode()
     if len(secret) < 32:
         raise RuntimeError("AUTH_SECRET_KEY must contain at least 32 bytes")
+    if configured.casefold() in _UNSAFE_AUTH_SECRET_KEYS:
+        raise RuntimeError("AUTH_SECRET_KEY must not use the public example value")
     return secret
+
+
+def _secret() -> bytes:
+    return validate_auth_secret()
 
 
 def encode_token(user: User, token_type: str, lifetime: timedelta, jti: str) -> str:

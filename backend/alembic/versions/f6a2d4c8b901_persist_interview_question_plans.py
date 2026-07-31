@@ -7,6 +7,7 @@ Revises: 4a1d9f0b3c22, e7b2c91d5f40
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "f6a2d4c8b901"
@@ -30,8 +31,18 @@ def upgrade() -> None:
         sa.Column("generation_warning", sa.Text(), nullable=True),
         sa.Column("generated_by_id", sa.BigInteger(), nullable=True),
         sa.Column("generated_by_name", sa.String(length=100), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
         sa.CheckConstraint(
             "generation_mode IN ('gemini','rules')",
             name=op.f("ck_interview_question_plans_valid_generation_mode"),

@@ -38,13 +38,20 @@ subprocess.run(
     check=True,
 )
 os.chdir(BACKEND)
+backend_path = str(BACKEND)
+if backend_path in sys.path:
+    sys.path.remove(backend_path)
+sys.path.insert(0, backend_path)
 
 from app.db.session import SessionLocal  # noqa: E402
+from app.main import app  # noqa: E402
 from app.services.initial_data import seed_initial_data  # noqa: E402
+from app.services.matching_benchmark import seed_matching_benchmark  # noqa: E402
 
 with SessionLocal() as database:
     seed_initial_data(database)
+    seed_matching_benchmark(database)
 
 import uvicorn  # noqa: E402
 
-uvicorn.run("app.main:app", host="127.0.0.1", port=8018, log_level="warning")
+uvicorn.run(app, host="127.0.0.1", port=8018, log_level="warning")

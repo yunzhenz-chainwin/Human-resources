@@ -1,11 +1,13 @@
 import importlib.util
 import io
+import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
-from pypdf import PdfWriter
 from docx import Document
+from pypdf import PdfWriter
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "resume_anonymizer.py"
@@ -142,7 +144,7 @@ def test_text_input_accepts_utf8_and_rejects_unknown_suffix() -> None:
 
         @staticmethod
         def read_bytes() -> bytes:
-            return "姓名 王小名\n電話 0912-345-678".encode("utf-8")
+            return "姓名 王小名\n電話 0912-345-678".encode()
 
     assert "姓名 王小名" in resume_anonymizer.read_resume_input(TextPath())
 
@@ -159,3 +161,30 @@ def test_ocr_quality_flags_low_confidence() -> None:
 
 def test_ocr_resolution_is_300_dpi() -> None:
     assert resume_anonymizer.OCR_DPI == 300
+
+
+def test_local_ocr_cleans_raw_resume_when_poppler_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scratch = ROOT / "backend"
+    token = f"cleanup-test-{uuid4().hex}"
+    expected_pdf = scratch / f".resume-ocr-{token}.pdf"
+    monkeypatch.chdir(scratch)
+    monkeypatch.setattr(resume_anonymizer.shutil, "which", lambda name: name)
+    monkeypatch.setattr(resume_anonymizer.secrets, "token_hex", lambda _length: token)
+
+    calls = 0
+
+    def fake_run(args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return type("Completed", (), {"stdout": "List of available languages:\nchi_tra\n"})()
+        raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(resume_anonymizer.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Poppler"):
+        resume_anonymizer._local_ocr_pdf(b"private resume", 1)
+
+    assert not expected_pdf.exists()

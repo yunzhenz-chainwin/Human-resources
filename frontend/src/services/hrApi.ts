@@ -148,6 +148,7 @@ export type CandidateResumeSummaryDto = {
   parse_status: string
   resume_url: string | null
   has_file: boolean
+  document_origin: 'applicant_upload' | 'system_generated'
 }
 export type CandidateApplicationDetailDto = {
   id: number
@@ -212,6 +213,7 @@ export type InterviewRecordQuestion = {
 }
 export type InterviewRecordWrite = {
   stage: InterviewStage
+  question_plan_id?: number | null
   interviewed_at: string
   duration_minutes?: number | null
   mode: InterviewRecordMode
@@ -225,6 +227,8 @@ export type InterviewRecordWrite = {
 export type InterviewRecordDto = InterviewRecordWrite & {
   id: number
   application_id: number
+  question_plan_id: number | null
+  question_plan_version: number | null
   interviewer_id: number | null
   interviewer_name: string
   updated_by_id: number | null
@@ -260,6 +264,7 @@ export type InterviewQuestionPlanItem = {
   source: string
 }
 export type InterviewQuestionPlan = {
+  id?: number | null
   application_id: number
   stage: InterviewStage
   job_title: string
@@ -314,6 +319,7 @@ export type ResumeDto = {
   file_hash: string | null
   file_size: number | null
   mime: string | null
+  document_origin: 'applicant_upload' | 'system_generated'
   resume_url: string | null
   uploaded_at: string
   updated_at: string
@@ -358,13 +364,34 @@ async function apiBlob(path: string, retry = true): Promise<Blob> {
   const headers = new Headers()
   const accessToken = authSession.state.accessToken
   if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
-  const response = await fetch(`${API_BASE}${path}`, { headers })
-  if (response.status === 401 && retry && authSession.state.refreshToken) {
-    await authSession.refreshAccess(accessToken)
-    return apiBlob(path, false)
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 30_000)
+  try {
+    let response: Response
+    try {
+      response = await fetch(`${API_BASE}${path}`, { headers, signal: controller.signal })
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === 'AbortError') {
+        throw new Error('檔案讀取逾時，請稍後再試')
+      }
+      throw new Error('無法連線至檔案服務')
+    }
+    if (response.status === 401 && retry && authSession.state.refreshToken) {
+      await authSession.refreshAccess(accessToken)
+      return apiBlob(path, false)
+    }
+    if (!response.ok) {
+      let detail = response.statusText || '檔案無法讀取'
+      try {
+        const body = await response.json() as { detail?: string }
+        if (body.detail) detail = body.detail
+      } catch { /* response is not JSON */ }
+      throw new Error(`${response.status}：${detail}`)
+    }
+    return await response.blob()
+  } finally {
+    window.clearTimeout(timeout)
   }
-  if (!response.ok) throw new Error(`無法讀取檔案（${response.status}）`)
-  return response.blob()
 }
 
 // Hard cap so a backend that ignores the `page` param cannot spin the fetch-all loops into an infinite loop / OOM.
@@ -372,18 +399,37 @@ const MAX_FETCH_PAGES = 100
 
 export const hrApi = {
   health: () => apiRequest<{ status: string }>('/health'),
-  candidates: async (params: { page?: number; page_size?: number } = {}): Promise<ApiResult<CandidateDto[]>> => {
+  candidates: async (
+    params: {
+      page?: number
+      page_size?: number
+      q?: string
+      skill?: string
+      status?: string
+      city?: string
+      min_years?: number
+      department_id?: number
+    } = {},
+  ): Promise<ApiResult<CandidateDto[]>> => {
     const pageSize = params.page_size || 100
+    // Optional AND filters resolved server-side; omitted params keep the original "return everything" behaviour.
+    const filters: Record<string, string> = {}
+    if (params.q) filters.q = params.q
+    if (params.skill) filters.skill = params.skill
+    if (params.status) filters.status = params.status
+    if (params.city) filters.city = params.city
+    if (params.min_years !== undefined) filters.min_years = String(params.min_years)
+    if (params.department_id !== undefined) filters.department_id = String(params.department_id)
     // An explicit page returns just that page; the default (no page) walks every page so counts stay accurate.
     if (params.page !== undefined) {
-      const query = new URLSearchParams({ page: String(params.page), page_size: String(pageSize) })
+      const query = new URLSearchParams({ page: String(params.page), page_size: String(pageSize), ...filters })
       return apiRequest<CandidateDto[]>(`/candidates?${query}`)
     }
     const all: CandidateDto[] = []
     let batch: CandidateDto[]
     let page = 1
     do {
-      const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+      const query = new URLSearchParams({ page: String(page), page_size: String(pageSize), ...filters })
       batch = (await apiRequest<CandidateDto[]>(`/candidates?${query}`)).data
       all.push(...batch)
       page += 1
@@ -424,7 +470,10 @@ export const hrApi = {
   }),
   deleteDepartmentRequisition: (id: number) => apiRequest<void>(`/department/requisitions/${id}`, { method: 'DELETE' }),
 
-  applications: () => apiRequest<ApplicationDto[]>('/applications'),
+  applications: (filters: { requisitionId?: number | null } = {}) => {
+    const query = filters.requisitionId ? `?requisition_id=${encodeURIComponent(String(filters.requisitionId))}` : ''
+    return apiRequest<ApplicationDto[]>(`/applications${query}`)
+  },
   createApplication: (payload: ApplicationWrite) => apiRequest<ApplicationDto>('/applications', {
     method: 'POST', body: JSON.stringify(payload),
   }),
@@ -432,6 +481,7 @@ export const hrApi = {
     method: 'PATCH', body: JSON.stringify(payload),
   }),
   downloadResume: (id: number) => apiBlob(`/resumes/${id}/file`),
+  previewResume: (id: number) => apiBlob(`/resumes/${id}/preview`),
   updateApplicationInterview: (id: number, payload: InterviewWrite) => apiRequest<ApplicationDto>(`/applications/${id}/interview`, {
     method: 'PATCH', body: JSON.stringify(payload),
   }),
@@ -458,7 +508,7 @@ export const hrApi = {
     apiRequest<InterviewRecordDto>(`/applications/${applicationId}/interview-records`, {
       method: 'POST', body: JSON.stringify(payload),
     }),
-  updateInterviewRecord: (applicationId: number, recordId: number, payload: Partial<Omit<InterviewRecordWrite, 'stage'>>) =>
+  updateInterviewRecord: (applicationId: number, recordId: number, payload: Partial<Omit<InterviewRecordWrite, 'stage' | 'question_plan_id'>>) =>
     apiRequest<InterviewRecordDto>(`/applications/${applicationId}/interview-records/${recordId}`, {
       method: 'PATCH', body: JSON.stringify(payload),
     }),

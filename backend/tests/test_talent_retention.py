@@ -24,6 +24,7 @@ from app.models import (
     CandidateEducation,
     CandidateExperience,
     CandidateSkill,
+    DeidentifiedResumeDocument,
     InterviewRecord,
     JobApplication,
     JobRequisition,
@@ -269,6 +270,28 @@ def test_dry_run_defaults_safe_and_actual_purge_erases_all_candidate_pii(
         )
         db.add(resume)
         db.flush()
+        deidentified_resume = DeidentifiedResumeDocument(
+            source_resume_id=resume.id,
+            anonymous_ref=str(uuid4()),
+            version=1,
+            storage_key="deidentified-resumes/anonymous-v1.pdf",
+            file_hash="c" * 64,
+            file_size=128,
+            source_file_hash=resume.file_hash,
+            deidentification_version="test-v1",
+            payload_schema_version="talenthub.deidentified-resume.v1",
+            analysis_payload={
+                "schema_version": "talenthub.deidentified-resume.v1",
+                "skills": ["Python"],
+            },
+            validation_status="analysis_ready",
+            validation_summary={"blocker_count": 0},
+            created_by=actor.id,
+            reviewed_by=actor.id,
+            reviewed_at=datetime(2021, 1, 1, tzinfo=UTC),
+        )
+        db.add(deidentified_resume)
+        db.flush()
         application = JobApplication(
             requisition_id=requisition.id,
             candidate_id=candidate.id,
@@ -301,7 +324,10 @@ def test_dry_run_defaults_safe_and_actual_purge_erases_all_candidate_pii(
             ]
         )
         db.commit()
-        candidate_id, resume_id, application_id = candidate.id, resume.id, application.id
+        candidate_id = candidate.id
+        resume_id = resume.id
+        deidentified_resume_id = deidentified_resume.id
+        application_id = application.id
         actor_id = actor.id
 
     with testing_session() as db:
@@ -335,6 +361,7 @@ def test_dry_run_defaults_safe_and_actual_purge_erases_all_candidate_pii(
         assert result.storage_delete_failures == 0
         assert db.get(Candidate, candidate_id) is None
         assert db.get(ResumeFile, resume_id) is None
+        assert db.get(DeidentifiedResumeDocument, deidentified_resume_id) is None
         assert db.get(JobApplication, application_id) is None
         assert db.scalar(select(func.count()).select_from(CandidateEducation)) == 0
         assert db.scalar(select(func.count()).select_from(CandidateExperience)) == 0
@@ -348,7 +375,10 @@ def test_dry_run_defaults_safe_and_actual_purge_erases_all_candidate_pii(
         )
         assert audit is not None
         assert "Private Candidate" not in str(audit.details)
-    assert storage.deleted == ["resumes/random-key.pdf"]
+    assert sorted(storage.deleted) == [
+        "deidentified-resumes/anonymous-v1.pdf",
+        "resumes/random-key.pdf",
+    ]
     assert not photo.exists()
 
 

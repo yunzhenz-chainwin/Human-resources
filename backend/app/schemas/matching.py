@@ -14,6 +14,29 @@ MatchStatus = Literal[
     "rejected_by_manager",
     "withdrawn",
 ]
+MatchSource = Literal["all", "applicants", "talent_pool"]
+
+RejectionReasonCategory = Literal[
+    "skills",
+    "experience",
+    "salary",
+    "location",
+    "education",
+    "role_fit",
+    "availability",
+    "position_closed",
+    "other",
+]
+
+OverrideReasonCategory = Literal[
+    "transferable_skills",
+    "related_experience",
+    "learning_potential",
+    "internal_referral",
+    "business_need",
+    "data_incomplete",
+    "other",
+]
 
 
 class MatchHighlight(BaseModel):
@@ -83,9 +106,21 @@ class MatchRead(BaseModel):
     highlights: list[MatchHighlight] = Field(default_factory=list)
     rank: int | None
     status: MatchStatus
+    recruitment_stage: MatchStatus
+    stage_updated_by: int | None
+    stage_updated_at: datetime | None
+    manual_override_category: str | None
+    manual_override_note: str | None
+    manual_override_by: int | None
+    manual_override_at: datetime | None
+    feedback_category: str | None
+    feedback_note: str | None
     feedback_reason: str | None
+    feedback_by: int | None
     feedback_at: datetime | None
     computed_at: datetime
+    data_completeness: float
+    confidence: Literal["high", "medium", "low"]
 
 
 class MatchList(BaseModel):
@@ -96,13 +131,18 @@ class MatchList(BaseModel):
 class CandidateMatchOverviewItem(BaseModel):
     candidate: MatchCandidateRead
     match: MatchRead | None = None
+    source: Literal["applicant", "talent_pool"]
+    application_id: int | None = None
 
 
 class CandidateMatchOverview(BaseModel):
     items: list[CandidateMatchOverviewItem]
+    source: MatchSource
     total_candidates: int
     computed_count: int
     uncomputed_count: int
+    applicants_count: int
+    talent_pool_count: int
 
 
 class MatchingCriteria(BaseModel):
@@ -134,14 +174,45 @@ class MatchingCriteria(BaseModel):
         return self
 
 
+class MatchingCriteriaImpact(BaseModel):
+    source: MatchSource
+    total_candidates: int
+    current_passed: int
+    preview_passed: int
+    preview_excluded: int
+    changed_count: int
+
+
 class MatchFeedback(BaseModel):
     status: Literal["interview", "rejected_by_manager"]
+    reason_category: RejectionReasonCategory | None = None
+    note: str | None = Field(default=None, max_length=500)
+    # Deprecated compatibility field. New callers should send category + note.
     reason: str | None = Field(default=None, max_length=200)
 
     @model_validator(mode="after")
     def require_rejection_reason(self):
-        if self.status == "rejected_by_manager" and not (self.reason or "").strip():
-            raise ValueError("A rejection reason is required")
+        if self.status == "rejected_by_manager":
+            if self.reason_category is None and not (self.reason or "").strip():
+                raise ValueError("A structured rejection reason is required")
+            if self.reason_category == "other" and not (
+                (self.note or "").strip() or (self.reason or "").strip()
+            ):
+                raise ValueError("A note is required when the reason category is other")
+        return self
+
+
+class MatchManualOverride(BaseModel):
+    reason_category: OverrideReasonCategory
+    note: str | None = Field(default=None, max_length=500)
+    target_stage: Literal["recommended", "shortlisted", "contacted", "interview"] = (
+        "shortlisted"
+    )
+
+    @model_validator(mode="after")
+    def require_other_note(self):
+        if self.reason_category == "other" and not (self.note or "").strip():
+            raise ValueError("A note is required when the reason category is other")
         return self
 
 

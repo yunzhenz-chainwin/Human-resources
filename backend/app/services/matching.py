@@ -298,8 +298,11 @@ def _match_highlights(
         "blacklisted": "人才列入黑名單",
         "consent_withdrawn": "人才已撤回資料使用同意",
         "required_skills": "必要技能",
+        "required_skills_unknown": "必要技能資料不足",
         "minimum_years": "最低年資",
+        "minimum_years_unknown": "工作年資資料不足",
         "education": "學歷要求",
+        "education_unknown": "學歷資料不足",
         "location": "工作地點",
     }
 
@@ -465,24 +468,21 @@ def score_candidate(
     required_ratio = config.get("required_skill_ratio", 1.0)
     if not isinstance(required_ratio, int | float) or not 0 <= required_ratio <= 1:
         required_ratio = 1.0
-    if (
-        config.get("require_skills", True)
-        and required
-        and len(required_hits) / len(required) < required_ratio
-    ):
-        gate_misses.append("required_skills")
-    if (
-        config.get("require_years", True)
-        and min_years is not None
-        and (years is None or years < min_years)
-    ):
-        gate_misses.append("minimum_years")
-    if (
-        config.get("require_education", True)
-        and required_education
-        and candidate_education < required_education
-    ):
-        gate_misses.append("education")
+    if config.get("require_skills", True) and required:
+        if not normalized_candidate_skills:
+            gate_misses.append("required_skills_unknown")
+        elif len(required_hits) / len(required) < required_ratio:
+            gate_misses.append("required_skills")
+    if config.get("require_years", True) and min_years is not None:
+        if years is None:
+            gate_misses.append("minimum_years_unknown")
+        elif years < min_years:
+            gate_misses.append("minimum_years")
+    if config.get("require_education", True) and required_education:
+        if candidate_education == 0:
+            gate_misses.append("education_unknown")
+        elif candidate_education < required_education:
+            gate_misses.append("education")
     work_adjacent = {
         normalize_text(city)
         for city in ADJACENT_CITIES.get(normalize_text(requisition.work_city), set())
@@ -496,56 +496,99 @@ def score_candidate(
         gate_misses.append("location")
 
     skill_denominator = len(required) * 2 + len(preferred)
+    skill_known = bool(normalized_candidate_skills) or not skill_denominator
     skill_score = (
         (len(required_hits) * 2 + len(preferred_hits)) / skill_denominator
+        if skill_denominator and skill_known
+        else 0.5
         if skill_denominator
         else 1.0
     )
     title_score = _title_relevance(candidate.current_title, requisition.title)
-    years_score = 1.0 if min_years is None else min(1.0, (years or 0) / max(min_years, 0.1))
+    years_score = (
+        1.0
+        if min_years is None
+        else 0.5
+        if years is None
+        else min(1.0, years / max(min_years, 0.1))
+    )
     salary_score = _salary_score(candidate, requisition)
     education_score = (
         1.0
         if required_education == 0 or candidate_education >= required_education
+        else 0.5
+        if candidate_education == 0
         else candidate_education / required_education
     )
     location_score = _location_score(candidate, requisition.work_city)
+    salary_known = bool(
+        (candidate.expected_salary_min is not None or candidate.expected_salary_max is not None)
+        and (requisition.salary_min is not None or requisition.salary_max is not None)
+    )
+    location_known = bool(_candidate_cities(candidate))
+    education_known = candidate_education > 0 or required_education == 0
     components = {
-        "skill": (skill_score, required_hits + preferred_hits, required_misses + preferred_misses),
+        "skill": (
+            skill_score,
+            required_hits + preferred_hits,
+            required_misses + preferred_misses,
+            skill_known,
+        ),
         "relevance": (
             title_score,
             [candidate.current_title] if candidate.current_title else [],
             [],
+            bool(candidate.current_title),
         ),
-        "years": (years_score, [years] if years is not None else [], []),
-        "salary": (salary_score, [], []),
+        "years": (years_score, [years] if years is not None else [], [], years is not None),
+        "salary": (salary_score, [], [], salary_known),
         "education": (
             education_score,
             [],
-            [requisition.education_req] if "education" in gate_misses else [],
+            [requisition.education_req]
+            if "education" in gate_misses or "education_unknown" in gate_misses
+            else [],
+            education_known,
         ),
-        "location": (location_score, [requisition.work_city] if location_score == 1 else [], []),
+        "location": (
+            location_score,
+            [requisition.work_city] if location_score == 1 else [],
+            [],
+            location_known,
+        ),
     }
     missing_fields = [
         field
         for field, value in (
+            ("skills", normalized_candidate_skills or None),
             ("current_title", candidate.current_title),
             ("total_years", candidate.total_years),
-            ("highest_education", candidate.highest_education),
+            ("highest_education", candidate_education if candidate_education else None),
             (
                 "expected_salary",
-                candidate.expected_salary_min or candidate.expected_salary_max,
+                candidate.expected_salary_min
+                if candidate.expected_salary_min is not None
+                else candidate.expected_salary_max,
             ),
             ("location", candidate.expected_cities or candidate.city),
         )
         if value is None
     ]
+    completeness = max(0.0, 1 - len(set(missing_fields)) / 6)
+    confidence = (
+        "high" if completeness >= 0.8 else "medium" if completeness >= 0.6 else "low"
+    )
     breakdown: dict[str, Any] = {
         "gate": {"passed": not gate_misses, "miss": gate_misses},
-        "data_quality": {"missing": missing_fields},
+        "data_quality": {
+            "missing": missing_fields,
+            "total_fields": 6,
+            "completeness": round(completeness, 4),
+            "confidence": confidence,
+        },
     }
     weighted_total = 0.0
-    for key, (component_score, hits, misses) in components.items():
+    for key, (component_score, hits, misses, known) in components.items():
         contribution = weights[key] * component_score
         weighted_total += contribution
         breakdown[key] = {
@@ -554,6 +597,7 @@ def score_candidate(
             "contribution": round(contribution * 100, 2),
             "hit": hits,
             "miss": misses,
+            "known": known,
         }
         if key == "skill":
             breakdown[key]["evidence"] = skill_evidence
@@ -577,8 +621,8 @@ def score_candidate(
     breakdown["highlights"] = _match_highlights(
         required_hits=required_hits,
         preferred_hits=preferred_hits,
-        required_misses=required_misses,
-        preferred_misses=preferred_misses,
+        required_misses=required_misses if skill_known else [],
+        preferred_misses=preferred_misses if skill_known else [],
         gate_misses=gate_misses,
         years=years,
         min_years=min_years,
@@ -627,7 +671,11 @@ def rematch_requisition(db: Session, requisition: JobRequisition) -> list[MatchR
             result.total_score = score.total_score
             result.score_breakdown = score.breakdown
             result.computed_at = now
-            if result.status in AUTO_STATUSES:
+            if (
+                result.status in AUTO_STATUSES
+                and result.stage_updated_at is None
+                and result.manual_override_at is None
+            ):
                 result.status = "recommended" if score.gate_passed else "ineligible"
         result.rank = None
         computed.append((candidate, score, result))
@@ -669,8 +717,7 @@ def assess_matching_readiness(results: list[MatchResult]) -> dict[str, Any]:
     )
     completeness_scores: list[float] = []
     for item in results:
-        missing = (item.score_breakdown or {}).get("data_quality", {}).get("missing", [])
-        completeness_scores.append(max(0.0, 1 - len(set(missing)) / 5))
+        completeness_scores.append(item.data_completeness)
     completeness = sum(completeness_scores) / total if total else 0.0
     average_score = (
         sum(float(item.total_score) for item in eligible) / len(eligible) if eligible else 0.0

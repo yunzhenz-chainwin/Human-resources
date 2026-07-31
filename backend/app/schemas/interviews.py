@@ -48,6 +48,7 @@ class InterviewRecordCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     stage: InterviewStage
+    question_plan_id: int | None = Field(default=None, gt=0)
     interviewed_at: datetime
     duration_minutes: int | None = Field(default=None, ge=1, le=1440)
     mode: InterviewMode
@@ -121,6 +122,8 @@ class InterviewRecordRead(BaseModel):
 
     id: int
     application_id: int
+    question_plan_id: int | None
+    question_plan_version: int | None
     stage: InterviewStage
     interviewed_at: datetime
     duration_minutes: int | None

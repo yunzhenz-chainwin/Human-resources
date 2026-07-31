@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -6,7 +7,7 @@ from uuid import uuid4
 import fitz
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import String, cast, exists, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import get_settings
@@ -21,6 +22,7 @@ from app.dependencies.auth import (
 from app.models import (
     Candidate,
     CandidateActivity,
+    CandidateSkill,
     Department,
     JobApplication,
     JobRequisition,
@@ -39,7 +41,9 @@ from app.schemas.hr import (
     RequisitionRead,
 )
 from app.services.applications import normalize_email, normalize_phone
+from app.services.matching import canonical_skill
 from app.services.security import write_audit
+from app.services.storage import StorageProvider, get_storage_provider
 from app.services.talent_retention import candidate_retention_until
 
 router = APIRouter(prefix="/candidates")
@@ -66,6 +70,17 @@ def _safe_external_url(value: str | None) -> str | None:
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return None
     return value
+
+
+def _resume_has_file(resume: ResumeFile, storage: StorageProvider) -> bool:
+    if not resume.storage_key:
+        return False
+    try:
+        return storage.exists(resume.storage_key)
+    except Exception:
+        # Candidate details should remain usable during a temporary object-store
+        # outage. The actual preview/download endpoint will still return an error.
+        return False
 
 
 def _photo_candidate(db: Session, user: User, candidate_id: int) -> Candidate:
@@ -138,6 +153,14 @@ def _validated_photo(data: bytes, content_type: str | None) -> tuple[str, str]:
 def list_candidates(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    q: str | None = Query(None, description="Keyword over name/current_title/code/email"),
+    skill: str | None = Query(None, description="Canonical skill filter (matches skill_norm)"),
+    status: str | None = Query(None, description="Exact candidate status"),
+    min_years: float | None = Query(None, ge=0, description="Minimum total_years"),
+    city: str | None = Query(None, description="Expected city (membership in expected_cities)"),
+    department_id: int | None = Query(
+        None, description="Filter to candidates with an application in this department"
+    ),
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_manager),
 ) -> list[Candidate]:
@@ -146,11 +169,57 @@ def list_candidates(
     Department managers must use ``/department/workspace`` or the scoped
     applications API.  Filtering this endpoint by department is not sufficient:
     it would still expose the talent-pool catalogue outside the hiring workflow.
+
+    All filter parameters are optional and combined with AND; when none are
+    supplied the behaviour is identical to the unfiltered, paginated listing.
     """
+    query = select(Candidate).where(Candidate.deleted_at.is_(None))
+
+    if q:
+        pattern = f"%{q}%"
+        query = query.where(
+            or_(
+                Candidate.name.ilike(pattern),
+                Candidate.current_title.ilike(pattern),
+                Candidate.code.ilike(pattern),
+                Candidate.email.ilike(pattern),
+            )
+        )
+
+    if skill:
+        normalized_skill = canonical_skill(skill)
+        query = query.where(
+            exists().where(
+                (CandidateSkill.candidate_id == Candidate.id)
+                & (CandidateSkill.skill_norm == normalized_skill)
+            )
+        )
+
+    if status:
+        query = query.where(Candidate.status == status)
+
+    if min_years is not None:
+        query = query.where(Candidate.total_years >= min_years)
+
+    if city:
+        # ``expected_cities`` is a generic JSON array serialized with json.dumps,
+        # so matching the quoted, json-encoded token keeps element boundaries and
+        # stays portable across SQLite (TEXT storage) and PostgreSQL (JSON -> text
+        # cast). This avoids substring collisions such as "Tai" hitting "Taipei".
+        token = f"%{json.dumps(city)}%"
+        query = query.where(cast(Candidate.expected_cities, String).ilike(token))
+
+    if department_id is not None:
+        query = query.where(
+            exists().where(
+                (JobApplication.candidate_id == Candidate.id)
+                & (JobApplication.requisition_id == JobRequisition.id)
+                & (JobRequisition.department_id == department_id)
+            )
+        )
+
     query = (
-        select(Candidate)
-        .where(Candidate.deleted_at.is_(None))
-        .order_by(Candidate.updated_at.desc())
+        query.order_by(Candidate.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -215,6 +284,7 @@ def get_candidate(
         if audited_user is not None and audited_user.role == "manager"
         else None
     )
+    resume_storage = get_storage_provider()
 
     application_statement = (
         select(JobApplication, JobRequisition, ResumeFile)
@@ -262,7 +332,8 @@ def get_candidate(
                         source_platform=scoped_resume.source_platform,
                         parse_status=scoped_resume.parse_status,
                         resume_url=_safe_external_url(scoped_resume.resume_url),
-                        has_file=bool(scoped_resume.storage_key),
+                        has_file=_resume_has_file(scoped_resume, resume_storage),
+                        document_origin=scoped_resume.document_origin,
                     )
                     if scoped_resume is not None
                     else None
@@ -290,7 +361,8 @@ def get_candidate(
             source_platform=resume.source_platform,
             parse_status=resume.parse_status,
             resume_url=_safe_external_url(resume.resume_url),
-            has_file=bool(resume.storage_key),
+            has_file=_resume_has_file(resume, resume_storage),
+            document_origin=resume.document_origin,
         )
         for resume, requisition in db.execute(resume_statement).all()
     ]

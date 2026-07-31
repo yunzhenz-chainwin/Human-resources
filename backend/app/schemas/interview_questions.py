@@ -57,6 +57,7 @@ class InterviewQuestionPlanItem(BaseModel):
 
 
 class InterviewQuestionPlanResponse(BaseModel):
+    id: int | None = None
     application_id: int
     stage: Literal["hr", "manager"]
     job_title: str

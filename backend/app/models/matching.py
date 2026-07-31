@@ -58,6 +58,21 @@ class MatchResult(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(
         String(30), default="recommended", server_default="recommended", nullable=False
     )
+    # ``status`` remains the persisted recruitment stage for API compatibility.
+    # The audit fields below distinguish a human stage decision from the
+    # automatically calculated gate/score, so a rematch cannot erase human work.
+    stage_updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    stage_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    manual_override_category: Mapped[str | None] = mapped_column(String(40))
+    manual_override_note: Mapped[str | None] = mapped_column(String(500))
+    manual_override_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    manual_override_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    feedback_category: Mapped[str | None] = mapped_column(String(40))
+    feedback_note: Mapped[str | None] = mapped_column(String(500))
     feedback_reason: Mapped[str | None] = mapped_column(String(200))
     feedback_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     feedback_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
@@ -72,3 +87,33 @@ class MatchResult(TimestampMixin, Base):
     def highlights(self) -> list[dict]:
         value = (self.score_breakdown or {}).get("highlights", [])
         return value if isinstance(value, list) else []
+
+    @property
+    def recruitment_stage(self) -> str:
+        """Human workflow stage, kept separate from the calculated fit fields."""
+
+        return self.status
+
+    @property
+    def data_completeness(self) -> float:
+        quality = (self.score_breakdown or {}).get("data_quality", {})
+        stored = quality.get("completeness") if isinstance(quality, dict) else None
+        if isinstance(stored, int | float):
+            return max(0.0, min(1.0, float(stored)))
+        missing = quality.get("missing", []) if isinstance(quality, dict) else []
+        # Older score rows tracked five fields and did not persist a denominator.
+        return max(0.0, 1 - len(set(missing if isinstance(missing, list) else [])) / 5)
+
+    @property
+    def confidence(self) -> str:
+        quality = (self.score_breakdown or {}).get("data_quality", {})
+        stored = quality.get("confidence") if isinstance(quality, dict) else None
+        if stored in {"high", "medium", "low"}:
+            return stored
+        return (
+            "high"
+            if self.data_completeness >= 0.8
+            else "medium"
+            if self.data_completeness >= 0.6
+            else "low"
+        )

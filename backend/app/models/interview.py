@@ -33,6 +33,10 @@ class InterviewRecord(TimestampMixin, Base):
             "overall_rating IS NULL OR overall_rating BETWEEN 1 AND 5",
             name="valid_overall_rating",
         ),
+        CheckConstraint(
+            "question_plan_version IS NULL OR question_plan_version >= 1",
+            name="valid_question_plan_version",
+        ),
         Index(
             "ix_interview_records_application_interviewed_at",
             "application_id",
@@ -44,6 +48,10 @@ class InterviewRecord(TimestampMixin, Base):
     application_id: Mapped[int] = mapped_column(
         ForeignKey("job_applications.id", ondelete="CASCADE"), index=True
     )
+    question_plan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("interview_question_plans.id", ondelete="SET NULL"), index=True
+    )
+    question_plan_version: Mapped[int | None] = mapped_column(Integer)
     stage: Mapped[str] = mapped_column(String(20), nullable=False)
     interviewed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     duration_minutes: Mapped[int | None] = mapped_column(Integer)

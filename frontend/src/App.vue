@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import AdminView from './components/AdminView.vue'
 import AuthView from './components/AuthView.vue'
+import CandidateAnalysisPanel from './components/CandidateAnalysisPanel.vue'
 import DepartmentWorkspace from './components/DepartmentWorkspace.vue'
-import InterviewManagement from './components/InterviewManagement.vue'
-import MatchingView from './components/MatchingView.vue'
+import RecruitmentWorkspace from './components/RecruitmentWorkspace.vue'
 import ReportsView from './components/ReportsView.vue'
 import TalentRetentionPanel from './components/TalentRetentionPanel.vue'
 import { adminApi, type Department } from './services/adminApi'
@@ -16,6 +16,7 @@ import {
   type ApplicationDto,
   type CandidateDetailDto,
   type CandidateDto,
+  type CandidateResumeSummaryDto,
   type CandidateWrite,
   type ParsedResume,
   type RequisitionDto,
@@ -27,8 +28,9 @@ import {
 import { privacyApi } from './services/privacyApi'
 import { formatApiDateTime } from './utils/dateTime'
 
-type Page = 'dashboard' | 'department' | 'candidates' | 'resumes' | 'jobs' | 'interviews' | 'matching' | 'reports' | 'admin'
+type Page = 'dashboard' | 'department' | 'candidates' | 'resumes' | 'jobs' | 'matching' | 'reports' | 'admin'
 type Dialog = 'candidate' | 'activity' | 'job' | null
+type CandidateDetailTab = 'profile' | 'documents' | 'activity'
 type IntakeStageId = 1 | 2 | 3 | 4
 type IntakeStage = {
   id: IntakeStageId
@@ -38,6 +40,7 @@ type IntakeStage = {
   outcome: string
   destination: Page
   action: string
+  intakeTab?: 'upload' | 'manual'
 }
 type UploadItemStatus = 'queued' | 'uploading' | 'pending' | 'processing' | 'needs_review' | 'ready' | 'failed' | 'duplicate'
 type UploadItem = {
@@ -61,6 +64,7 @@ const apiOnline = ref(false)
 const error = ref('')
 const notice = ref('')
 const lastSync = ref('尚未同步')
+const recruitmentRefreshKey = ref(0)
 const candidates = ref<CandidateDto[]>([])
 const retentionPolicyYears = ref(2)
 const retentionSavingCandidateId = ref<number | null>(null)
@@ -71,6 +75,8 @@ const departments = ref<Department[]>([])
 const resumes = ref<ResumeDto[]>([])
 const jobs = ref<RequisitionDto[]>([])
 const search = ref('')
+const skillSearch = ref('')
+const skillSearching = ref(false)
 const candidateStatus = ref('all')
 const resumeStatus = ref('all')
 const uploadFiles = ref<File[]>([])
@@ -81,11 +87,18 @@ const syncingResumes = ref(false)
 const recentlyConfirmedCount = ref(0)
 const uploadRequisitionId = ref<number | null>(null)
 const uploadInput = ref<HTMLInputElement | null>(null)
+const intakeTab = ref<'upload' | 'manual'>('upload')
 const intakeGuideStage = ref<IntakeStageId>(1)
 const selectedCandidate = ref<CandidateDetailDto | null>(null)
+const candidateDetailTab = ref<CandidateDetailTab>('profile')
+const candidateDetailBody = ref<HTMLElement | null>(null)
 const candidateActivities = ref<ActivityDto[]>([])
 const selectedCandidateResume = ref<ResumeDto | null>(null)
 const candidateResumeLoading = ref(false)
+const resumeFilePreview = ref<ResumeDto | null>(null)
+const resumeFilePreviewUrl = ref('')
+const resumeFilePreviewLoadingId = ref<number | null>(null)
+const resumeFilePreviewError = ref('')
 const candidatePhotoInput = ref<HTMLInputElement | null>(null)
 const candidatePhotoFile = ref<File | null>(null)
 const candidatePhotoPreviews = reactive<Record<number, string>>({})
@@ -105,8 +118,9 @@ const intakeStages: IntakeStage[] = [
     shortTitle: '基本資料',
     description: '填寫姓名與聯絡方式，先建立一筆可搜尋、可持續補充的人才主檔。',
     outcome: '完成後：人才會有基本識別資料',
-    destination: 'candidates',
-    action: '到人才庫新增',
+    destination: 'resumes',
+    action: '到新增人才手動填寫',
+    intakeTab: 'manual',
   },
   {
     id: 2,
@@ -115,7 +129,8 @@ const intakeStages: IntakeStage[] = [
     description: '上傳一份或多份履歷，系統會排入 OCR 與來源辨識；手邊沒有履歷也能略過。',
     outcome: '完成後：履歷會進入人工校對佇列',
     destination: 'resumes',
-    action: '到履歷辨識',
+    action: '到新增人才上傳履歷',
+    intakeTab: 'upload',
   },
   {
     id: 3,
@@ -143,19 +158,59 @@ const jobForm = reactive({
   salary_type: 'monthly', headcount: 1, status: 'draft',
 })
 
-const allNav: { id: Page; label: string; icon: string; roles: string[] }[] = [
-  { id: 'dashboard', label: '工作總覽', icon: '⌂', roles: ['it', 'admin', 'hr', 'manager'] },
-  { id: 'department', label: '部門後台', icon: '▦', roles: ['manager'] },
-  { id: 'candidates', label: '人才庫', icon: '人', roles: ['admin', 'hr'] },
-  { id: 'resumes', label: '履歷辨識中心', icon: '▤', roles: ['admin', 'hr', 'manager'] },
-  { id: 'jobs', label: '職缺管理', icon: '◇', roles: ['admin', 'hr', 'manager'] },
-  { id: 'interviews', label: '面試安排', icon: '▣', roles: ['admin', 'hr', 'manager'] },
-  { id: 'matching', label: '媒合程度', icon: '◎', roles: ['admin', 'hr', 'manager'] },
-  { id: 'reports', label: '招募分析', icon: '⌁', roles: ['admin', 'hr', 'manager'] },
-  { id: 'admin', label: '帳號與權限', icon: '⚙', roles: ['it', 'admin', 'hr'] },
+type NavItem = { id: Page; label: string; icon: string; roles: string[] }
+type NavGroup = { id: string; label: string | null; items: NavItem[] }
+
+const navGroups: NavGroup[] = [
+  {
+    id: 'overview',
+    label: null,
+    items: [
+      { id: 'dashboard', label: '工作總覽', icon: '⌂', roles: ['it', 'admin', 'hr', 'manager'] },
+    ],
+  },
+  {
+    id: 'recruitment',
+    label: '招募執行',
+    items: [
+      { id: 'department', label: '部門後台', icon: '▦', roles: ['manager'] },
+      { id: 'candidates', label: '人才庫', icon: '人', roles: ['admin', 'hr'] },
+      { id: 'resumes', label: '新增人才', icon: '＋', roles: ['admin', 'hr', 'manager'] },
+      { id: 'jobs', label: '職缺管理', icon: '◇', roles: ['admin', 'hr', 'manager'] },
+    ],
+  },
+  {
+    id: 'matching',
+    label: '媒合與面試',
+    items: [
+      { id: 'matching', label: '人才評估與面試', icon: '◎', roles: ['admin', 'hr', 'manager'] },
+    ],
+  },
+  {
+    id: 'analytics',
+    label: '分析報表',
+    items: [
+      { id: 'reports', label: '招募分析', icon: '⌁', roles: ['admin', 'hr', 'manager'] },
+    ],
+  },
+  {
+    id: 'system',
+    label: '系統管理',
+    items: [
+      { id: 'admin', label: '帳號與權限', icon: '⚙', roles: ['it', 'admin', 'hr'] },
+    ],
+  },
 ]
 
-const nav = computed(() => allNav.filter(item => item.roles.includes(authState.user?.role || '')))
+const allNav: NavItem[] = navGroups.flatMap(group => group.items)
+
+// Render groups by role, dropping any group that has no visible item for this role.
+const visibleNavGroups = computed(() => {
+  const role = authState.user?.role || ''
+  return navGroups
+    .map(group => ({ ...group, items: group.items.filter(item => item.roles.includes(role)) }))
+    .filter(group => group.items.length > 0)
+})
 const managerDefaultPage: Page = 'department'
 
 function canAccessPage(target: Page) {
@@ -173,7 +228,7 @@ const roleProfile = computed(() => ({
   manager: { label: '部門主管', scope: '所屬部門', note: '僅查看本部門職缺與實際應徵人才' },
 }[authState.user?.role || 'manager']))
 
-const pageTitle = computed(() => nav.value.find(item => item.id === page.value)?.label || 'TalentHub')
+const pageTitle = computed(() => allNav.find(item => item.id === page.value)?.label || 'TalentHub')
 const filteredCandidates = computed(() => candidates.value.filter(candidate => {
   const q = search.value.trim().toLocaleLowerCase()
   const inSearch = !q || [candidate.name, candidate.email, candidate.phone, candidate.current_title, candidate.city, candidate.source]
@@ -229,8 +284,7 @@ function goToIntakeStage(stage: IntakeStageId) {
 
 async function openIntakeStage(stage: IntakeStage) {
   intakeGuideStage.value = stage.id
-  await navigate(stage.destination)
-  if (stage.id === 1) openCandidate()
+  await navigate(stage.destination, stage.intakeTab ? { intakeTab: stage.intakeTab } : undefined)
 }
 
 function canReassignApplication(application: ApplicationDto) {
@@ -339,7 +393,7 @@ async function refreshAll(silent = false) {
       Object.keys(candidatePhotoPreviews).forEach(id => clearCandidatePhotoPreview(Number(id)))
     }
     const [candidateResult, resumeResult, jobResult, applicationResult, departmentResult] = await Promise.allSettled([
-      canEditCandidates ? hrApi.candidates() : Promise.resolve({ data: [] as CandidateDto[] }),
+      canEditCandidates ? hrApi.candidates(skillSearch.value.trim() ? { skill: skillSearch.value.trim() } : {}) : Promise.resolve({ data: [] as CandidateDto[] }),
       hrApi.resumes(),
       hrApi.requisitions(),
       canEditCandidates ? hrApi.applications() : Promise.resolve({ data: [] as ApplicationDto[] }),
@@ -370,6 +424,7 @@ async function refreshAll(silent = false) {
     } else if (jobResult.status === 'fulfilled') {
       departments.value = departmentsFromJobs(jobResult.value.data)
     }
+    recruitmentRefreshKey.value += 1
     lastSync.value = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })
     if (failures.length) {
       // Surface every failed dataset; health() already ran and set apiOnline, so a data/permission error is not a connection outage.
@@ -386,7 +441,34 @@ async function refreshAll(silent = false) {
   }
 }
 
-async function navigate(target: Page) {
+// Skill filtering needs the backend; other filters (keyword/status) stay client-side over the loaded list.
+let skillSearchTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleSkillSearch() {
+  if (skillSearchTimer) clearTimeout(skillSearchTimer)
+  skillSearchTimer = setTimeout(() => { void applySkillSearch() }, 400)
+}
+async function applySkillSearch() {
+  if (skillSearchTimer) {
+    clearTimeout(skillSearchTimer)
+    skillSearchTimer = null
+  }
+  if (!['admin', 'hr'].includes(authState.user?.role || '')) return
+  const skill = skillSearch.value.trim()
+  skillSearching.value = true
+  error.value = ''
+  try {
+    // A cleared skill box returns to the original "load everything + client-side filter" behaviour.
+    const result = skill ? await hrApi.candidates({ skill }) : await hrApi.candidates()
+    candidates.value = result.data
+    await loadCandidatePhotos(candidates.value)
+  } catch (cause) {
+    showError(cause)
+  } finally {
+    skillSearching.value = false
+  }
+}
+
+async function navigate(target: Page, options?: { intakeTab?: 'upload' | 'manual' }) {
   if (!canAccessPage(target)) {
     page.value = defaultPageForCurrentRole()
     sidebarOpen.value = false
@@ -398,9 +480,31 @@ async function navigate(target: Page) {
   page.value = target
   sidebarOpen.value = false
   error.value = ''
-  if (['candidates', 'resumes', 'jobs', 'interviews', 'matching', 'reports'].includes(target)) {
+  // The unified intake page defaults to the upload tab; explicit callers can land on manual filling.
+  if (target === 'resumes') setIntakeTab(options?.intakeTab ?? 'upload')
+  if (['candidates', 'resumes', 'jobs', 'matching', 'reports'].includes(target)) {
     await refreshAll(true)
   }
+}
+
+const canManualIntake = computed(() => ['admin', 'hr'].includes(authState.user?.role || ''))
+
+function setIntakeTab(tab: 'upload' | 'manual') {
+  // Managers never get the manual-entry tab; force them back to uploading.
+  const next = tab === 'manual' && canManualIntake.value ? 'manual' : 'upload'
+  intakeTab.value = next
+  if (next === 'manual') resetCandidateForm()
+}
+
+// Reset the shared candidate form to a brand-new record (used by the inline manual-intake tab).
+function resetCandidateForm() {
+  editingCandidate.value = null
+  editingCandidateApplication.value = null
+  candidateDepartmentId.value = null
+  candidateJobId.value = null
+  Object.assign(candidateForm, { name: '', email: '', phone: '', city: '', current_title: '', total_years: 0, source: 'manual', status: 'new' })
+  candidatePhotoFile.value = null
+  if (candidatePhotoInput.value) candidatePhotoInput.value.value = ''
 }
 
 async function openCandidate(candidate?: CandidateDto) {
@@ -448,7 +552,7 @@ function selectCandidatePhoto(event: Event) {
   candidatePhotoFile.value = file
 }
 
-async function saveCandidate() {
+async function saveCandidate(fromInlineIntake = false) {
   if (!candidateForm.name?.trim()) return showError('姓名為必填欄位')
   const target = candidateDepartmentJobs.value.find(job => job.id === candidateJobId.value) || null
   if (candidateDepartmentId.value !== null && !target) {
@@ -495,6 +599,8 @@ async function saveCandidate() {
     else candidates.value.unshift(result.data)
     dialog.value = null
     setNotice(`${editingCandidate.value ? '人才資料已更新' : '人才已建立'}（DB candidates #${result.data.id}／${result.data.code}）${assignmentMessage}`)
+    // Inline manual tab stays open for continuous entry; wipe the form so the next record starts clean.
+    if (fromInlineIntake) resetCandidateForm()
   } catch (cause) {
     if (candidateSaved && !assignmentSaved) {
       showError(new Error(`人才基本資料已儲存，但部門主管指派未完成：${cause instanceof Error ? cause.message : '請稍後再試'}`))
@@ -514,9 +620,17 @@ async function removeCandidatePhoto(candidate: CandidateDto) {
   } catch (cause) { showError(cause) } finally { saving.value = false }
 }
 
+function selectCandidateDetailTab(tab: CandidateDetailTab) {
+  candidateDetailTab.value = tab
+  window.requestAnimationFrame(() => candidateDetailBody.value?.scrollTo({ top: 0 }))
+}
+
 async function viewCandidate(candidate: CandidateDto) {
+  closeResumeFilePreview()
+  resumeFilePreviewError.value = ''
   selectedCandidateResume.value = null
   candidateActivities.value = []
+  candidateDetailTab.value = 'profile'
   try {
     const [detail, activities] = await Promise.all([
       hrApi.candidate(candidate.id),
@@ -546,6 +660,43 @@ async function downloadCandidateResume(resumeId: number, filename: string | null
   } catch (cause) { showError(cause) }
 }
 
+function isPdfResume(resume: ResumeDto | null): boolean {
+  if (!resume) return false
+  return resume.mime?.toLowerCase() === 'application/pdf'
+    || resume.original_filename?.toLowerCase().endsWith('.pdf') === true
+}
+
+function closeResumeFilePreview() {
+  if (resumeFilePreviewUrl.value) URL.revokeObjectURL(resumeFilePreviewUrl.value)
+  resumeFilePreviewUrl.value = ''
+  resumeFilePreview.value = null
+}
+
+async function previewCandidateResume(resume: CandidateResumeSummaryDto) {
+  closeResumeFilePreview()
+  resumeFilePreviewError.value = ''
+  resumeFilePreviewLoadingId.value = resume.id
+  try {
+    const detail = (await hrApi.resume(resume.id)).data
+    let objectUrl = ''
+    if (isPdfResume(detail)) {
+      const blob = await hrApi.previewResume(resume.id)
+      objectUrl = URL.createObjectURL(blob)
+    }
+    resumeFilePreviewUrl.value = objectUrl
+    resumeFilePreview.value = detail
+  } catch (cause) {
+    closeResumeFilePreview()
+    const detail = cause instanceof Error ? cause.message : '未知錯誤'
+    resumeFilePreviewError.value = detail.startsWith('404：')
+      ? `${resume.original_filename || '這份履歷'}的原始檔已不在儲存空間，請使用系統補建 PDF。`
+      : `無法開啟 ${resume.original_filename || '履歷'}：${detail}`
+    showError(cause)
+  } finally {
+    resumeFilePreviewLoadingId.value = null
+  }
+}
+
 function safeExternalUrl(value: string | null | undefined) {
   if (!value) return ''
   try {
@@ -560,17 +711,23 @@ function resumeValue(value: unknown): string {
   return String(value || '').trim()
 }
 
-const candidateResumeHighlights = computed(() => {
-  const payload = selectedCandidateResume.value?.parsed_payload || {}
+function resumeHighlights(resume: ResumeDto | null) {
+  const payload = resume?.parsed_payload || {}
   const labels: Record<string, string> = {
     current_company: '目前公司', expected_title: '期望職稱', education: '履歷學歷', experience: '履歷經歷',
     skills: '履歷技能', self_intro: '自我介紹', summary: '履歷摘要',
   }
   return Object.entries(labels).map(([key, label]) => ({ label, value: resumeValue(payload[key]) })).filter(item => item.value)
-})
+}
+
+const candidateResumeHighlights = computed(() => resumeHighlights(selectedCandidateResume.value))
+const resumeFilePreviewHighlights = computed(() => resumeHighlights(resumeFilePreview.value))
+const resumeFilePreviewIsPdf = computed(() => isPdfResume(resumeFilePreview.value))
+const resumeFilePreviewIsGenerated = computed(() => resumeFilePreview.value?.document_origin === 'system_generated')
 
 function openActivity(candidate: CandidateDetailDto) {
   selectedCandidate.value = candidate
+  selectCandidateDetailTab('activity')
   const managerMessage = authState.user?.role === 'manager'
   Object.assign(activityForm, {
     type: managerMessage ? '主管留言' : 'HR 留言',
@@ -936,6 +1093,15 @@ async function updateCandidateRetention(candidate: CandidateDto, event: Event) {
     const setting = (await privacyApi.updateCandidateRetention(candidate.id, retentionYears)).data
     candidate.retention_years_override = setting.retention_years_override
     candidate.retention_until = setting.retention_until
+    const listedCandidate = candidates.value.find(item => item.id === candidate.id)
+    if (listedCandidate && listedCandidate !== candidate) {
+      listedCandidate.retention_years_override = setting.retention_years_override
+      listedCandidate.retention_until = setting.retention_until
+    }
+    if (selectedCandidate.value?.id === candidate.id && selectedCandidate.value !== candidate) {
+      selectedCandidate.value.retention_years_override = setting.retention_years_override
+      selectedCandidate.value.retention_until = setting.retention_until
+    }
     setNotice(
       setting.uses_company_default
         ? `${candidate.name} 已恢復公司預設 ${setting.effective_retention_years} 年，保存至 ${dateOnly(setting.retention_until)}`
@@ -970,6 +1136,7 @@ async function authenticated() {
 }
 
 function logout() {
+  closeResumeFilePreview()
   authSession.logout()
   candidates.value = []
   Object.keys(candidatePhotoPreviews).forEach(id => clearCandidatePhotoPreview(Number(id)))
@@ -981,6 +1148,7 @@ function logout() {
   uploadFiles.value = []
   uploadItems.value = []
   uploadValidationError.value = ''
+  intakeTab.value = 'upload'
   resumeDropActive.value = false
   recentlyConfirmedCount.value = 0
   uploadRequisitionId.value = null
@@ -1007,6 +1175,8 @@ onMounted(async () => {
   await authSession.initialize()
   if (authState.user && lastSync.value === '尚未同步') await authenticated()
 })
+
+onBeforeUnmount(closeResumeFilePreview)
 </script>
 
 <template>
@@ -1018,10 +1188,12 @@ onMounted(async () => {
       <div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><strong>TalentHub</strong><small>人才與職涯平台</small></div></div>
       <nav>
         <div class="role-scope"><small>目前工作範圍</small><strong>{{ roleProfile.scope }}</strong><span>{{ roleProfile.note }}</span></div>
-        <p class="nav-label">招募工作台</p>
-        <button v-for="item in nav" :key="item.id" class="nav-item" :class="{ active: page === item.id }" :data-testid="`nav-${item.id}`" @click="navigate(item.id)">
-          <span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><em v-if="item.id === 'resumes' && pendingReviewCount">{{ pendingReviewCount }}</em>
-        </button>
+        <template v-for="group in visibleNavGroups" :key="group.id">
+          <p v-if="group.label" class="nav-label">{{ group.label }}</p>
+          <button v-for="item in group.items" :key="item.id" class="nav-item" :class="{ active: page === item.id }" :data-testid="`nav-${item.id}`" @click="navigate(item.id)">
+            <span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span><em v-if="item.id === 'resumes' && pendingReviewCount">{{ pendingReviewCount }}</em>
+          </button>
+        </template>
       </nav>
       <div class="sidebar-footer"><div class="connection"><i :class="{ online: apiOnline }"></i><div><strong>{{ apiOnline ? 'API 已連線' : 'API 未連線' }}</strong><small>{{ API_BASE }}</small></div></div></div>
     </aside>
@@ -1043,7 +1215,7 @@ onMounted(async () => {
           <div v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" class="intake-page">
             <header class="intake-welcome route-only">
               <nav class="intake-route-guide" data-testid="intake-route-guide" aria-label="HR 人才建檔四關路線">
-                <div class="route-guide-heading"><strong>HR 招募四關路線</strong><small>點擊路標查看每一關能做什麼</small></div>
+                <div class="route-guide-heading"><strong>HR 招募四關路線</strong><small>點擊路標直接前往該關；滑過或聚焦可先預覽</small></div>
                 <div class="intake-route-map">
                   <svg viewBox="0 0 520 240" preserveAspectRatio="none" aria-hidden="true">
                     <path class="route-road-halo" d="M50 176 C17 125 68 101 105 120 C156 147 116 83 160 54 C207 23 238 84 300 66 C354 50 352 19 399 39 C458 64 466 113 428 142 C396 167 450 177 430 184" />
@@ -1058,8 +1230,10 @@ onMounted(async () => {
                     :data-testid="`intake-route-stop-${stage.id}`"
                     type="button"
                     :aria-current="intakeGuideStage === stage.id ? 'step' : undefined"
-                    :aria-label="`第 ${stage.id} 關：${stage.title}，${intakeStageStatus(stage.id)}`"
-                    @click="goToIntakeStage(stage.id)"
+                    :aria-label="`第 ${stage.id} 關：${stage.title}，${intakeStageStatus(stage.id)}，前往${stage.action}`"
+                    @mouseenter="goToIntakeStage(stage.id)"
+                    @focus="goToIntakeStage(stage.id)"
+                    @click="openIntakeStage(stage)"
                   >
                     <span class="route-pin"><b>{{ stage.id }}</b></span>
                     <strong>{{ stage.shortTitle }}</strong>
@@ -1094,9 +1268,9 @@ onMounted(async () => {
         </section>
 
         <section v-else-if="page === 'candidates' && (authState.user.role === 'hr' || authState.user.role === 'admin')" class="page">
-          <header class="talent-hero">
-            <div><p class="eyebrow">{{ roleProfile.scope }} TALENT POOL</p><h1>人才資料庫</h1><p>從人才資料、聯繫狀態到職缺媒合，在同一個工作區快速管理。</p></div>
-            <div class="talent-hero-actions"><button class="button secondary" @click="navigate('matching')">◎ 查看媒合程度</button><button class="button primary" @click="openCandidate()">＋ 手動新增人才</button></div>
+          <header class="talent-list-toolbar panel">
+            <div><strong>人才清單</strong><span>一人一列顯示摘要；點開人才後再查看聯絡方式、履歷、應徵紀錄與完整操作。</span></div>
+            <div class="talent-hero-actions"><button class="button secondary" @click="navigate('matching')">◎ 查看媒合程度</button><button class="button primary" @click="navigate('resumes', { intakeTab: 'manual' })">＋ 手動新增人才</button></div>
           </header>
           <div class="talent-metrics">
             <article><span>人才總數</span><strong>{{ candidates.length }}</strong><small>目前權限範圍</small></article>
@@ -1105,26 +1279,31 @@ onMounted(async () => {
             <article><span>平均年資</span><strong>{{ averageCandidateYears }}</strong><small>年</small></article>
           </div>
           <TalentRetentionPanel v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" @policy-loaded="retentionPolicyYears = $event" @policy-updated="refreshAll(true)" @purged="refreshAll(true)" />
-          <div id="candidate-retention-list" class="filter-bar panel"><label class="search-field"><span>⌕</span><input v-model="search" placeholder="搜尋姓名、Email、電話、職稱或來源"></label><select v-model="candidateStatus"><option value="all">全部狀態</option><option v-for="(label, key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select><span>{{ filteredCandidates.length }} 筆結果</span></div>
-          <div v-if="filteredCandidates.length" class="talent-card-grid">
-            <article v-for="candidate in filteredCandidates" :key="candidate.id" class="panel talent-card">
-              <header><button class="talent-identity" @click="viewCandidate(candidate)"><img v-if="candidatePhotoPreviews[candidate.id]" class="person-avatar large candidate-photo" :src="candidatePhotoPreviews[candidate.id]" :alt="`${candidate.name}的大頭照`"><span v-else class="person-avatar large">{{ candidate.name.slice(0,1) }}</span><span><strong>{{ candidate.name }}</strong><small>{{ candidate.code }}</small></span></button><span class="status" :data-status="candidate.status">{{ candidateStatusLabels[candidate.status] || candidate.status }}</span></header>
-              <div class="talent-role"><strong>{{ candidate.current_title || '尚未填寫目前職稱' }}</strong><span>{{ candidate.city || '地區待補' }} · {{ candidate.total_years ?? 0 }} 年經驗</span></div>
-              <div class="talent-contact"><p><small>EMAIL</small><strong>{{ candidate.email || '未提供' }}</strong></p><p><small>PHONE</small><strong>{{ candidate.phone || '未提供' }}</strong></p></div>
-              <div class="talent-source"><span>{{ sourceLabels[candidate.source || ''] || candidate.source || '未知來源' }}</span><small>DB #{{ candidate.id }} · 更新於 {{ date(candidate.updated_at) }}<template v-if="candidate.retention_until"> · 保存至 {{ dateOnly(candidate.retention_until) }}</template></small></div>
-              <div v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" class="candidate-retention-control" :class="{ custom: candidate.retention_years_override !== null }">
-                <div><span>{{ candidate.retention_years_override === null ? `公司預設 ${retentionPolicyYears} 年` : `個別設定 ${candidate.retention_years_override} 年` }}</span><small>{{ candidate.retention_until ? `到期日 ${dateOnly(candidate.retention_until)}` : '尚未計算到期日' }}</small></div>
-                <label>保存年限<select :value="candidate.retention_years_override ?? ''" :disabled="retentionSavingCandidateId === candidate.id" :aria-label="`${candidate.name}的保存年限`" @change="updateCandidateRetention(candidate, $event)"><option value="">沿用公司預設（{{ retentionPolicyYears }} 年）</option><option v-for="years in retentionYearOptions" :key="years" :value="years">個別設定 {{ years }} 年</option></select></label>
-              </div>
-              <footer><button class="button secondary" @click="viewCandidate(candidate)">查看詳情</button><button class="text-button" @click="openCandidate(candidate)">編輯</button><button class="text-button danger-text" :disabled="saving" @click="removeCandidate(candidate)">刪除</button></footer>
+          <div id="candidate-retention-list" class="filter-bar panel"><label class="search-field"><span>⌕</span><input v-model="search" placeholder="搜尋姓名、Email、電話、職稱或來源"></label><label class="search-field"><span>◆</span><input v-model="skillSearch" data-testid="candidate-skill-search" placeholder="依技能搜尋（後端比對）" @input="scheduleSkillSearch" @keyup.enter="applySkillSearch"></label><select v-model="candidateStatus"><option value="all">全部狀態</option><option v-for="(label, key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select><span>{{ skillSearching ? '技能搜尋中…' : `${filteredCandidates.length} 筆結果` }}</span></div>
+          <div v-if="filteredCandidates.length" class="talent-list panel" role="list" data-testid="talent-list">
+            <div class="talent-list-head" aria-hidden="true"><span>人才</span><span>目前職務</span><span>來源／更新</span><span>保存期限</span><span>狀態</span><span></span></div>
+            <article v-for="candidate in filteredCandidates" :key="candidate.id" role="listitem">
+              <button type="button" class="talent-list-row" :data-testid="`talent-row-${candidate.id}`" @click="viewCandidate(candidate)">
+                <span class="talent-list-identity"><img v-if="candidatePhotoPreviews[candidate.id]" class="person-avatar candidate-photo" :src="candidatePhotoPreviews[candidate.id]" :alt="`${candidate.name}的大頭照`"><span v-else class="person-avatar">{{ candidate.name.slice(0,1) }}</span><span><strong>{{ candidate.name }}</strong><small>{{ candidate.code }}</small></span></span>
+                <span class="talent-list-role"><strong>{{ candidate.current_title || '職稱待補' }}</strong><small>{{ candidate.city || '地區待補' }} · {{ candidate.total_years ?? 0 }} 年經驗</small></span>
+                <span class="talent-list-source"><strong>{{ sourceLabels[candidate.source || ''] || candidate.source || '未知來源' }}</strong><small>更新於 {{ date(candidate.updated_at) }}</small></span>
+                <span class="talent-list-retention" :class="{ custom: candidate.retention_years_override !== null }"><strong>{{ candidate.retention_years_override === null ? `公司預設 ${retentionPolicyYears} 年` : `個別 ${candidate.retention_years_override} 年` }}</strong><small>{{ candidate.retention_until ? `保存至 ${dateOnly(candidate.retention_until)}` : '到期日待計算' }}</small></span>
+                <span class="status" :data-status="candidate.status">{{ candidateStatusLabels[candidate.status] || candidate.status }}</span>
+                <span class="talent-list-open">查看 <b aria-hidden="true">›</b></span>
+              </button>
             </article>
           </div>
-          <div v-else-if="loading" class="empty panel"><span class="spinner"></span><p>正在載入人才資料…</p></div>
+          <div v-else-if="loading || skillSearching" class="empty panel"><span class="spinner"></span><p>{{ skillSearching ? '正在依技能搜尋人才…' : '正在載入人才資料…' }}</p></div>
           <div v-else class="empty panel"><strong>找不到符合條件的人才</strong><p>請調整搜尋或篩選條件。</p></div>
         </section>
 
         <section v-else-if="page === 'resumes'" class="page resume-center-page" data-testid="resume-center">
-          <div class="page-heading resume-center-heading"><div><p class="eyebrow">RESUME RECOGNITION CENTER</p><h1>{{ authState.user.role === 'manager' ? '新增履歷並指派職缺' : '履歷匯入與校對' }}</h1><p>{{ authState.user.role === 'manager' ? '為本部門職缺新增履歷；確認入庫後，人才會自動出現在該職缺的應徵名單。' : '直接混合上傳 104、1111 或自製履歷，系統會逐檔自動判別。' }}</p></div></div>
+          <div class="page-heading resume-center-heading"><div><p class="eyebrow">{{ authState.user.role === 'manager' ? 'RESUME RECOGNITION CENTER' : 'ADD TALENT' }}</p><h1>{{ authState.user.role === 'manager' ? '新增履歷並指派職缺' : '新增人才' }}</h1><p>{{ authState.user.role === 'manager' ? '為本部門職缺新增履歷；確認入庫後，人才會自動出現在該職缺的應徵名單。' : '兩條路都會把人才建進人才庫：用「上傳履歷」讓系統辨識既有履歷，或用「手動填寫」直接建立人才基本資料。' }}</p></div></div>
+          <div v-if="canManualIntake" class="intake-tab-bar" role="tablist" aria-label="新增人才方式">
+            <button type="button" role="tab" class="intake-tab" :class="{ active: intakeTab === 'upload' }" :aria-selected="intakeTab === 'upload'" data-testid="intake-tab-upload" @click="intakeTab = 'upload'">上傳履歷</button>
+            <button type="button" role="tab" class="intake-tab" :class="{ active: intakeTab === 'manual' }" :aria-selected="intakeTab === 'manual'" data-testid="intake-tab-manual" @click="setIntakeTab('manual')">手動填寫</button>
+          </div>
+          <div v-show="!canManualIntake || intakeTab === 'upload'" class="intake-upload-panel">
           <ol class="resume-center-flow" aria-label="履歷辨識三步驟" data-testid="resume-center-flow">
             <li class="resume-center-flow-step" :class="{ 'is-active': uploadFiles.length, 'is-complete': uploadItems.length && !uploadFiles.length }" data-testid="resume-center-step-1">
               <span class="resume-center-flow-number" aria-hidden="true">1</span>
@@ -1207,6 +1386,20 @@ onMounted(async () => {
               <div v-else class="empty review-empty"><h2 id="resume-review-heading">3. 人工校對</h2><strong>從解析佇列選擇一份履歷</strong><p>系統解析結果會顯示在這裡，{{ authState.user.role === 'manager' ? '確認後會加入指定職缺的應徵名單；主管不會取得人才庫瀏覽權限。' : 'HR 可修正後再寫入人才庫。' }}</p></div>
             </article>
           </div>
+          </div>
+
+          <div v-if="canManualIntake && intakeTab === 'manual'" class="intake-manual-panel">
+            <form class="panel intake-manual-card" @submit.prevent="saveCandidate(true)">
+              <div class="section-head resume-center-section-head"><div><h2>手動建立人才基本資料</h2><p>直接填寫人才主檔資料並儲存；送出後表單會清空，方便連續建立多筆。可一併指派應徵部門與職缺。</p></div></div>
+              <div class="form-grid">
+                <label class="wide photo-upload-field"><span>大頭照</span><input ref="candidatePhotoInput" type="file" accept="image/jpeg,image/png,image/webp" @change="selectCandidatePhoto"><small>JPG、PNG 或 WebP，最大 5 MB；儲存後才會上傳。</small></label>
+                <label>應徵部門<select v-model="candidateDepartmentId" data-testid="candidate-department-select" :disabled="candidateAssignmentDataUnavailable" @change="selectCandidateDepartment"><option :value="null">尚未指派部門</option><option v-for="department in selectableDepartments" :key="department.id" :value="department.id">{{ department.name }}</option></select><small>選擇後會透過正式應徵紀錄同步給該部門主管。</small></label>
+                <label>目標職缺<select v-model="candidateJobId" data-testid="candidate-job-select" :disabled="candidateAssignmentDataUnavailable || candidateDepartmentId === null || !candidateDepartmentJobs.length"><option :value="null" disabled>{{ candidateDepartmentId === null ? '請先選擇應徵部門' : candidateDepartmentJobs.length ? '請選擇該部門職缺' : '此部門目前沒有可用職缺' }}</option><option v-for="job in candidateDepartmentJobs" :key="job.id" :value="job.id">{{ job.req_no }} · {{ job.title }}（{{ jobStatusLabels[job.status] || job.status }}）</option></select><small v-if="candidateDepartmentId !== null && !candidateDepartmentJobs.length" class="assignment-warning" data-testid="candidate-assignment-warning">此部門目前沒有可用職缺；請先建立／開放職缺後再指派。</small><small v-else>指派職缺後，儲存時會同步建立該職缺的應徵紀錄。</small></label>
+                <label>姓名 *<input v-model="candidateForm.name" required></label><label>Email<input v-model="candidateForm.email" type="email"></label><label>電話<input v-model="candidateForm.phone"></label><label>地區<input v-model="candidateForm.city"></label><label>目前職稱<input v-model="candidateForm.current_title"></label><label>總年資<input v-model.number="candidateForm.total_years" type="number" min="0" step="0.5"></label><label>來源<select v-model="candidateForm.source"><option value="manual">手動建立</option><option value="p104">104</option><option value="p1111">1111</option><option value="generic">一般履歷</option><option value="direct">自製履歷</option></select></label><label>狀態<select v-model="candidateForm.status"><option v-for="(label,key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select></label>
+              </div>
+              <footer class="intake-manual-actions"><button type="submit" class="button primary" data-testid="intake-manual-submit" :disabled="saving || candidateAssignmentInvalid">{{ saving ? '儲存中…' : '儲存至資料庫' }}</button></footer>
+            </form>
+          </div>
         </section>
 
 
@@ -1215,8 +1408,17 @@ onMounted(async () => {
           <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="panel job-card"><header><span class="status" :data-status="job.status">{{ jobStatusLabels[job.status] || job.status }}</span><button v-if="authState.user.role !== 'manager'" class="text-button" @click="openJob(job)">編輯</button><button v-else class="text-button" @click="navigate('matching')">查看人才 →</button></header><h2>{{ job.title }}</h2><p>{{ job.req_no }} · {{ job.department_name || (job.department_id ? `部門 #${job.department_id}` : '未設定部門') }} · {{ job.work_city }} · 需求 {{ job.headcount }} 人</p><div class="job-summary">{{ job.summary || job.jd }}</div><div class="skill-list"><span v-for="skill in job.skills || []" :key="skill">{{ skill }}</span></div><footer><small>{{ job.requested_by ? '部門送交 · ' : '' }}{{ job.published_at ? `發布：${date(job.published_at)}` : '尚未發布' }}</small><button v-if="authState.user.role !== 'manager' && ['draft','submitted'].includes(job.status)" class="button primary" :disabled="saving" @click="approveJob(job)">核准職缺</button></footer></article><div v-if="loading && !jobs.length" class="empty panel"><span class="spinner"></span><p>正在載入職缺…</p></div><div v-else-if="!jobs.length" class="empty panel"><strong>目前沒有職缺</strong><p>目前權限範圍內沒有可檢視的職缺。</p></div></div>
         </section>
 
-        <InterviewManagement v-else-if="page === 'interviews'" />
-        <MatchingView v-else-if="page === 'matching'" :jobs="jobs" :can-configure="authState.user.role === 'hr' || authState.user.role === 'admin'" :can-configure-weights="['hr', 'admin', 'manager'].includes(authState.user.role)" />
+        <RecruitmentWorkspace
+          v-else-if="page === 'matching'"
+          :key="page"
+          :jobs="jobs"
+          :role="authState.user.role"
+          :refresh-key="recruitmentRefreshKey"
+          initial-mode="matching"
+          :can-configure="authState.user.role === 'hr' || authState.user.role === 'admin'"
+          :can-configure-weights="['hr', 'admin', 'manager'].includes(authState.user.role)"
+          :can-manage="['hr', 'admin', 'manager'].includes(authState.user.role)"
+        />
         <ReportsView v-else-if="page === 'reports'" :jobs="jobs" />
         <AdminView v-else-if="page === 'admin'" :current-user="authState.user" />
         <section v-else class="page unavailable-page"><div class="unavailable-icon">⌛</div><p class="eyebrow">NOT CONNECTED</p><h1>{{ pageTitle }}尚未接上後端</h1><p>這個模組目前沒有可持久化的 API，因此先停用所有操作，避免產生「看似成功但未寫入資料庫」的誤解。</p><button class="button secondary" @click="navigate('dashboard')">返回工作總覽</button></section>
@@ -1224,52 +1426,103 @@ onMounted(async () => {
     </main>
 
     <div v-if="selectedCandidate" class="drawer-overlay" @click.self="selectedCandidate = null" @keydown.esc="selectedCandidate = null">
-      <aside class="detail-drawer" role="dialog" aria-modal="true" aria-labelledby="candidate-drawer-title">
-        <header><div><img v-if="candidatePhotoPreviews[selectedCandidate.id]" class="person-avatar large candidate-photo" :src="candidatePhotoPreviews[selectedCandidate.id]" :alt="`${selectedCandidate.name}的大頭照`"><span v-else class="person-avatar large">{{ selectedCandidate.name.slice(0,1) }}</span><div><small>{{ selectedCandidate.code }}</small><h2 id="candidate-drawer-title">{{ selectedCandidate.name }}</h2><p>{{ selectedCandidate.current_title || '未填職稱' }}</p></div></div><button aria-label="關閉人才詳情" @click="selectedCandidate = null">×</button></header>
-        <div class="detail-body">
-          <div class="detail-grid"><div><small>Email</small><strong>{{ selectedCandidate.email || '未提供' }}</strong></div><div><small>電話</small><strong>{{ selectedCandidate.phone || '未提供' }}</strong></div><div><small>地區</small><strong>{{ selectedCandidate.city || '未提供' }}</strong></div><div><small>來源</small><strong>{{ sourceLabels[selectedCandidate.source || ''] || selectedCandidate.source || '未知' }}</strong></div></div>
-          <div class="drawer-actions">
-            <button class="button primary" data-testid="add-shared-activity" @click="openActivity(selectedCandidate)">＋ {{ authState.user.role === 'manager' ? '新增主管留言' : '新增 HR 留言／聯繫' }}</button>
-            <template v-if="authState.user.role !== 'manager'"><button class="button secondary" @click="openCandidate(selectedCandidate)">編輯資料</button><button v-if="selectedCandidate.has_photo" class="button secondary" :disabled="saving" @click="removeCandidatePhoto(selectedCandidate)">移除照片</button><button class="button danger" @click="archiveCandidate(selectedCandidate)">封存</button><button class="button danger" :disabled="saving" @click="removeCandidate(selectedCandidate)">刪除人才</button></template>
-          </div>
-          <section class="candidate-profile-block" data-testid="candidate-application-details">
-            <h3>應徵職缺與申請資料</h3>
-            <div v-if="selectedCandidate.applications.length" class="candidate-application-list">
-              <article v-for="application in selectedCandidate.applications" :key="application.id">
-                <header><div><small>{{ application.requisition.department_name || `部門 #${application.requisition.department_id}` }}</small><strong>{{ application.requisition.title }}</strong><span>{{ application.requisition.req_no }} · {{ date(application.applied_at) }}</span></div><b class="status" :data-status="application.status">{{ application.status }}</b></header>
-                <div v-if="safeExternalUrl(application.portfolio_url) || safeExternalUrl(application.linkedin_url)" class="candidate-links"><a v-if="safeExternalUrl(application.portfolio_url)" :href="safeExternalUrl(application.portfolio_url)" target="_blank" rel="noopener noreferrer">作品集／個人網站 ↗</a><a v-if="safeExternalUrl(application.linkedin_url)" :href="safeExternalUrl(application.linkedin_url)" target="_blank" rel="noopener noreferrer">LinkedIn ↗</a></div>
-                <div v-if="application.cover_letter" class="candidate-cover-letter"><small>求職信</small><p>{{ application.cover_letter }}</p></div>
-                <p v-if="!application.cover_letter && !safeExternalUrl(application.portfolio_url) && !safeExternalUrl(application.linkedin_url)" class="candidate-empty-line">這筆應徵未提供作品連結、LinkedIn 或求職信。</p>
-              </article>
+      <aside class="detail-drawer candidate-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="candidate-drawer-title" data-testid="candidate-detail-drawer">
+        <header class="candidate-detail-header">
+          <div class="candidate-detail-identity"><img v-if="candidatePhotoPreviews[selectedCandidate.id]" class="person-avatar large candidate-photo" :src="candidatePhotoPreviews[selectedCandidate.id]" :alt="`${selectedCandidate.name}的大頭照`"><span v-else class="person-avatar large">{{ selectedCandidate.name.slice(0,1) }}</span><div><small>{{ selectedCandidate.code }}</small><h2 id="candidate-drawer-title">{{ selectedCandidate.name }}</h2><p>{{ selectedCandidate.current_title || '未填職稱' }} · {{ selectedCandidate.city || '地區待補' }} · {{ selectedCandidate.total_years ?? 0 }} 年經驗</p></div></div>
+          <div class="candidate-detail-header-state"><span class="status" :data-status="selectedCandidate.status">{{ candidateStatusLabels[selectedCandidate.status] || selectedCandidate.status }}</span><button aria-label="關閉人才詳情" @click="selectedCandidate = null">×</button></div>
+        </header>
+
+        <nav class="candidate-detail-tabs" role="tablist" aria-label="人才詳情分頁">
+          <button id="candidate-tab-profile" type="button" role="tab" :class="{ active: candidateDetailTab === 'profile' }" :aria-selected="candidateDetailTab === 'profile'" aria-controls="candidate-panel-profile" data-testid="candidate-detail-tab-profile" @click="selectCandidateDetailTab('profile')"><span>1</span><span><strong>基本資料</strong><small>聯絡、技能與經歷</small></span></button>
+          <button id="candidate-tab-documents" type="button" role="tab" :class="{ active: candidateDetailTab === 'documents' }" :aria-selected="candidateDetailTab === 'documents'" aria-controls="candidate-panel-documents" data-testid="candidate-detail-tab-documents" @click="selectCandidateDetailTab('documents')"><span>2</span><span><strong>履歷與去識別化</strong><small>{{ selectedCandidate.resumes.length }} 份原始履歷</small></span></button>
+          <button id="candidate-tab-activity" type="button" role="tab" :class="{ active: candidateDetailTab === 'activity' }" :aria-selected="candidateDetailTab === 'activity'" aria-controls="candidate-panel-activity" data-testid="candidate-detail-tab-activity" @click="selectCandidateDetailTab('activity')"><span>3</span><span><strong>應徵與紀錄</strong><small>{{ selectedCandidate.applications.length }} 筆應徵 · {{ candidateActivities.length }} 筆活動</small></span></button>
+        </nav>
+
+        <div class="candidate-detail-actionbar">
+          <div><button class="button primary" data-testid="add-shared-activity" @click="openActivity(selectedCandidate)">＋ {{ authState.user.role === 'manager' ? '新增主管留言' : '新增 HR 留言／聯繫' }}</button><template v-if="authState.user.role !== 'manager'"><button class="button secondary" @click="openCandidate(selectedCandidate)">編輯人才</button><button v-if="selectedCandidate.has_photo" class="button secondary" :disabled="saving" @click="removeCandidatePhoto(selectedCandidate)">移除照片</button></template></div>
+          <div v-if="authState.user.role !== 'manager'" class="candidate-detail-danger-actions"><button class="button danger" @click="archiveCandidate(selectedCandidate)">封存</button><button class="button danger" :disabled="saving" @click="removeCandidate(selectedCandidate)">刪除人才</button></div>
+        </div>
+
+        <div ref="candidateDetailBody" class="detail-body candidate-detail-body">
+          <section id="candidate-panel-profile" v-show="candidateDetailTab === 'profile'" role="tabpanel" aria-labelledby="candidate-tab-profile" data-testid="candidate-detail-panel-profile">
+            <div class="candidate-section-heading"><div><small>PROFILE</small><h3>基本資料</h3><p>聯絡方式、保存期限與人才經歷集中在這一頁。</p></div></div>
+            <div class="detail-grid candidate-contact-grid"><div><small>Email</small><strong>{{ selectedCandidate.email || '未提供' }}</strong></div><div><small>電話</small><strong>{{ selectedCandidate.phone || '未提供' }}</strong></div><div><small>地區</small><strong>{{ selectedCandidate.city || '未提供' }}</strong></div><div><small>來源</small><strong>{{ sourceLabels[selectedCandidate.source || ''] || selectedCandidate.source || '未知' }}</strong></div></div>
+            <div v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" class="candidate-retention-control drawer-retention-control" :class="{ custom: selectedCandidate.retention_years_override !== null }">
+              <div><span>{{ selectedCandidate.retention_years_override === null ? `公司預設 ${retentionPolicyYears} 年` : `個別設定 ${selectedCandidate.retention_years_override} 年` }}</span><small>{{ selectedCandidate.retention_until ? `保存至 ${dateOnly(selectedCandidate.retention_until)}` : '尚未計算到期日' }}</small></div>
+              <label>保存年限<select :value="selectedCandidate.retention_years_override ?? ''" :disabled="retentionSavingCandidateId === selectedCandidate.id" :aria-label="`${selectedCandidate.name}的保存年限`" @change="updateCandidateRetention(selectedCandidate, $event)"><option value="">沿用公司預設（{{ retentionPolicyYears }} 年）</option><option v-for="years in retentionYearOptions" :key="years" :value="years">個別設定 {{ years }} 年</option></select></label>
             </div>
-            <div v-else class="empty compact"><p>目前權限範圍內沒有應徵職缺資料。</p></div>
+            <section class="candidate-profile-block candidate-section-card">
+              <div class="candidate-block-heading"><div><h3>技能與人才摘要</h3><p>履歷確認後整理出的工作相關資訊。</p></div><span>{{ selectedCandidate.skills.length }} 項技能</span></div>
+              <p v-if="selectedCandidate.summary" class="candidate-summary">{{ selectedCandidate.summary }}</p>
+              <div v-if="selectedCandidate.skills.length" class="candidate-skill-list"><span v-for="skill in selectedCandidate.skills" :key="skill">{{ skill }}</span></div>
+              <div v-else class="empty compact"><p>尚未整理技能或人才摘要。</p></div>
+            </section>
+            <section class="candidate-profile-block candidate-history-grid">
+              <div class="candidate-section-card"><h3>工作經歷</h3><article v-for="experience in selectedCandidate.experiences" :key="experience.id" class="candidate-history-card"><strong>{{ experience.title }}</strong><span>{{ experience.company }}<template v-if="experience.industry"> · {{ experience.industry }}</template></span><small>{{ experience.start_ym || '未填起始' }}－{{ experience.end_ym || '至今' }}<template v-if="experience.years !== null"> · {{ experience.years }} 年</template></small><p v-if="experience.description">{{ experience.description }}</p></article><div v-if="!selectedCandidate.experiences.length" class="empty compact"><p>尚無結構化工作經歷。</p></div></div>
+              <div class="candidate-section-card"><h3>學歷</h3><article v-for="education in selectedCandidate.educations" :key="education.id" class="candidate-history-card"><strong>{{ education.school }}</strong><span>{{ [education.degree, education.major].filter(Boolean).join(' · ') || '未填學位／科系' }}</span><small>{{ education.start_ym || '未填起始' }}－{{ education.end_ym || '未填結束' }}</small></article><div v-if="!selectedCandidate.educations.length" class="empty compact"><p>尚無結構化學歷。</p></div></div>
+            </section>
           </section>
-          <section class="candidate-profile-block">
-            <h3>技能與人才摘要</h3>
-            <p v-if="selectedCandidate.summary" class="candidate-summary">{{ selectedCandidate.summary }}</p>
-            <div v-if="selectedCandidate.skills.length" class="candidate-skill-list"><span v-for="skill in selectedCandidate.skills" :key="skill">{{ skill }}</span></div>
-            <div v-else class="empty compact"><p>尚未整理技能或人才摘要。</p></div>
+
+          <section id="candidate-panel-documents" v-show="candidateDetailTab === 'documents'" role="tabpanel" aria-labelledby="candidate-tab-documents" data-testid="candidate-resumes">
+            <div class="candidate-section-heading"><div><small>FILES &amp; PRIVACY</small><h3>履歷與去識別化檔案</h3><p>先管理檔案，再決定是否使用已核准版本進行職位分析。</p></div><span>{{ selectedCandidate.resumes.length }} 份原始履歷</span></div>
+            <div class="candidate-storage-guide" data-testid="candidate-deidentification-storage-guide"><span aria-hidden="true">檔</span><div><strong>原始履歷與去識別化檔案會分開保存</strong><p>展開下方原始履歷後按「上傳此履歷的去識別化檔案」，選擇一份已去識別化的 PDF 檔；系統會新增版本化檔案並自動掃描是否殘留個資，不會覆蓋原始檔。預覽確認並核准後，才能提供職位分析使用。</p></div></div>
+            <CandidateAnalysisPanel
+              :key="selectedCandidate.id"
+              :candidate="selectedCandidate"
+              :resumes="selectedCandidate.resumes"
+              :jobs="jobs"
+              :role="authState.user.role"
+              auto-expand-first-document
+              @open-parsed-resume="openCandidateResume"
+            />
+            <div v-if="selectedCandidateResume" class="candidate-resume-preview"><header><div><small>履歷解析內容</small><strong>{{ selectedCandidateResume.original_filename || `履歷 #${selectedCandidateResume.id}` }}</strong></div><button type="button" aria-label="關閉履歷內容" @click="selectedCandidateResume = null">×</button></header><div v-if="candidateResumeHighlights.length" class="resume-highlight-list"><div v-for="item in candidateResumeHighlights" :key="item.label"><small>{{ item.label }}</small><p>{{ item.value }}</p></div></div><pre v-if="selectedCandidateResume.resume_text">{{ selectedCandidateResume.resume_text }}</pre><div v-if="!candidateResumeHighlights.length && !selectedCandidateResume.resume_text" class="empty compact"><p>此履歷尚無可顯示的解析內容。</p></div></div>
           </section>
-          <section class="candidate-profile-block candidate-history-grid">
-            <div><h3>工作經歷</h3><article v-for="experience in selectedCandidate.experiences" :key="experience.id" class="candidate-history-card"><strong>{{ experience.title }}</strong><span>{{ experience.company }}<template v-if="experience.industry"> · {{ experience.industry }}</template></span><small>{{ experience.start_ym || '未填起始' }}－{{ experience.end_ym || '至今' }}<template v-if="experience.years !== null"> · {{ experience.years }} 年</template></small><p v-if="experience.description">{{ experience.description }}</p></article><div v-if="!selectedCandidate.experiences.length" class="empty compact"><p>尚無結構化工作經歷。</p></div></div>
-            <div><h3>學歷</h3><article v-for="education in selectedCandidate.educations" :key="education.id" class="candidate-history-card"><strong>{{ education.school }}</strong><span>{{ [education.degree, education.major].filter(Boolean).join(' · ') || '未填學位／科系' }}</span><small>{{ education.start_ym || '未填起始' }}－{{ education.end_ym || '未填結束' }}</small></article><div v-if="!selectedCandidate.educations.length" class="empty compact"><p>尚無結構化學歷。</p></div></div>
+
+          <section id="candidate-panel-activity" v-show="candidateDetailTab === 'activity'" role="tabpanel" aria-labelledby="candidate-tab-activity" data-testid="candidate-detail-panel-activity">
+            <div class="candidate-section-heading"><div><small>APPLICATIONS &amp; TIMELINE</small><h3>應徵與紀錄</h3><p>職缺申請、HR 聯繫與主管留言集中在同一條工作脈絡。</p></div></div>
+            <section class="candidate-profile-block candidate-section-card" data-testid="candidate-application-details">
+              <div class="candidate-block-heading"><div><h3>應徵職缺與申請資料</h3><p>目前權限範圍內可查看的正式應徵紀錄。</p></div><span>{{ selectedCandidate.applications.length }} 筆</span></div>
+              <div v-if="selectedCandidate.applications.length" class="candidate-application-list">
+                <article v-for="application in selectedCandidate.applications" :key="application.id">
+                  <header><div><small>{{ application.requisition.department_name || `部門 #${application.requisition.department_id}` }}</small><strong>{{ application.requisition.title }}</strong><span>{{ application.requisition.req_no }} · {{ date(application.applied_at) }}</span></div><b class="status" :data-status="application.status">{{ application.status }}</b></header>
+                  <div v-if="safeExternalUrl(application.portfolio_url) || safeExternalUrl(application.linkedin_url)" class="candidate-links"><a v-if="safeExternalUrl(application.portfolio_url)" :href="safeExternalUrl(application.portfolio_url)" target="_blank" rel="noopener noreferrer">作品集／個人網站 ↗</a><a v-if="safeExternalUrl(application.linkedin_url)" :href="safeExternalUrl(application.linkedin_url)" target="_blank" rel="noopener noreferrer">LinkedIn ↗</a></div>
+                  <div v-if="application.cover_letter" class="candidate-cover-letter"><small>求職信</small><p>{{ application.cover_letter }}</p></div>
+                  <p v-if="!application.cover_letter && !safeExternalUrl(application.portfolio_url) && !safeExternalUrl(application.linkedin_url)" class="candidate-empty-line">這筆應徵未提供作品連結、LinkedIn 或求職信。</p>
+                </article>
+              </div>
+              <div v-else class="empty compact"><p>目前權限範圍內沒有應徵職缺資料。</p></div>
+            </section>
+            <section class="candidate-profile-block candidate-section-card candidate-activity-block">
+              <div class="candidate-block-heading"><div><h3>HR／主管共享留言與活動</h3><p>主管只能留言，不會直接改動人才狀態。</p></div><span>{{ candidateActivities.length }} 筆</span></div>
+              <div v-if="candidateActivities.length" class="timeline shared-timeline" data-testid="shared-activity-timeline">
+                <article v-for="activity in candidateActivities" :key="activity.id" :data-author-role="activity.author_role || 'legacy'" :data-testid="`shared-activity-${activity.id}`">
+                  <i></i><div class="timeline-author"><strong>{{ activity.author_name || '歷史紀錄' }}</strong><span>{{ activityRoleLabels[activity.author_role || ''] || activity.author_role || '未標示角色' }}<template v-if="activity.author_department_name"> · {{ activity.author_department_name }}</template></span></div><small>{{ date(activity.happened_at) }} · {{ activity.type }}</small><p>{{ activity.content }}</p>
+                </article>
+              </div>
+              <div v-else class="empty compact"><p>尚無共享留言或活動紀錄。</p></div>
+            </section>
           </section>
-          <section class="candidate-profile-block" data-testid="candidate-resumes">
-            <h3>履歷</h3>
-            <div v-if="selectedCandidate.resumes.length" class="candidate-resume-list"><article v-for="resume in selectedCandidate.resumes" :key="resume.id"><div><strong>{{ resume.original_filename || `履歷 #${resume.id}` }}</strong><span>{{ resume.target_requisition_title || '未標示職缺' }} · {{ sourceLabels[resume.source_platform] || resume.source_platform }}</span></div><div><button class="text-button" type="button" :disabled="candidateResumeLoading" @click="openCandidateResume(resume.id)">{{ candidateResumeLoading ? '讀取中…' : '查看內容' }}</button><button v-if="resume.has_file" class="text-button" type="button" @click="downloadCandidateResume(resume.id, resume.original_filename)">下載</button><a v-if="safeExternalUrl(resume.resume_url)" :href="safeExternalUrl(resume.resume_url)" target="_blank" rel="noopener noreferrer">外部履歷 ↗</a></div></article></div>
-            <div v-else class="empty compact"><p>目前部門沒有可存取的已確認履歷。</p></div>
-            <div v-if="selectedCandidateResume" class="candidate-resume-preview"><header><div><small>履歷內容</small><strong>{{ selectedCandidateResume.original_filename || `履歷 #${selectedCandidateResume.id}` }}</strong></div><button type="button" aria-label="關閉履歷內容" @click="selectedCandidateResume = null">×</button></header><div v-if="candidateResumeHighlights.length" class="resume-highlight-list"><div v-for="item in candidateResumeHighlights" :key="item.label"><small>{{ item.label }}</small><p>{{ item.value }}</p></div></div><pre v-if="selectedCandidateResume.resume_text">{{ selectedCandidateResume.resume_text }}</pre><div v-if="!candidateResumeHighlights.length && !selectedCandidateResume.resume_text" class="empty compact"><p>此履歷尚無可顯示的解析內容。</p></div></div>
-          </section>
-          <h3>HR／主管共享留言與活動</h3>
-          <p class="shared-activity-hint">HR 與這位人才所應徵部門的主管都能查看此時間軸；主管只能留言，不會改動人才狀態。</p>
-          <div v-if="candidateActivities.length" class="timeline shared-timeline" data-testid="shared-activity-timeline">
-            <article v-for="activity in candidateActivities" :key="activity.id" :data-author-role="activity.author_role || 'legacy'" :data-testid="`shared-activity-${activity.id}`">
-              <i></i><div class="timeline-author"><strong>{{ activity.author_name || '歷史紀錄' }}</strong><span>{{ activityRoleLabels[activity.author_role || ''] || activity.author_role || '未標示角色' }}<template v-if="activity.author_department_name"> · {{ activity.author_department_name }}</template></span></div><small>{{ date(activity.happened_at) }} · {{ activity.type }}</small><p>{{ activity.content }}</p>
-            </article>
-          </div>
-          <div v-else class="empty compact"><p>尚無共享留言或活動紀錄</p></div>
         </div>
       </aside>
+    </div>
+
+    <div v-if="resumeFilePreview" class="resume-file-preview-overlay" role="presentation" @click.self="closeResumeFilePreview" @keydown.esc="closeResumeFilePreview">
+      <section class="resume-file-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="resume-file-preview-title">
+        <header>
+          <div><small>{{ resumeFilePreviewIsGenerated ? 'SYSTEM-GENERATED PROFILE' : resumeFilePreviewIsPdf ? 'ORIGINAL PDF' : 'WORD TEXT PREVIEW' }}</small><h2 id="resume-file-preview-title">{{ resumeFilePreview.original_filename || `履歷 #${resumeFilePreview.id}` }}</h2><p>{{ resumeFilePreviewIsGenerated ? '依人才庫資料補建的 PDF，並非應徵者原始上傳檔' : resumeFilePreviewIsPdf ? '應徵者提供的原始 PDF 檔案' : '瀏覽器無法原樣呈現 Word，以下顯示安全的解析文字' }}</p></div>
+          <div class="resume-file-preview-actions"><button class="button secondary" type="button" @click="downloadCandidateResume(resumeFilePreview.id, resumeFilePreview.original_filename)">下載原檔</button><button class="resume-file-preview-close" type="button" aria-label="關閉履歷預覽" @click="closeResumeFilePreview">×</button></div>
+        </header>
+        <div v-if="resumeFilePreviewIsPdf && resumeFilePreviewUrl" class="resume-file-preview-canvas">
+          <iframe :src="resumeFilePreviewUrl" :title="`${resumeFilePreview.original_filename || '履歷'}預覽`"></iframe>
+        </div>
+        <div v-else class="resume-word-preview">
+          <div class="resume-preview-notice"><strong>Word 預覽為解析文字</strong><span>DOC／DOCX 的字型、圖片與排版可能和原始檔不同；需要核對版面時請使用「下載原檔」。</span></div>
+          <div v-if="resumeFilePreviewHighlights.length" class="resume-highlight-list"><div v-for="item in resumeFilePreviewHighlights" :key="item.label"><small>{{ item.label }}</small><p>{{ item.value }}</p></div></div>
+          <pre v-if="resumeFilePreview.resume_text">{{ resumeFilePreview.resume_text }}</pre>
+          <div v-if="!resumeFilePreviewHighlights.length && !resumeFilePreview.resume_text" class="empty compact"><strong>沒有可顯示的解析文字</strong><p>請下載原始 Word 檔案查看完整內容。</p></div>
+        </div>
+        <footer><span>預覽與下載都會依照登入權限判斷，且不公開檔案網址。</span><button class="button primary" type="button" @click="closeResumeFilePreview">關閉預覽</button></footer>
+      </section>
     </div>
 
     <div v-if="dialog" class="modal-overlay" @click.self="dialog = null" @keydown.esc="dialog = null"><form class="modal-card" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title" @submit.prevent="dialog === 'candidate' ? saveCandidate() : dialog === 'activity' ? saveActivity() : saveJob()"><header><div><small>{{ dialog === 'candidate' ? '儲存至 candidates 資料表' : '資料會直接寫入 API' }}</small><h2 id="app-dialog-title">{{ dialog === 'candidate' ? (editingCandidate ? `編輯人才（DB #${editingCandidate.id}）` : '新增人才') : dialog === 'activity' ? (authState.user.role === 'manager' ? '新增主管留言' : '新增 HR 留言／聯繫紀錄') : (editingJob ? '編輯職缺' : '建立職缺') }}</h2></div><button type="button" aria-label="關閉編輯視窗" @click="dialog = null">×</button></header>
@@ -1289,8 +1542,18 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.intake-tab-bar{display:inline-flex;gap:6px;margin:0 0 16px;padding:5px;border:1px solid #dbe7e3;border-radius:12px;background:#eef4f2}.intake-tab{min-width:132px;padding:9px 18px;border:1px solid transparent;border-radius:9px;background:transparent;color:#5c716b;font-size:12px;font-weight:800;cursor:pointer}.intake-tab:hover{color:#165f55}.intake-tab.active{border-color:#71b8aa;background:#fff;color:#165f55;box-shadow:0 4px 12px rgba(24,95,84,.08)}
+.intake-manual-panel{display:block}.intake-manual-card{padding:18px 20px 16px}.intake-manual-card .section-head{margin-bottom:14px}.intake-manual-actions{display:flex;justify-content:flex-end;margin-top:16px}
 .manager-job-target{display:grid;gap:6px;margin:14px 16px 12px;padding:13px;border:1px solid #cfe2dc;border-radius:10px;background:#f8fbfa;color:#496c66;font-size:9px;font-weight:700}.manager-job-target select{width:100%;height:40px;border:1px solid #c9dcd7;border-radius:8px;background:#fff;padding:0 11px;color:#274f49;font-size:10px}.manager-job-target small{color:#7f918d;font-weight:400}.manager-job-target .target-warning{color:#a25e38}.dropzone:disabled{cursor:not-allowed;opacity:.62}.resume-target-summary{margin:14px 17px 0;padding:12px 14px;border:1px solid #c9e4da;border-radius:9px;background:#eef8f4;color:#285f56}.resume-target-summary small,.resume-target-summary strong{display:block}.resume-target-summary small{font-size:8px;color:#6e877f}.resume-target-summary strong{margin-top:3px;font-size:11px}.resume-target-summary p{margin:5px 0 0;font-size:8px;color:#668078}
 .shared-activity-hint{margin:-5px 0 14px;color:#70827e;font-size:9px;line-height:1.6}.shared-timeline article{padding:12px 12px 12px 23px;border:1px solid #e0ebe7;border-radius:9px;background:#fbfdfc}.shared-timeline article[data-author-role="hr"]{border-left:3px solid #19917e}.shared-timeline article[data-author-role="manager"]{border-left:3px solid #d59b32}.timeline-author{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}.timeline-author strong{color:#174f48;font-size:10px}.timeline-author span{padding:3px 6px;border-radius:99px;background:#edf5f2;color:#56706a;font-size:7px}.shared-timeline article>small{display:block;color:#80908c}.shared-timeline article>p{white-space:pre-wrap;overflow-wrap:anywhere}
 .candidate-assignment-list{display:flex;flex-wrap:wrap;gap:6px;padding:10px 12px;border:1px solid #d8e7e2;border-radius:9px;background:#f8fbfa}.candidate-assignment-list>small{flex-basis:100%;color:#6e827d}.candidate-assignment-list>span{padding:5px 8px;border-radius:99px;background:#e6f2ee;color:#27675e;font-size:8px}.form-grid label>small{display:block;margin-top:5px;color:#788b86;font-size:8px;line-height:1.45}.form-grid label>.assignment-warning{color:#a45445;font-weight:700}
 .candidate-profile-block{margin:18px 0;padding-top:4px}.candidate-profile-block>h3,.candidate-history-grid h3{margin:0 0 10px}.candidate-application-list,.candidate-resume-list{display:grid;gap:9px}.candidate-application-list>article,.candidate-resume-list>article,.candidate-history-card{padding:12px;border:1px solid #dce9e5;border-radius:10px;background:#fbfdfc}.candidate-application-list article>header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.candidate-application-list header div>*{display:block}.candidate-application-list header small,.candidate-application-list header span,.candidate-history-card small,.candidate-history-card span,.candidate-resume-list span{color:#778a85;font-size:8px}.candidate-application-list header strong,.candidate-history-card strong,.candidate-resume-list strong{margin:3px 0;color:#214f49;font-size:10px}.candidate-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}.candidate-links a,.candidate-resume-list a{color:#087b6c;font-size:8px;font-weight:700;text-decoration:none}.candidate-cover-letter{margin-top:10px;padding:9px;border-radius:8px;background:#f1f7f5}.candidate-cover-letter small{color:#6f827d;font-size:8px}.candidate-cover-letter p,.candidate-summary,.candidate-history-card p{margin:5px 0 0;white-space:pre-wrap;color:#405f59;font-size:9px;line-height:1.65}.candidate-empty-line{margin:8px 0 0;color:#879691;font-size:8px}.candidate-skill-list{display:flex;flex-wrap:wrap;gap:6px}.candidate-skill-list span{padding:5px 8px;border-radius:99px;background:#e6f2ee;color:#27675e;font-size:8px;font-weight:700}.candidate-history-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.candidate-history-card{margin-bottom:8px}.candidate-history-card>*{display:block}.candidate-resume-list>article{display:flex;align-items:center;justify-content:space-between;gap:10px}.candidate-resume-list article>div:first-child>*{display:block}.candidate-resume-list article>div:last-child{display:flex;align-items:center;gap:8px}.candidate-resume-preview{margin-top:10px;padding:12px;border:1px solid #cfe3dc;border-radius:10px;background:#f4faf8}.candidate-resume-preview>header{display:flex;align-items:center;justify-content:space-between}.candidate-resume-preview>header div>*{display:block}.candidate-resume-preview>header button{border:0;background:none;color:#607772;font-size:18px}.resume-highlight-list{display:grid;gap:7px;margin-top:10px}.resume-highlight-list>div{padding:8px;border-radius:7px;background:#fff}.resume-highlight-list small{color:#71847f;font-size:7px}.resume-highlight-list p{margin:3px 0 0;white-space:pre-wrap;color:#345b54;font-size:8px;line-height:1.55}.candidate-resume-preview pre{max-height:240px;overflow:auto;margin:10px 0 0;padding:10px;border-radius:7px;background:#173b36;color:#e8f5f1;white-space:pre-wrap;font:8px/1.6 monospace}@media(max-width:700px){.candidate-history-grid{grid-template-columns:1fr}.candidate-resume-list>article{align-items:flex-start;flex-direction:column}}
+.resume-origin-badge{display:inline-flex!important;width:max-content;margin-top:5px;padding:3px 6px;border-radius:99px;font-size:7px!important;font-style:normal;font-weight:800}.resume-origin-badge.generated{background:#e1f2eb;color:#1b7463}.resume-origin-badge.missing{background:#fff0df;color:#9b612c}.candidate-resume-file-error{margin:9px 0 0}.resume-preview-trigger{font-weight:800}.resume-file-preview-overlay{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:18px;background:rgba(10,34,31,.7);backdrop-filter:blur(4px)}.resume-file-preview-dialog{display:flex;flex-direction:column;width:min(1120px,100%);height:min(92vh,920px);overflow:hidden;border-radius:16px;background:#fff;box-shadow:0 28px 90px rgba(5,27,24,.4)}.resume-file-preview-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:17px 20px;border-bottom:1px solid #dfe9e6}.resume-file-preview-dialog>header small{color:#218174;font-size:8px;font-weight:800;letter-spacing:1px}.resume-file-preview-dialog>header h2{margin:4px 0;font-size:17px;color:#173f3a}.resume-file-preview-dialog>header p{margin:0;color:#71837f;font-size:9px}.resume-file-preview-actions{display:flex;align-items:center;gap:8px}.resume-file-preview-close{width:38px;height:38px;border:0;background:transparent;color:#647672;font-size:26px}.resume-file-preview-canvas{flex:1;min-height:0;padding:12px;background:#dce3e1}.resume-file-preview-canvas iframe{width:100%;height:100%;border:0;border-radius:7px;background:#fff}.resume-word-preview{flex:1;min-height:0;overflow:auto;padding:18px 22px;background:#f5f8f7}.resume-preview-notice{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #ead9b8;border-radius:9px;background:#fff8e9;color:#765c2c}.resume-preview-notice strong{font-size:10px;white-space:nowrap}.resume-preview-notice span{font-size:9px;line-height:1.55}.resume-word-preview .resume-highlight-list{grid-template-columns:repeat(2,minmax(0,1fr))}.resume-word-preview pre{margin:12px 0 0;padding:16px;border:1px solid #dce7e3;border-radius:9px;background:#fff;color:#294f49;white-space:pre-wrap;overflow-wrap:anywhere;font:10px/1.75 monospace}.resume-file-preview-dialog>footer{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 18px;border-top:1px solid #dfe9e6}.resume-file-preview-dialog>footer span{color:#71837f;font-size:8px}@media(max-width:700px){.resume-file-preview-overlay{padding:0}.resume-file-preview-dialog{width:100%;height:100vh;border-radius:0}.resume-file-preview-dialog>header{align-items:stretch;flex-direction:column}.resume-file-preview-actions{justify-content:space-between}.resume-word-preview .resume-highlight-list{grid-template-columns:1fr}.resume-file-preview-dialog>footer span{display:none}}
+
+/* Candidate detail workspace: three focused views instead of one long, narrow drawer. */
+.candidate-detail-drawer{width:min(880px,calc(100vw - 28px));display:flex;flex-direction:column;overflow:hidden;background:#f5f8f7}.candidate-detail-header{flex:0 0 auto;align-items:center;padding:18px 22px!important;background:#fff}.candidate-detail-identity{min-width:0;align-items:center}.candidate-detail-identity>div{min-width:0}.candidate-detail-header h2{font-size:21px!important;color:#143f39}.candidate-detail-header p{margin-top:4px!important;font-size:12px!important}.candidate-detail-header-state{display:flex;align-items:center;gap:13px}.candidate-detail-header-state>button{width:38px;height:38px;border:0;background:transparent;color:#687b77;font-size:27px}.candidate-detail-header-state>.status{font-size:11px;padding:6px 10px}
+.candidate-detail-tabs{flex:0 0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:11px 16px;border-bottom:1px solid #dde8e5;background:#eef4f2}.candidate-detail-tabs button{min-width:0;min-height:58px;display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid transparent;border-radius:10px;background:transparent;color:#5c716b;text-align:left}.candidate-detail-tabs button:hover{background:#fff}.candidate-detail-tabs button.active{border-color:#71b8aa;background:#fff;color:#165f55;box-shadow:0 4px 12px rgba(24,95,84,.08)}.candidate-detail-tabs button>span:first-child{width:29px;height:29px;flex:0 0 auto;display:grid;place-items:center;border-radius:50%;background:#dce9e5;color:#456c64;font-size:12px;font-weight:800}.candidate-detail-tabs button.active>span:first-child{background:#168476;color:#fff}.candidate-detail-tabs strong,.candidate-detail-tabs small{display:block}.candidate-detail-tabs strong{font-size:13px}.candidate-detail-tabs small{margin-top:2px;color:#7a8d87;font-size:11px}
+.candidate-detail-actionbar{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 18px;border-bottom:1px solid #e0e9e7;background:#fff}.candidate-detail-actionbar>div{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.candidate-detail-actionbar .button{height:36px;font-size:12px}.candidate-detail-danger-actions{margin-left:auto}.candidate-detail-body{flex:1;min-height:0;overflow:auto;padding:22px 24px 38px;scrollbar-gutter:stable}.candidate-section-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:15px}.candidate-section-heading small{color:#218074;font-size:11px!important;font-weight:900;letter-spacing:1px}.candidate-section-heading h3{margin:3px 0;color:#174b44;font-size:20px}.candidate-section-heading p{margin:0;color:#6b7f79;font-size:13px;line-height:1.55}.candidate-section-heading>span{padding:6px 9px;border-radius:99px;background:#e3f1ed;color:#236b60;font-size:12px;font-weight:800;white-space:nowrap}.candidate-contact-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.candidate-contact-grid>div{min-height:68px;padding:12px 13px;border:1px solid #e1e9e7;background:#fff}.candidate-contact-grid small{font-size:11px!important}.candidate-contact-grid strong{margin-top:5px;font-size:13px;overflow-wrap:anywhere}.candidate-section-card{padding:16px;border:1px solid #dce8e4;border-radius:12px;background:#fff}.candidate-block-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px}.candidate-block-heading h3{margin:0;color:#1b5049;font-size:15px}.candidate-block-heading p{margin:4px 0 0;color:#71847e;font-size:12px}.candidate-block-heading>span{padding:5px 8px;border-radius:99px;background:#edf4f2;color:#55726b;font-size:11px;font-weight:800;white-space:nowrap}.candidate-detail-body .candidate-profile-block{margin:14px 0}.candidate-detail-body .candidate-summary{margin:0 0 12px;font-size:13px;line-height:1.7}.candidate-detail-body .candidate-skill-list span{padding:6px 9px;font-size:12px}.candidate-detail-body .candidate-history-grid{gap:14px}.candidate-detail-body .candidate-history-card{padding:12px 13px;background:#f8fbfa}.candidate-detail-body .candidate-history-card strong{font-size:14px}.candidate-detail-body .candidate-history-card span,.candidate-detail-body .candidate-history-card small{margin-top:3px;font-size:12px}.candidate-detail-body .candidate-history-card p{font-size:12px}.candidate-storage-guide{display:flex;align-items:flex-start;gap:13px;padding:14px 15px;border:1px solid #e4ca91;border-radius:11px;background:#fff9ec;color:#6f572e}.candidate-storage-guide>span{width:36px;height:36px;flex:0 0 auto;display:grid;place-items:center;border-radius:9px;background:#e9b956;color:#fff;font-size:13px;font-weight:900}.candidate-storage-guide strong{display:block;color:#684e22;font-size:14px}.candidate-storage-guide p{margin:4px 0 0;font-size:12px;line-height:1.65}.candidate-detail-body :deep(.candidate-analysis-panel){margin:14px 0 0}.candidate-detail-body .candidate-resume-preview{margin-top:14px;padding:15px}.candidate-detail-body .candidate-resume-preview header small{font-size:11px}.candidate-detail-body .candidate-resume-preview header strong{font-size:14px}.candidate-detail-body .resume-highlight-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.candidate-detail-body .resume-highlight-list small{font-size:11px}.candidate-detail-body .resume-highlight-list p{font-size:12px}.candidate-detail-body .candidate-application-list{gap:10px}.candidate-detail-body .candidate-application-list>article{padding:14px}.candidate-detail-body .candidate-application-list header small,.candidate-detail-body .candidate-application-list header span{font-size:11px}.candidate-detail-body .candidate-application-list header strong{font-size:14px}.candidate-detail-body .candidate-links a,.candidate-detail-body .candidate-cover-letter small,.candidate-detail-body .candidate-empty-line{font-size:11px}.candidate-detail-body .candidate-cover-letter p{font-size:12px}.candidate-activity-block{margin-bottom:0!important}.candidate-detail-body .shared-timeline{display:grid;gap:9px}.candidate-detail-body .shared-timeline article{padding:13px 14px 13px 24px}.candidate-detail-body .timeline-author strong{font-size:13px}.candidate-detail-body .timeline-author span{font-size:10px}.candidate-detail-body .shared-timeline article>small{font-size:11px!important}.candidate-detail-body .shared-timeline article>p{font-size:12px!important}
+@media(max-width:900px){.candidate-detail-drawer{width:100%}.candidate-detail-actionbar{align-items:flex-start;flex-direction:column}.candidate-detail-danger-actions{margin-left:0}.candidate-contact-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:620px){.candidate-detail-header{padding:14px 16px!important}.candidate-detail-header-state>.status{display:none}.candidate-detail-tabs{gap:5px;padding:8px}.candidate-detail-tabs button{justify-content:center;min-height:48px;padding:8px}.candidate-detail-tabs button>span:first-child,.candidate-detail-tabs small{display:none}.candidate-detail-tabs strong{font-size:12px;text-align:center}.candidate-detail-actionbar{padding:9px 12px}.candidate-detail-actionbar>div{width:100%}.candidate-detail-actionbar .button{flex:1}.candidate-detail-body{padding:17px 14px 28px}.candidate-contact-grid,.candidate-detail-body .candidate-history-grid,.candidate-detail-body .resume-highlight-list{grid-template-columns:1fr}.candidate-section-heading{align-items:flex-start;flex-direction:column}.candidate-storage-guide{padding:12px}.candidate-detail-body :deep(.candidate-analysis-panel){margin-top:12px}}
 </style>
