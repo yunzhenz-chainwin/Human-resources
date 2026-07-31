@@ -5,6 +5,7 @@ from app.models.candidate import (
     CandidateExperience,
     CandidateSkill,
 )
+from app.models.consent import CandidateConsent, ConsentNotice
 from app.models.deidentified_resume import DeidentifiedResumeDocument
 from app.models.interview import InterviewQuestionPlan, InterviewRecord
 from app.models.matching import MatchResult
@@ -32,6 +33,8 @@ __all__ = [
     "CandidateEducation",
     "CandidateExperience",
     "CandidateSkill",
+    "CandidateConsent",
+    "ConsentNotice",
     "DeidentifiedResumeDocument",
     "InterviewRecord",
     "InterviewQuestionPlan",

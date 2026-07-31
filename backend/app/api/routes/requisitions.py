@@ -10,6 +10,7 @@ from app.dependencies.auth import (
     enforce_department_scope,
     get_current_user,
     require_recruiting_manager,
+    require_recruiting_user,
 )
 from app.models import JobRequisition, User
 from app.schemas.hr import (
@@ -19,6 +20,11 @@ from app.schemas.hr import (
     RequisitionRead,
     RequisitionUpdate,
 )
+from app.schemas.matching import (
+    JobComplianceLintRequest,
+    JobComplianceResult,
+)
+from app.services.jd_compliance import JD_COMPLIANCE_RULES_VERSION, lint_job_text
 
 router = APIRouter(prefix="/requisitions")
 
@@ -108,6 +114,31 @@ def create_requisition(
         raise HTTPException(status_code=409, detail="需求單號重複或關聯資料不存在") from exc
     db.refresh(requisition)
     return requisition
+
+
+@router.post("/lint", response_model=JobComplianceResult)
+def lint_requisition_text(
+    payload: JobComplianceLintRequest,
+    user: User = Depends(require_recruiting_user),
+) -> JobComplianceResult:
+    """Preview anti-discrimination lint for requisition text without saving.
+
+    Scans title/summary/JD for wording that likely violates 就服法 §5 and the
+    related age / gender-equality statutes, and returns rewrite suggestions.
+    Findings are advisory (``warning``) and never block creating/editing a
+    requisition. Declared above ``/{requisition_id}`` so the literal ``lint``
+    segment is not captured as a requisition id.
+    """
+    result = lint_job_text(
+        title=payload.title,
+        summary=payload.summary,
+        jd=payload.jd,
+    )
+    return JobComplianceResult(
+        status=result["status"],
+        findings=result["findings"],
+        rules_version=JD_COMPLIANCE_RULES_VERSION,
+    )
 
 
 @router.get("/{requisition_id}", response_model=RequisitionRead)

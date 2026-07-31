@@ -226,3 +226,38 @@ class MatchStatusUpdate(BaseModel):
         "hired",
         "withdrawn",
     ]
+
+
+JobTextField = Literal["title", "summary", "jd"]
+ComplianceCategory = Literal[
+    "gender",
+    "age",
+    "marital_pregnancy",
+    "military",
+    "appearance",
+    "nationality_race",
+    "religion",
+    "disability",
+    "astrology",
+]
+
+
+class JobComplianceLintRequest(BaseModel):
+    """Preview payload for the anti-discrimination JD linter (not persisted)."""
+
+    title: str | None = Field(default=None, max_length=200)
+    summary: str | None = Field(default=None, max_length=2000)
+    jd: str | None = Field(default=None, max_length=20000)
+
+
+class JobComplianceFinding(BaseModel):
+    category: ComplianceCategory
+    matched: str
+    field: JobTextField
+    suggestion: str
+
+
+class JobComplianceResult(BaseModel):
+    status: Literal["ok", "warning"]
+    findings: list[JobComplianceFinding] = Field(default_factory=list)
+    rules_version: str

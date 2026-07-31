@@ -12,9 +12,36 @@ import httpx
 from app.core.config import get_settings
 from app.schemas.interview_questions import (
     InterviewQuestionPlanItem,
+    QuestionCompliance,
     SuggestedInterviewQuestion,
     TraitQuestionSuggestion,
 )
+from app.services.interview_question_compliance import check_question
+
+
+def _evaluate_compliance(
+    question: str,
+    follow_up: str | None = None,
+) -> QuestionCompliance:
+    """Screen a question (and its follow-up) for unlawful / discriminatory topics."""
+    text = question if not follow_up else f"{question}\n{follow_up}"
+    return QuestionCompliance(**check_question(text))
+
+
+def annotate_question_compliance(
+    items: list[InterviewQuestionPlanItem],
+) -> list[InterviewQuestionPlanItem]:
+    """Return copies of plan items with freshly computed compliance results.
+
+    Used when re-reading stored plans so the compliance verdict always reflects
+    the current rule library rather than whatever was persisted with the plan.
+    """
+    return [
+        item.model_copy(
+            update={"compliance": _evaluate_compliance(item.question, item.follow_up)}
+        )
+        for item in items
+    ]
 
 MANAGER_QUESTION_PROMPT_VERSION = "manager-personalized-v3-2026-07"
 HR_QUESTION_PROMPT_VERSION = "hr-structured-v2-2026-07"
@@ -164,6 +191,7 @@ def _question(
         purpose=purpose,
         follow_up=follow_up,
         source=source,
+        compliance=_evaluate_compliance(question, follow_up),
     )
 
 
@@ -544,6 +572,9 @@ def _parse_gemini_questions(
                         purpose=values["purpose"],
                         follow_up=values["follow_up"],
                         source=f"Gemini 客製題目｜{values['source']}",
+                        compliance=_evaluate_compliance(
+                            values["question"], values["follow_up"]
+                        ),
                     )
                 )
         except (KeyError, TypeError, ValueError):
@@ -1017,6 +1048,7 @@ def suggest_interview_questions(
                     question=question,
                     purpose=purpose,
                     follow_up=follow_up,
+                    compliance=_evaluate_compliance(question, follow_up),
                 )
                 for question, purpose, follow_up in _templates(
                     _category(trait), trait, job_title
@@ -1154,12 +1186,17 @@ def personalized_trait_interview_questions(
             prefix, source, resume_follow_up = contexts[
                 (trait_index + question_index) % len(contexts)
             ]
+            personalized_question = f"{prefix}{item.question}"
+            personalized_follow_up = f"{item.follow_up} {resume_follow_up}"
             questions.append(
                 SuggestedInterviewQuestion(
-                    question=f"{prefix}{item.question}",
+                    question=personalized_question,
                     purpose=item.purpose,
-                    follow_up=f"{item.follow_up} {resume_follow_up}",
+                    follow_up=personalized_follow_up,
                     source=source,
+                    compliance=_evaluate_compliance(
+                        personalized_question, personalized_follow_up
+                    ),
                 )
             )
         result.append(TraitQuestionSuggestion(trait=suggestion.trait, questions=questions))

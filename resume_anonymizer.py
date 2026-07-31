@@ -643,7 +643,26 @@ class WebHandler(BaseHTTPRequestHandler):
 def serve_web(port: int, host: str = "127.0.0.1") -> int:
     server = ThreadingHTTPServer((host, port), WebHandler)
     server.daemon_threads = True
-    print(f"履歷去識別化工具：http://127.0.0.1:{port}")
+    if host in ("0.0.0.0", "::"):
+        # Bound to every interface for LAN access; report the machine's LAN
+        # address(es) so the printed link actually works from other devices.
+        lan_hint = ""
+        try:
+            import socket
+
+            addrs = {
+                info[4][0]
+                for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+                if not info[4][0].startswith("127.")
+            }
+            if addrs:
+                lan_hint = "".join(f"\n  區網連線：http://{addr}:{port}" for addr in sorted(addrs))
+        except OSError:
+            pass
+        print(f"履歷去識別化工具已啟動（綁定 {host}:{port}）")
+        print(f"  本機連線：http://127.0.0.1:{port}{lan_hint}")
+    else:
+        print(f"履歷去識別化工具已啟動：http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

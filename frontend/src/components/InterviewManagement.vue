@@ -121,6 +121,77 @@ const recordModeLabels: Record<InterviewRecordMode, string> = { onsite: '現場�
 const recordStatusLabels: Record<InterviewRecordStatus, string> = { planned: '已規劃', in_progress: '填寫中', completed: '已提交評分', cancelled: '已取消', no_show: '未到場' }
 const recommendationLabels: Record<InterviewRecommendation, string> = { advance: '進入下一階段', hold: '保留觀察', reject: '不建議錄用', offer: '建議發 Offer' }
 
+// --- Interview-question compliance (就服法§5 / 性平法§7·§11) ---------------
+// The backend attaches a `compliance` result to AI-generated / suggested
+// questions. For manually typed questions (which the record read schema does
+// not carry compliance for) we mirror the backend rule library here so the
+// interviewer still gets an immediate 合法 / 疑似違法 verdict. Keep this list in
+// sync with backend/app/services/interview_question_compliance.py; both need a
+// legal review before production use.
+type QuestionCompliance = {
+  status: 'ok' | 'warning'
+  categories: string[]
+  matched: string[]
+  suggestion: string
+  rules_version?: string
+}
+const complianceCategoryLabels: Record<string, string> = {
+  marital: '婚姻狀況',
+  pregnancy: '懷孕或生育計畫',
+  childcare: '家庭照顧責任',
+  age: '年齡',
+  gender: '性別或性傾向',
+  race: '種族或籍貫',
+  religion: '宗教或黨派',
+  disability_health: '身心障礙或健康病史',
+  appearance: '容貌或身材',
+  astrology_blood: '星座、血型或命理',
+}
+const localComplianceRules: Array<{ category: string; keywords: string[]; patterns: RegExp[]; suggestion: string }> = [
+  { category: 'marital', keywords: ['婚姻', '已婚', '未婚', '離婚', '結婚', '打算結婚', '何時結婚', '配偶', '老公', '老婆', '感情狀況', '有沒有男朋友', '有沒有女朋友', '有沒有交往'], patterns: [/\b(?:marital|married|spouse|husband|wife|boyfriend|girlfriend)\b/i], suggestion: '建議改問工作能力面向：避免詢問婚姻或感情狀況，可改問是否能配合職務所需的出差、輪班或加班安排。' },
+  { category: 'pregnancy', keywords: ['懷孕', '有孕', '生育', '生小孩', '生子', '生寶寶', '打算生', '備孕', '產假', '育嬰假', '育嬰留職', '生育計畫', '月經', '經期'], patterns: [/\b(?:pregnan\w*|maternity|childbearing)\b/i, /plan to have (?:a )?(?:child|children|baby|kids)/i], suggestion: '建議改問工作能力面向：避免詢問懷孕或生育計畫，可改問是否能配合職務的工作時間與出勤要求。' },
+  { category: 'childcare', keywords: ['照顧小孩', '照顧家人', '照顧長輩', '照顧父母', '家庭照顧', '家庭責任', '帶小孩', '誰帶小孩', '誰顧小孩', '托兒', '育兒', '家裡有沒有小孩'], patterns: [/child\s?care/i, /care for (?:your )?(?:children|family|parents|kids)/i, /\b(?:caregiving|dependents)\b/i], suggestion: '建議改問工作能力面向：避免詢問家庭照顧責任，可改問是否能配合職務所需的工時、值班或臨時加班。' },
+  { category: 'age', keywords: ['年齡', '幾歲', '今年多大', '出生年', '出生日期', '民國幾年', '哪一年出生', '生肖', '屬什麼'], patterns: [/\b(?:age|how old|year of birth|birth year|date of birth|birthday)\b/i], suggestion: '建議改問工作能力面向：避免詢問年齡或出生年次，可改問與職務相關的經驗年資或具體技能。' },
+  { category: 'gender', keywords: ['性別', '性傾向', '性向', '你是男是女', '男生還是女生', '同性戀', '異性戀', '跨性別'], patterns: [/\b(?:gender|sexual orientation|homosexual|heterosexual|transgender|lgbt)\b/i], suggestion: '建議改問工作能力面向：避免詢問性別或性傾向，請聚焦職務所需的專業能力與工作表現。' },
+  { category: 'race', keywords: ['種族', '籍貫', '省籍', '外省', '本省', '族群', '原住民', '血統', '國籍', '你是哪裡人', '老家在哪', '老家哪裡'], patterns: [/\b(?:race|ethnicity|ethnic|nationality|native place|where are you from)\b/i], suggestion: '建議改問工作能力面向：避免詢問種族、籍貫或國籍，可改問是否具備合法工作資格與職務所需語言能力。' },
+  { category: 'religion', keywords: ['宗教', '信仰', '拜拜', '佛教', '基督教', '天主教', '伊斯蘭', '回教', '政黨', '黨派', '政治立場', '支持哪一黨', '支持哪個政黨'], patterns: [/\b(?:religion|religious|faith|church|political party|which party)\b/i], suggestion: '建議改問工作能力面向：避免詢問宗教信仰或政黨黨派，可改問是否能配合公司既定的工作時間與排班。' },
+  { category: 'disability_health', keywords: ['身心障礙', '殘障', '殘疾', '病史', '疾病', '健康狀況', '健康情形', '慢性病', '精神疾病', '家族病史', '遺傳疾病', '開過刀', '服用藥物', '身心狀況', '是否生病'], patterns: [/\b(?:disabilit\w*|handicap\w*|health condition|medical history|mental illness)\b/i, /chronic (?:illness|disease)/i], suggestion: '建議改問工作能力面向：避免詢問健康病史或身心障礙，可改問是否能執行職務說明書所列的必要工作任務（必要時提供合理調整）。' },
+  { category: 'appearance', keywords: ['身高', '體重', '外貌', '長相', '五官', '容貌', '胖瘦', '幾公斤', '幾公分', '整形', '身材'], patterns: [/\b(?:body weight|physical appearance|how tall|your looks)\b/i], suggestion: '建議改問工作能力面向：避免針對身高、體重或容貌提問，請改問與職務績效直接相關的能力；如職務確有外型需求，須有明確職業資格依據並經法遵確認。' },
+  { category: 'astrology_blood', keywords: ['星座', '血型', '命盤', '紫微', '塔羅', '算命', '生辰八字', '八字', '占卜'], patterns: [/\b(?:astrolog\w*|blood type|horoscope|zodiac)\b/i], suggestion: '建議改問工作能力面向：避免以星座、血型或命理作為評估依據，請改問可觀察的工作行為與具體成果。' },
+]
+
+function localCompliance(text: string | null | undefined): QuestionCompliance {
+  const result: QuestionCompliance = { status: 'ok', categories: [], matched: [], suggestion: '' }
+  const haystack = (text || '').trim()
+  if (!haystack) return result
+  const suggestions: string[] = []
+  for (const rule of localComplianceRules) {
+    const hits = [
+      ...rule.keywords.filter(keyword => haystack.includes(keyword)),
+      ...rule.patterns.filter(pattern => pattern.test(haystack)).map(pattern => pattern.source),
+    ]
+    if (!hits.length) continue
+    result.categories.push(rule.category)
+    suggestions.push(rule.suggestion)
+    for (const hit of hits) if (!result.matched.includes(hit)) result.matched.push(hit)
+  }
+  if (result.categories.length) {
+    result.status = 'warning'
+    result.suggestion = suggestions.join(' ')
+  }
+  return result
+}
+
+function questionCompliance(question: { question?: string | null; compliance?: QuestionCompliance | null }): QuestionCompliance {
+  const attached = question.compliance
+  if (attached && (attached.status === 'ok' || attached.status === 'warning')) return attached
+  return localCompliance(question.question)
+}
+
+function complianceCategoryText(compliance: QuestionCompliance): string {
+  return compliance.categories.map(category => complianceCategoryLabels[category] || category).join('、')
+}
+
 function stageData(application: ApplicationDto, stage: InterviewStage): InterviewStageDto {
   return stage === 'hr' ? application.hr_interview : application.manager_interview
 }
@@ -1172,6 +1243,12 @@ onMounted(load)
                 <span>{{ questionIsAnswered(question) ? '✓' : index + 1 }}</span>
                 <div>
                   <strong>{{ question.question }}</strong>
+                  <p v-if="questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert">
+                    <b>⚠ 疑似違法提問</b>
+                    <span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span>
+                    <em>{{ questionCompliance(question).suggestion }}</em>
+                  </p>
+                  <p v-else class="question-compliance ok"><b>✓ 合法</b><span>未偵測到違法／歧視性內容</span></p>
                   <details v-if="question.purpose || question.follow_up || question.source" class="question-prompt-details">
                     <summary>需要時查看面試提示</summary>
                     <div>
@@ -1267,7 +1344,7 @@ onMounted(load)
             </details>
             <details v-if="workspaceQuestionPlan?.questions.length" class="workspace-gemini-preview">
               <summary>預覽目前 {{ workspaceQuestionPlan.questions.length }} 題</summary>
-              <ol><li v-for="question in workspaceQuestionPlan.questions" :key="question.question">{{ question.question }}</li></ol>
+              <ol><li v-for="question in workspaceQuestionPlan.questions" :key="question.question">{{ question.question }}<span v-if="questionCompliance(question).status === 'warning'" class="question-compliance-inline warning" role="alert" :title="questionCompliance(question).suggestion">⚠ 疑似違法（{{ complianceCategoryText(questionCompliance(question)) }}）</span><span v-else class="question-compliance-inline ok">✓ 合法</span></li></ol>
             </details>
           </section>
 
@@ -1290,7 +1367,7 @@ onMounted(load)
                 <article v-for="suggestion in questionSuggestions.suggestions" :key="suggestion.trait">
                   <header><strong>{{ suggestion.trait }}</strong><span>{{ questionSuggestions.job_title }}</span></header>
                   <div v-for="question in suggestion.questions" :key="question.question" class="suggested-question">
-                    <div><small v-if="question.source" class="question-source">履歷依據｜{{ question.source }}</small><strong>{{ question.question }}</strong><p><b>提問目的</b>{{ question.purpose }}</p><p><b>追問方向</b>{{ question.follow_up }}</p></div>
+                    <div><small v-if="question.source" class="question-source">履歷依據｜{{ question.source }}</small><strong>{{ question.question }}</strong><p v-if="questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert"><b>⚠ 疑似違法提問</b><span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span><em>{{ questionCompliance(question).suggestion }}</em></p><p v-else class="question-compliance ok"><b>✓ 合法</b></p><p><b>提問目的</b>{{ question.purpose }}</p><p><b>追問方向</b>{{ question.follow_up }}</p></div>
                     <button class="button secondary" type="button" :disabled="recordForm.questions.some(item => item.question === question.question) || (recordEditorOpen && !canEditStage(recordForm.stage))" @click="addSuggestedQuestion(question, suggestion.trait)">{{ recordForm.questions.some(item => item.question === question.question) ? '已加入' : '加入紀錄' }}</button>
                   </div>
                 </article>
@@ -1318,6 +1395,12 @@ onMounted(load)
                 <header><div><strong>快速問答紀錄</strong><span>目前 {{ recordAnsweredCount }}/{{ recordForm.questions.length }} 題已填寫；面試中只要先記回答。</span></div><button class="button secondary" type="button" @click="addBlankQuestion">＋ 自訂問題</button></header>
                 <article v-for="(question, index) in recordForm.questions" :key="index" class="record-question-card">
                   <header><span>{{ index + 1 }}</span><label>問題<input v-model="question.question" maxlength="500" placeholder="輸入面試問題" required></label><button type="button" aria-label="移除這個問題" @click="removeRecordQuestion(index)">×</button></header>
+                  <p v-if="question.question.trim() && questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert">
+                    <b>⚠ 疑似違法提問</b>
+                    <span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span>
+                    <em>{{ questionCompliance(question).suggestion }}</em>
+                  </p>
+                  <p v-else-if="question.question.trim()" class="question-compliance ok"><b>✓ 合法</b><span>未偵測到違法／歧視性內容</span></p>
                   <details v-if="question.source || question.purpose || question.follow_up" class="record-question-context">
                     <summary>查看這題的設計依據與追問提示</summary>
                     <div><small v-if="question.source"><b>設計依據</b>{{ question.source }}</small>
@@ -1449,4 +1532,16 @@ onMounted(load)
 .interview-card-detail{padding:1px 16px 16px;border-top:1px solid #e0ebe7;background:#fff}
 @media(max-width:820px){.interview-row-toggle{grid-template-columns:minmax(0,1fr) 32px;gap:10px;padding:13px}.interview-row-progress{grid-column:1;grid-row:2;justify-items:start;grid-template-columns:auto 1fr}.interview-row-progress .application-status{grid-row:auto}.interview-row-toggle .row-chevron{grid-column:2;grid-row:1/3}.interview-card-detail{padding-inline:12px}.stage-grid{grid-template-columns:1fr}}
 @media(max-width:680px){.interview-embedded-heading{align-items:stretch;flex-direction:column}.interview-embedded-actions{align-items:stretch;flex-direction:column}.interview-embedded-actions .button{width:100%}}
+
+/* 面試題目合規檢核（就服法§5 / 性平法§7·§11）：綠=合法、紅=疑似違法。 */
+.question-compliance{display:grid !important;gap:2px;margin:7px 0 0 !important;padding:8px 10px !important;border-left:3px solid !important;border-radius:0 6px 6px 0 !important;font-size:11px !important;line-height:1.55 !important}
+.question-compliance b{font-weight:800}
+.question-compliance span{font-size:10px}
+.question-compliance em{font-style:normal;font-size:10px;line-height:1.5}
+.question-compliance.ok{border-left-color:#2a8879 !important;background:#edf8f3 !important;color:#1f6b60 !important}
+.question-compliance.warning{border-left-color:#c94b43 !important;background:#fdeceb !important;color:#8f342e !important}
+.suggested-question .question-compliance{margin-top:6px !important}
+.question-compliance-inline{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:99px;font-size:9px;font-weight:700;vertical-align:middle}
+.question-compliance-inline.ok{background:#e3f4eb;color:#237052}
+.question-compliance-inline.warning{background:#fbe0de;color:#a2352e;cursor:help}
 </style>

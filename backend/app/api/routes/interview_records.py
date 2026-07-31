@@ -24,6 +24,7 @@ from app.models import (
     User,
 )
 from app.schemas.interview_questions import (
+    InterviewQuestionPlanItem,
     InterviewQuestionPlanResponse,
     InterviewQuestionSuggestionRequest,
     InterviewQuestionSuggestionResponse,
@@ -37,6 +38,7 @@ from app.schemas.interviews import (
 from app.services.interview_questions import (
     HR_QUESTION_PROMPT_VERSION,
     MANAGER_QUESTION_PROMPT_VERSION,
+    annotate_question_compliance,
     gemini_hr_question_plan,
     gemini_manager_question_plan,
     personalized_trait_interview_questions,
@@ -318,7 +320,9 @@ def _stored_plan_response(
         application_id=application.id,
         stage=stage,
         job_title=requisition.title,
-        questions=plan.questions,
+        questions=annotate_question_compliance(
+            [InterviewQuestionPlanItem.model_validate(item) for item in plan.questions]
+        ),
         personalization_basis=plan.personalization_basis,
         guidance=(
             f"已載入保存的{'HR' if stage == 'hr' else '主管'}五題；"

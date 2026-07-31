@@ -5,6 +5,7 @@ from app.api.routes.applications import router as applications_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.candidate_analysis import router as candidate_analysis_router
 from app.api.routes.candidates import router as candidates_router
+from app.api.routes.consent import router as consent_router
 from app.api.routes.deidentified_resumes import router as deidentified_resumes_router
 from app.api.routes.department import router as department_router
 from app.api.routes.health import router as health_router
@@ -69,5 +70,10 @@ api_router.include_router(
 )
 api_router.include_router(
     reports_router, tags=["reports"], dependencies=[Depends(require_recruiting_user)]
+)
+api_router.include_router(
+    consent_router,
+    tags=["consent"],
+    dependencies=[Depends(require_recruiting_user)],
 )
 api_router.include_router(admin_router, tags=["admin"])

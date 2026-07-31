@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from alembic import command
 from app.core.config import get_settings
@@ -84,6 +85,7 @@ def test_sqlite_interview_record_id_is_generated_after_migration(
             ).fetchone() == (42,)
 
         command.upgrade(config, "head")
+        expected_head = ScriptDirectory.from_config(config).get_current_head()
         with closing(sqlite3.connect(database_path)) as connection:
             plan_columns = {
                 column[1]
@@ -117,7 +119,7 @@ def test_sqlite_interview_record_id_is_generated_after_migration(
                 "total_tokens",
             }.issubset(plan_columns)
             assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-                ("e63b1f8a2d40",)
+                (expected_head,)
             ]
     finally:
         get_settings.cache_clear()

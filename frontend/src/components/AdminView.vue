@@ -13,10 +13,11 @@ import {
 } from '../services/adminApi'
 import type { CurrentUser } from '../services/auth'
 import { formatApiDateTime } from '../utils/dateTime'
+import ConsentNoticePanel from './ConsentNoticePanel.vue'
 import ItOperationsPanel from './ItOperationsPanel.vue'
 
 const props = defineProps<{ currentUser: CurrentUser }>()
-const tab = ref<'users' | 'departments' | 'catalogs' | 'settings' | 'audits'>('users')
+const tab = ref<'users' | 'departments' | 'catalogs' | 'settings' | 'audits' | 'consent'>('users')
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
@@ -39,8 +40,8 @@ const departmentForm = reactive({ name: '', parent_id: null as number | null, is
 const roleLabels: Record<UserRole, string> = { it: 'IT 管理員', admin: '相容管理員', hr: 'HR', manager: '部門主管' }
 const isSystemAdmin = computed(() => ['it', 'admin'].includes(props.currentUser.role))
 const tabs = computed(() => isSystemAdmin.value
-  ? ([['users','使用者'],['departments','部門'],['catalogs','技能與標籤'],['settings','系統設定'],['audits','稽核紀錄']] as const)
-  : ([['users','使用者']] as const))
+  ? ([['users','使用者'],['departments','部門'],['catalogs','技能與標籤'],['settings','系統設定'],['audits','稽核紀錄'],['consent','告知同意條款']] as const)
+  : ([['users','使用者'],['consent','告知同意條款']] as const))
 
 function showNotice(message: string) {
   notice.value = message
@@ -251,6 +252,8 @@ onMounted(load)
     </div>
 
     <div v-else-if="tab === 'settings'" class="panel admin-section"><header><div><h2>系統設定</h2><p>敏感設定的值會由 API 遮蔽。</p></div></header><div class="setting-list"><article v-for="item in settings" :key="item.key"><div><strong>{{ item.key }}</strong><small>{{ item.description || '未填說明' }}</small></div><code>{{ item.is_secret ? '••••••••' : JSON.stringify(item.value) }}</code></article><p v-if="!settings.length" class="empty">尚無系統設定</p></div></div>
+
+    <ConsentNoticePanel v-else-if="tab === 'consent'" />
 
     <div v-else class="panel admin-section"><header><div><h2>稽核紀錄</h2><p>最近 {{ audits.length }} 筆登入、管理操作與個資存取紀錄。</p></div></header><div class="admin-table"><table><thead><tr><th>時間</th><th>操作者</th><th>動作</th><th>資源</th><th>來源 IP</th></tr></thead><tbody><tr v-for="item in audits" :key="item.id"><td>{{ date(item.created_at) }}</td><td>#{{ item.actor_user_id || '系統' }}</td><td><strong>{{ item.action }}</strong></td><td>{{ item.resource_type }} {{ item.resource_id ? `#${item.resource_id}` : '' }}</td><td>{{ item.ip_address || '—' }}</td></tr></tbody></table></div></div>
   </section>

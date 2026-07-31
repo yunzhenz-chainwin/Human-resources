@@ -3,6 +3,24 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.services.interview_question_compliance import COMPLIANCE_RULES_VERSION
+
+
+class QuestionCompliance(BaseModel):
+    """Result of screening a question against the anti-discrimination rules.
+
+    ``status`` is ``"warning"`` when the question appears to touch a protected
+    attribute (marital / pregnancy / childcare / age / gender / race / religion
+    / disability_health / appearance / astrology_blood, ...). The wording is a
+    compliance aid and must be reviewed by legal counsel.
+    """
+
+    status: Literal["ok", "warning"] = "ok"
+    categories: list[str] = Field(default_factory=list)
+    matched: list[str] = Field(default_factory=list)
+    suggestion: str = ""
+    rules_version: str = COMPLIANCE_RULES_VERSION
+
 
 class InterviewQuestionSuggestionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -32,6 +50,7 @@ class SuggestedInterviewQuestion(BaseModel):
     purpose: str
     follow_up: str
     source: str | None = None
+    compliance: QuestionCompliance | None = None
 
 
 class TraitQuestionSuggestion(BaseModel):
@@ -54,6 +73,7 @@ class InterviewQuestionPlanItem(BaseModel):
     purpose: str
     follow_up: str
     source: str
+    compliance: QuestionCompliance | None = None
 
 
 class InterviewQuestionPlanResponse(BaseModel):

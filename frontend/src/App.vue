@@ -26,6 +26,11 @@ import {
   type ResumeUploadResult,
 } from './services/hrApi'
 import { privacyApi } from './services/privacyApi'
+import {
+  jobComplianceCategoryLabels,
+  lintJobText,
+  type JobComplianceFinding,
+} from './services/jobComplianceApi'
 import { formatApiDateTime } from './utils/dateTime'
 
 type Page = 'dashboard' | 'department' | 'candidates' | 'resumes' | 'jobs' | 'matching' | 'reports' | 'admin'
@@ -157,6 +162,42 @@ const jobForm = reactive({
   jd: '', summary: '', skillsText: '', salary_min: null as number | null, salary_max: null as number | null,
   salary_type: 'monthly', headcount: 1, status: 'draft',
 })
+
+// Anti-discrimination JD lint (就服法 §5 / 中高齡就業促進法 / 性別平等工作法).
+// Advisory only: warnings are surfaced in the form but never block saving.
+const jobComplianceFindings = ref<JobComplianceFinding[]>([])
+const jobComplianceLabel = (category: JobComplianceFinding['category']) =>
+  jobComplianceCategoryLabels[category] || category
+let jobComplianceTimer: ReturnType<typeof setTimeout> | null = null
+let jobComplianceToken = 0
+
+function clearJobComplianceLint() {
+  if (jobComplianceTimer) { clearTimeout(jobComplianceTimer); jobComplianceTimer = null }
+  jobComplianceToken += 1
+  jobComplianceFindings.value = []
+}
+
+function scheduleJobComplianceLint() {
+  if (dialog.value !== 'job') return
+  if (jobComplianceTimer) clearTimeout(jobComplianceTimer)
+  const title = jobForm.title, summary = jobForm.summary, jd = jobForm.jd
+  if (!title.trim() && !summary.trim() && !jd.trim()) { clearJobComplianceLint(); return }
+  const token = ++jobComplianceToken
+  jobComplianceTimer = setTimeout(async () => {
+    try {
+      const result = await lintJobText({ title, summary, jd })
+      if (token === jobComplianceToken) jobComplianceFindings.value = result.findings
+    } catch {
+      // Lint is advisory; a failed preview must not disrupt editing.
+      if (token === jobComplianceToken) jobComplianceFindings.value = []
+    }
+  }, 500)
+}
+
+watch(
+  () => dialog.value === 'job' && [jobForm.title, jobForm.summary, jobForm.jd].join(''),
+  (value) => { if (value !== false) scheduleJobComplianceLint() },
+)
 
 type NavItem = { id: Page; label: string; icon: string; roles: string[] }
 type NavGroup = { id: string; label: string | null; items: NavItem[] }
@@ -1036,6 +1077,7 @@ async function reviewResumeSource(value: ResumeSource) {
 }
 
 function openJob(job?: RequisitionDto) {
+  clearJobComplianceLint()
   editingJob.value = job || null
   Object.assign(jobForm, job ? {
     req_no: job.req_no, title: job.title, department_id: job.department_id, employment_type: job.employment_type,
@@ -1405,7 +1447,24 @@ onBeforeUnmount(closeResumeFilePreview)
 
         <section v-else-if="page === 'jobs'" class="page">
           <div class="page-heading"><div><p class="eyebrow">{{ roleProfile.scope }}</p><h1>{{ authState.user.role === 'manager' ? '我的職缺' : '職缺管理' }}</h1><p>{{ authState.user.role === 'manager' ? '追蹤所屬部門職缺、推薦人才與招募進度。' : '建立、編輯及核准全公司職缺；核准後公開前台才能讀取。' }}</p></div><button v-if="authState.user.role !== 'manager'" class="button primary" @click="openJob()">＋ 建立職缺</button></div>
-          <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="panel job-card"><header><span class="status" :data-status="job.status">{{ jobStatusLabels[job.status] || job.status }}</span><button v-if="authState.user.role !== 'manager'" class="text-button" @click="openJob(job)">編輯</button><button v-else class="text-button" @click="navigate('matching')">查看人才 →</button></header><h2>{{ job.title }}</h2><p>{{ job.req_no }} · {{ job.department_name || (job.department_id ? `部門 #${job.department_id}` : '未設定部門') }} · {{ job.work_city }} · 需求 {{ job.headcount }} 人</p><div class="job-summary">{{ job.summary || job.jd }}</div><div class="skill-list"><span v-for="skill in job.skills || []" :key="skill">{{ skill }}</span></div><footer><small>{{ job.requested_by ? '部門送交 · ' : '' }}{{ job.published_at ? `發布：${date(job.published_at)}` : '尚未發布' }}</small><button v-if="authState.user.role !== 'manager' && ['draft','submitted'].includes(job.status)" class="button primary" :disabled="saving" @click="approveJob(job)">核准職缺</button></footer></article><div v-if="loading && !jobs.length" class="empty panel"><span class="spinner"></span><p>正在載入職缺…</p></div><div v-else-if="!jobs.length" class="empty panel"><strong>目前沒有職缺</strong><p>目前權限範圍內沒有可檢視的職缺。</p></div></div>
+          <div v-if="jobs.length" class="job-list panel" role="list" data-testid="job-list">
+            <div class="job-list-head" aria-hidden="true"><span>職缺</span><span>部門／技能</span><span>地點／需求</span><span>狀態</span><span></span></div>
+            <article v-for="job in jobs" :key="job.id" role="listitem">
+              <div class="job-list-row" :data-testid="`job-row-${job.id}`">
+                <span class="job-list-title"><strong>{{ job.title }}</strong><small>{{ job.req_no }}<template v-if="job.requested_by"> · 部門送交</template> · {{ job.published_at ? `發布 ${date(job.published_at)}` : '尚未發布' }}</small></span>
+                <span class="job-list-dept"><strong>{{ job.department_name || (job.department_id ? `部門 #${job.department_id}` : '未設定部門') }}</strong><small>{{ (job.skills || []).slice(0, 3).join('、') || '未列技能' }}</small></span>
+                <span class="job-list-meta"><strong>{{ job.work_city || '地點待定' }}</strong><small>需求 {{ job.headcount }} 人</small></span>
+                <span class="status" :data-status="job.status">{{ jobStatusLabels[job.status] || job.status }}</span>
+                <span class="job-list-actions">
+                  <button v-if="authState.user.role !== 'manager'" class="text-button" @click="openJob(job)">編輯</button>
+                  <button v-else class="text-button" @click="navigate('matching')">查看人才 →</button>
+                  <button v-if="authState.user.role !== 'manager' && ['draft','submitted'].includes(job.status)" class="button primary" :disabled="saving" @click="approveJob(job)">核准</button>
+                </span>
+              </div>
+            </article>
+          </div>
+          <div v-else-if="loading" class="empty panel"><span class="spinner"></span><p>正在載入職缺…</p></div>
+          <div v-else class="empty panel"><strong>目前沒有職缺</strong><p>目前權限範圍內沒有可檢視的職缺。</p></div>
         </section>
 
         <RecruitmentWorkspace
@@ -1535,6 +1594,10 @@ onBeforeUnmount(closeResumeFilePreview)
       </div>
       <div v-else-if="dialog === 'activity'" class="form-grid"><label>紀錄類型<select v-model="activityForm.type" data-testid="activity-type"><option v-if="authState.user.role === 'manager'">主管留言</option><template v-else><option>HR 留言</option><option>電話聯繫</option><option>Email</option><option>面談</option><option>其他</option></template></select></label><label v-if="authState.user.role !== 'manager'">後續狀態<select v-model="activityForm.next_status"><option v-for="(label,key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select></label><label class="wide">{{ authState.user.role === 'manager' ? '給 HR 的主管留言' : '給部門主管的 HR 留言／活動紀錄' }} *<textarea v-model="activityForm.content" data-testid="activity-content" rows="6" required :placeholder="authState.user.role === 'manager' ? '記錄主管觀察、建議或需要 HR 協助的事項…' : '記錄聯繫結果、建議與希望部門主管留意的事項…'"></textarea></label></div>
       <div v-else class="form-grid"><label>職缺編號 *<input v-model="jobForm.req_no" required :disabled="!!editingJob"></label><label>職缺名稱 *<input v-model="jobForm.title" required></label><label>部門 ID<input v-model.number="jobForm.department_id" type="number" min="1"></label><label>工作地點<input v-model="jobForm.work_city"></label><label>聘僱類型<select v-model="jobForm.employment_type"><option value="full_time">正職</option><option value="contract">約聘</option><option value="part_time">兼職</option></select></label><label>需求人數<input v-model.number="jobForm.headcount" type="number" min="1"></label><label>月薪下限<input v-model.number="jobForm.salary_min" type="number" min="0"></label><label>月薪上限<input v-model.number="jobForm.salary_max" type="number" min="0"></label><label class="wide">技能（逗號分隔）<input v-model="jobForm.skillsText"></label><label class="wide">職缺摘要<textarea v-model="jobForm.summary" rows="2"></textarea></label><label class="wide">職務說明 *<textarea v-model="jobForm.jd" rows="7" required></textarea></label><label>流程狀態<select v-model="jobForm.status"><option v-for="(label,key) in jobStatusLabels" :key="key" :value="key">{{ label }}</option></select></label></div>
+      <div v-if="dialog === 'job' && jobComplianceFindings.length" class="jd-compliance-alert" role="alert" data-testid="jd-compliance-alert">
+        <div class="jd-compliance-head"><span aria-hidden="true">⚠</span><div><strong>可能涉及就業歧視用語（{{ jobComplianceFindings.length }} 項）</strong><small>依就業服務法第 5 條、中高齡就業促進法、性別平等工作法，職缺不得限制受保護特徵。以下為系統偵測提示，仍需人工／法務判斷，警示不會阻擋儲存。</small></div></div>
+        <ul class="jd-compliance-list"><li v-for="(finding, index) in jobComplianceFindings" :key="index"><span class="jd-compliance-tag">{{ jobComplianceLabel(finding.category) }}</span><span class="jd-compliance-matched">「{{ finding.matched }}」</span><small class="jd-compliance-where">（{{ finding.field === 'title' ? '職缺名稱' : finding.field === 'summary' ? '職缺摘要' : '職務說明' }}）</small><p>{{ finding.suggestion }}</p></li></ul>
+      </div>
       <footer><button type="button" class="button secondary" @click="dialog = null">取消</button><button type="submit" class="button primary" data-testid="activity-submit" :disabled="saving || (dialog === 'candidate' && candidateAssignmentInvalid)">{{ saving ? '儲存中…' : dialog === 'activity' ? '送出共享留言' : '儲存至資料庫' }}</button></footer></form></div>
 
     <Transition name="toast"><div v-if="notice" class="toast" role="status" aria-live="polite"><span>✓</span>{{ notice }}</div></Transition>
@@ -1547,6 +1610,7 @@ onBeforeUnmount(closeResumeFilePreview)
 .manager-job-target{display:grid;gap:6px;margin:14px 16px 12px;padding:13px;border:1px solid #cfe2dc;border-radius:10px;background:#f8fbfa;color:#496c66;font-size:9px;font-weight:700}.manager-job-target select{width:100%;height:40px;border:1px solid #c9dcd7;border-radius:8px;background:#fff;padding:0 11px;color:#274f49;font-size:10px}.manager-job-target small{color:#7f918d;font-weight:400}.manager-job-target .target-warning{color:#a25e38}.dropzone:disabled{cursor:not-allowed;opacity:.62}.resume-target-summary{margin:14px 17px 0;padding:12px 14px;border:1px solid #c9e4da;border-radius:9px;background:#eef8f4;color:#285f56}.resume-target-summary small,.resume-target-summary strong{display:block}.resume-target-summary small{font-size:8px;color:#6e877f}.resume-target-summary strong{margin-top:3px;font-size:11px}.resume-target-summary p{margin:5px 0 0;font-size:8px;color:#668078}
 .shared-activity-hint{margin:-5px 0 14px;color:#70827e;font-size:9px;line-height:1.6}.shared-timeline article{padding:12px 12px 12px 23px;border:1px solid #e0ebe7;border-radius:9px;background:#fbfdfc}.shared-timeline article[data-author-role="hr"]{border-left:3px solid #19917e}.shared-timeline article[data-author-role="manager"]{border-left:3px solid #d59b32}.timeline-author{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}.timeline-author strong{color:#174f48;font-size:10px}.timeline-author span{padding:3px 6px;border-radius:99px;background:#edf5f2;color:#56706a;font-size:7px}.shared-timeline article>small{display:block;color:#80908c}.shared-timeline article>p{white-space:pre-wrap;overflow-wrap:anywhere}
 .candidate-assignment-list{display:flex;flex-wrap:wrap;gap:6px;padding:10px 12px;border:1px solid #d8e7e2;border-radius:9px;background:#f8fbfa}.candidate-assignment-list>small{flex-basis:100%;color:#6e827d}.candidate-assignment-list>span{padding:5px 8px;border-radius:99px;background:#e6f2ee;color:#27675e;font-size:8px}.form-grid label>small{display:block;margin-top:5px;color:#788b86;font-size:8px;line-height:1.45}.form-grid label>.assignment-warning{color:#a45445;font-weight:700}
+.jd-compliance-alert{margin:14px 16px 4px;padding:13px 15px;border:1px solid #e4c579;border-radius:11px;background:#fff8e8;color:#6e561f}.jd-compliance-head{display:flex;align-items:flex-start;gap:11px}.jd-compliance-head>span{flex:0 0 auto;width:26px;height:26px;display:grid;place-items:center;border-radius:7px;background:#e6a532;color:#fff;font-size:14px;font-weight:900}.jd-compliance-head strong{display:block;color:#6a4d13;font-size:12px}.jd-compliance-head small{display:block;margin-top:4px;color:#8a7233;font-size:9px;line-height:1.6}.jd-compliance-list{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:9px}.jd-compliance-list>li{padding:9px 11px;border:1px solid #ecd6a0;border-radius:9px;background:#fffdf6}.jd-compliance-tag{display:inline-block;padding:3px 7px;border-radius:99px;background:#e6a532;color:#fff;font-size:8px;font-weight:800;vertical-align:middle}.jd-compliance-matched{margin-left:6px;color:#a2381f;font-size:10px;font-weight:800}.jd-compliance-where{margin-left:4px;color:#94805a;font-size:8px}.jd-compliance-list p{margin:6px 0 0;color:#5f6f4e;font-size:9px;line-height:1.6}
 .candidate-profile-block{margin:18px 0;padding-top:4px}.candidate-profile-block>h3,.candidate-history-grid h3{margin:0 0 10px}.candidate-application-list,.candidate-resume-list{display:grid;gap:9px}.candidate-application-list>article,.candidate-resume-list>article,.candidate-history-card{padding:12px;border:1px solid #dce9e5;border-radius:10px;background:#fbfdfc}.candidate-application-list article>header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.candidate-application-list header div>*{display:block}.candidate-application-list header small,.candidate-application-list header span,.candidate-history-card small,.candidate-history-card span,.candidate-resume-list span{color:#778a85;font-size:8px}.candidate-application-list header strong,.candidate-history-card strong,.candidate-resume-list strong{margin:3px 0;color:#214f49;font-size:10px}.candidate-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}.candidate-links a,.candidate-resume-list a{color:#087b6c;font-size:8px;font-weight:700;text-decoration:none}.candidate-cover-letter{margin-top:10px;padding:9px;border-radius:8px;background:#f1f7f5}.candidate-cover-letter small{color:#6f827d;font-size:8px}.candidate-cover-letter p,.candidate-summary,.candidate-history-card p{margin:5px 0 0;white-space:pre-wrap;color:#405f59;font-size:9px;line-height:1.65}.candidate-empty-line{margin:8px 0 0;color:#879691;font-size:8px}.candidate-skill-list{display:flex;flex-wrap:wrap;gap:6px}.candidate-skill-list span{padding:5px 8px;border-radius:99px;background:#e6f2ee;color:#27675e;font-size:8px;font-weight:700}.candidate-history-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.candidate-history-card{margin-bottom:8px}.candidate-history-card>*{display:block}.candidate-resume-list>article{display:flex;align-items:center;justify-content:space-between;gap:10px}.candidate-resume-list article>div:first-child>*{display:block}.candidate-resume-list article>div:last-child{display:flex;align-items:center;gap:8px}.candidate-resume-preview{margin-top:10px;padding:12px;border:1px solid #cfe3dc;border-radius:10px;background:#f4faf8}.candidate-resume-preview>header{display:flex;align-items:center;justify-content:space-between}.candidate-resume-preview>header div>*{display:block}.candidate-resume-preview>header button{border:0;background:none;color:#607772;font-size:18px}.resume-highlight-list{display:grid;gap:7px;margin-top:10px}.resume-highlight-list>div{padding:8px;border-radius:7px;background:#fff}.resume-highlight-list small{color:#71847f;font-size:7px}.resume-highlight-list p{margin:3px 0 0;white-space:pre-wrap;color:#345b54;font-size:8px;line-height:1.55}.candidate-resume-preview pre{max-height:240px;overflow:auto;margin:10px 0 0;padding:10px;border-radius:7px;background:#173b36;color:#e8f5f1;white-space:pre-wrap;font:8px/1.6 monospace}@media(max-width:700px){.candidate-history-grid{grid-template-columns:1fr}.candidate-resume-list>article{align-items:flex-start;flex-direction:column}}
 .resume-origin-badge{display:inline-flex!important;width:max-content;margin-top:5px;padding:3px 6px;border-radius:99px;font-size:7px!important;font-style:normal;font-weight:800}.resume-origin-badge.generated{background:#e1f2eb;color:#1b7463}.resume-origin-badge.missing{background:#fff0df;color:#9b612c}.candidate-resume-file-error{margin:9px 0 0}.resume-preview-trigger{font-weight:800}.resume-file-preview-overlay{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:18px;background:rgba(10,34,31,.7);backdrop-filter:blur(4px)}.resume-file-preview-dialog{display:flex;flex-direction:column;width:min(1120px,100%);height:min(92vh,920px);overflow:hidden;border-radius:16px;background:#fff;box-shadow:0 28px 90px rgba(5,27,24,.4)}.resume-file-preview-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:17px 20px;border-bottom:1px solid #dfe9e6}.resume-file-preview-dialog>header small{color:#218174;font-size:8px;font-weight:800;letter-spacing:1px}.resume-file-preview-dialog>header h2{margin:4px 0;font-size:17px;color:#173f3a}.resume-file-preview-dialog>header p{margin:0;color:#71837f;font-size:9px}.resume-file-preview-actions{display:flex;align-items:center;gap:8px}.resume-file-preview-close{width:38px;height:38px;border:0;background:transparent;color:#647672;font-size:26px}.resume-file-preview-canvas{flex:1;min-height:0;padding:12px;background:#dce3e1}.resume-file-preview-canvas iframe{width:100%;height:100%;border:0;border-radius:7px;background:#fff}.resume-word-preview{flex:1;min-height:0;overflow:auto;padding:18px 22px;background:#f5f8f7}.resume-preview-notice{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #ead9b8;border-radius:9px;background:#fff8e9;color:#765c2c}.resume-preview-notice strong{font-size:10px;white-space:nowrap}.resume-preview-notice span{font-size:9px;line-height:1.55}.resume-word-preview .resume-highlight-list{grid-template-columns:repeat(2,minmax(0,1fr))}.resume-word-preview pre{margin:12px 0 0;padding:16px;border:1px solid #dce7e3;border-radius:9px;background:#fff;color:#294f49;white-space:pre-wrap;overflow-wrap:anywhere;font:10px/1.75 monospace}.resume-file-preview-dialog>footer{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 18px;border-top:1px solid #dfe9e6}.resume-file-preview-dialog>footer span{color:#71837f;font-size:8px}@media(max-width:700px){.resume-file-preview-overlay{padding:0}.resume-file-preview-dialog{width:100%;height:100vh;border-radius:0}.resume-file-preview-dialog>header{align-items:stretch;flex-direction:column}.resume-file-preview-actions{justify-content:space-between}.resume-word-preview .resume-highlight-list{grid-template-columns:1fr}.resume-file-preview-dialog>footer span{display:none}}
 
