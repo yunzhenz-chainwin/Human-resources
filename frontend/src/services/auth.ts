@@ -29,6 +29,7 @@ const state = reactive({
 })
 
 let refreshPromise: Promise<string> | null = null
+let logoutPromise: Promise<void> | null = null
 
 async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response
@@ -131,11 +132,44 @@ async function login(username: string, password: string) {
   await loadCurrentUser()
 }
 
+async function logout(): Promise<void> {
+  if (logoutPromise) return logoutPromise
+  const accessToken = state.accessToken
+  const refreshToken = state.refreshToken
+  logoutPromise = (async () => {
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 2500)
+    try {
+      if (accessToken && refreshToken) {
+        await fetch(`${API_BASE}/auth/logout`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+          signal: controller.signal,
+        })
+      }
+    } catch {
+      // Logout is best-effort: an offline or expired session must never trap the UI.
+    } finally {
+      window.clearTimeout(timeout)
+      clear()
+    }
+  })()
+  try {
+    await logoutPromise
+  } finally {
+    logoutPromise = null
+  }
+}
+
 export const authSession = {
   state,
   authenticated: computed(() => Boolean(state.accessToken && state.user)),
   initialize,
   login,
-  logout: clear,
+  logout,
   refreshAccess,
 }

@@ -15,6 +15,8 @@ from app.db.session import get_db
 from app.models.candidate import Candidate
 from app.models.consent import CandidateConsent, ConsentNotice
 from app.models.organization import Department, User
+from app.models.recruitment import JobRequisition
+from app.services.matching import score_candidate
 from app.services.security import bootstrap_admin, hash_password
 
 
@@ -102,7 +104,12 @@ def test_create_versions_and_single_active_switch(consent_client) -> None:
     first = client.post(
         "/consent/notices",
         headers=admin,
-        json={"title": "招募告知 v1", "body": "第一版條款", "purpose_code": "002 人事管理", "activate": True},
+        json={
+            "title": "招募告知 v1",
+            "body": "第一版條款",
+            "purpose_code": "002 人事管理",
+            "activate": True,
+        },
     )
     assert first.status_code == 201, first.text
     assert first.json()["version"] == 1
@@ -167,9 +174,26 @@ def test_record_and_withdraw_candidate_consent(consent_client) -> None:
     assert recorded.json()["channel"] == "public_form"
     assert recorded.json()["withdrawn_at"] is None
 
+    repeated = client.post(
+        f"/candidates/{candidate_id}/consents",
+        headers=admin,
+        json={"channel": "public_form"},
+    )
+    assert repeated.status_code == 201
+    assert repeated.json()["id"] == consent_id
+
     listing = client.get(f"/candidates/{candidate_id}/consents", headers=admin)
     assert listing.status_code == 200
     assert len(listing.json()) == 1
+
+    with testing_session() as db:
+        candidate = db.get(Candidate, candidate_id)
+        stored = db.get(CandidateConsent, consent_id)
+        assert candidate is not None and stored is not None
+        assert candidate.consent_status == "consented"
+        assert candidate.consent_at == stored.consented_at
+        assert candidate.retention_until is not None
+        assert candidate.retention_until > stored.consented_at.date()
 
     withdrawn = client.post(
         f"/consent/candidate-consents/{consent_id}/withdraw", headers=admin
@@ -180,6 +204,42 @@ def test_record_and_withdraw_candidate_consent(consent_client) -> None:
     with testing_session() as db:
         stored = db.get(CandidateConsent, consent_id)
         assert stored is not None and stored.withdrawn_at is not None
+        candidate = db.get(Candidate, candidate_id)
+        assert candidate is not None
+        assert candidate.consent_status == "withdrawn"
+        assert candidate.consent_at == stored.consented_at
+        assert candidate.retention_until == stored.withdrawn_at.date()
+
+        requisition = JobRequisition(
+            req_no="CONSENT-GATE-001",
+            title="Consent gate",
+            employment_type="full_time",
+            work_city="台北市",
+            jd="Verify withdrawn candidates are excluded",
+            status="sourcing",
+        )
+        result = score_candidate(requisition, candidate, [])
+        assert result.gate_passed is False
+        assert "consent_withdrawn" in result.breakdown["gate"]["miss"]
+
+    # Re-consent requires this authenticated recruiting workflow; the anonymous
+    # public form is deliberately not allowed to reactivate a deduplicated record.
+    renewed = client.post(
+        f"/candidates/{candidate_id}/consents",
+        headers=admin,
+        json={"channel": "hr_manual"},
+    )
+    assert renewed.status_code == 201
+    assert renewed.json()["id"] != consent_id
+    with testing_session() as db:
+        candidate = db.get(Candidate, candidate_id)
+        assert candidate is not None
+        assert candidate.consent_status == "consented"
+        assert candidate.retention_until is not None
+        assert (
+            candidate.retention_until.isoformat()
+            > renewed.json()["consented_at"][:10]
+        )
 
 
 def test_permissions_require_manager_for_management(consent_client) -> None:

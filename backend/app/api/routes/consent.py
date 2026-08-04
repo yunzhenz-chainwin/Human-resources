@@ -1,5 +1,3 @@
-from datetime import UTC, datetime
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -20,7 +18,13 @@ from app.schemas.consent import (
     ConsentNoticeCreate,
     ConsentNoticeRead,
 )
-from app.services.consent import activate_notice, active_notice, next_version
+from app.services.consent import (
+    activate_notice,
+    active_notice,
+    next_version,
+    record_consent,
+    withdraw_consent,
+)
 from app.services.security import client_ip, write_audit
 
 router = APIRouter()
@@ -160,28 +164,28 @@ def record_candidate_consent(
     db: Session = Depends(get_db),
 ) -> CandidateConsent:
     enforce_candidate_scope(db, user, candidate_id)
-    if db.get(Candidate, candidate_id) is None:
-        raise HTTPException(status_code=404, detail="Candidate not found")
     notice = active_notice(db)
     if notice is None:
         raise HTTPException(
             status_code=409, detail="No active consent notice to record against"
         )
-    consent = CandidateConsent(
-        candidate_id=candidate_id,
-        notice_id=notice.id,
-        notice_version=notice.version,
-        consented_at=payload.consented_at or datetime.now(UTC),
+    candidate = db.get(Candidate, candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    consent, created = record_consent(
+        db,
+        candidate,
+        notice,
+        consented_at=payload.consented_at,
         channel=payload.channel,
     )
-    db.add(consent)
-    db.flush()
     _audit(
         db, user, request, "consent.candidate.record", "candidate_consent", consent.id,
         {
             "candidate_id": candidate_id,
             "notice_version": notice.version,
             "channel": payload.channel,
+            "created": created,
         },
     )
     db.commit()
@@ -202,11 +206,14 @@ def withdraw_candidate_consent(
     consent = db.get(CandidateConsent, consent_id)
     if consent is None:
         raise HTTPException(status_code=404, detail="Consent record not found")
-    if consent.withdrawn_at is None:
-        consent.withdrawn_at = datetime.now(UTC)
+    withdrawn_count = withdraw_consent(db, consent)
     _audit(
         db, actor, request, "consent.candidate.withdraw", "candidate_consent", consent.id,
-        {"candidate_id": consent.candidate_id, "notice_version": consent.notice_version},
+        {
+            "candidate_id": consent.candidate_id,
+            "notice_version": consent.notice_version,
+            "withdrawn_count": withdrawn_count,
+        },
     )
     db.commit()
     db.refresh(consent)

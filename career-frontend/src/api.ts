@@ -1,4 +1,4 @@
-import type { ApplicationForm, ApplicationResult, Job } from './types'
+import type { ApplicationForm, ApplicationResult, ConsentNotice, Job } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '')
 
@@ -50,9 +50,14 @@ export async function getJob(id: string | number): Promise<Job> {
   return normalizeJob(await request<Job>(`/public/jobs/${encodeURIComponent(id)}`))
 }
 
+export async function getActiveConsentNotice(): Promise<ConsentNotice> {
+  return request<ConsentNotice>('/public/consent-notices/active')
+}
+
 export async function createApplication(
   form: ApplicationForm,
   resume: File | null,
+  consentNotice: ConsentNotice,
 ): Promise<ApplicationResult> {
   const body = new FormData()
   if (form.job_id !== null && form.job_id !== '') body.append('job_id', String(form.job_id))
@@ -67,6 +72,8 @@ export async function createApplication(
   if (form.portfolio_url) body.append('portfolio_url', form.portfolio_url)
   if (form.cover_letter) body.append('cover_letter', form.cover_letter)
   body.append('consent', String(form.consent))
+  body.append('consent_notice_id', String(consentNotice.id))
+  body.append('consent_notice_version', String(consentNotice.version))
   body.append('source_platform', form.source_platform)
   if (resume) body.append('resume', resume)
   return request<ApplicationResult>('/public/applications', { method: 'POST', body })

@@ -18,10 +18,10 @@ from app.schemas.hr import (
     ApplicationInterviewStageRead,
     ApplicationInterviewUpdate,
     ApplicationRead,
-    CandidateRead,
     InterviewStage,
     RequisitionRead,
 )
+from app.services.candidate_privacy import candidate_read_for_user
 from app.services.security import write_audit
 
 router = APIRouter(prefix="/applications")
@@ -48,6 +48,7 @@ def _application_read(
     application: JobApplication,
     candidate: Candidate,
     requisition: JobRequisition,
+    user: User,
 ) -> ApplicationRead:
     return ApplicationRead(
         id=application.id,
@@ -56,7 +57,7 @@ def _application_read(
         status=application.status,
         source=application.source,
         applied_at=_aware(application.created_at),
-        resume_id=application.resume_id,
+        resume_id=None if user.role == "manager" else application.resume_id,
         cover_letter=application.cover_letter,
         linkedin_url=application.linkedin_url,
         portfolio_url=application.portfolio_url,
@@ -79,7 +80,7 @@ def _application_read(
             updated_by=application.manager_interview_updated_by,
             updated_at=_aware(application.manager_interview_updated_at),
         ),
-        candidate=CandidateRead.model_validate(candidate),
+        candidate=candidate_read_for_user(candidate, user),
         requisition=RequisitionRead.model_validate(requisition),
     )
 
@@ -267,7 +268,7 @@ def list_applications(
     if limit is not None:
         statement = statement.limit(limit)
     return [
-        _application_read(application, candidate, requisition)
+        _application_read(application, candidate, requisition, user)
         for application, candidate, requisition in db.execute(statement).all()
     ]
 
@@ -326,7 +327,7 @@ def create_application(
             detail="Candidate is already assigned to this job",
         ) from exc
     db.refresh(application)
-    return _application_read(application, candidate, requisition)
+    return _application_read(application, candidate, requisition, user)
 
 
 @router.patch("/{application_id}/assignment", response_model=ApplicationRead)
@@ -342,7 +343,7 @@ def update_application_assignment(
     application, candidate, current_requisition = _application_row(db, application_id)
     target_requisition = _assignment_requisition(db, payload.requisition_id)
     if application.requisition_id == target_requisition.id:
-        return _application_read(application, candidate, current_requisition)
+        return _application_read(application, candidate, current_requisition, user)
     if _application_has_process_history(application):
         raise HTTPException(
             status_code=409,
@@ -411,7 +412,7 @@ def update_application_assignment(
             detail="Candidate is already assigned to this job",
         ) from exc
     db.refresh(application)
-    return _application_read(application, candidate, target_requisition)
+    return _application_read(application, candidate, target_requisition, user)
 
 
 def _update_interview_stage(
@@ -471,7 +472,7 @@ def _update_interview_stage(
     )
     db.commit()
     db.refresh(application)
-    return _application_read(application, candidate, requisition)
+    return _application_read(application, candidate, requisition, user)
 
 
 @router.patch("/{application_id}/interviews/{stage}", response_model=ApplicationRead)

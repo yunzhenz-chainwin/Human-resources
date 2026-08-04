@@ -19,13 +19,12 @@ from fastapi import (
 )
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.dependencies.auth import (
     GLOBAL_RECRUITING_ROLES,
-    candidate_scope_clause,
     enforce_candidate_scope,
     get_current_user,
     require_recruiting_user,
@@ -116,23 +115,6 @@ def _apply_parse(resume: ResumeFile, path: Path, requested: str) -> None:
     resume.error_message = parsed.error_message
 
 
-def _manager_resume_scope_clause(user: User):
-    """Include targeted uploads while retaining the legacy applied-candidate scope."""
-
-    own_department_target = ResumeFile.target_requisition_id.in_(
-        select(JobRequisition.id).where(
-            JobRequisition.department_id == user.department_id
-        )
-    )
-    legacy_applied_candidate = and_(
-        ResumeFile.target_requisition_id.is_(None),
-        ResumeFile.candidate_id.in_(
-            select(Candidate.id).where(candidate_scope_clause(user))
-        ),
-    )
-    return or_(own_department_target, legacy_applied_candidate)
-
-
 def _enforce_resume_scope(db: Session, user: User, resume: ResumeFile) -> None:
     """Enforce a target department first, falling back to legacy candidate scope."""
 
@@ -176,6 +158,31 @@ def _enforce_targeted_resume_scope(db: Session, user: User, resume: ResumeFile) 
     )
     if department_id != user.department_id:
         raise HTTPException(status_code=403, detail="Outside resume scope")
+
+
+def _enforce_original_file_access(user: User, resume: ResumeFile) -> None:
+    """Keep all ResumeFile binaries behind the HR/admin boundary.
+
+    A system-generated profile can still contain direct identifiers, so its
+    origin is not a safe basis for manager access. Managers use only approved
+    de-identified document endpoints.
+    """
+
+    if user.role == "manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Resume files are available to HR and recruiting administrators only",
+        )
+
+
+def _enforce_original_detail_access(user: User, resume: ResumeFile) -> None:
+    """Keep raw/parsed ResumeFile content behind the HR/admin boundary."""
+
+    if user.role == "manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Resume details are available to HR and recruiting administrators only",
+        )
 
 
 def _resolve_target_requisition(
@@ -356,11 +363,14 @@ def list_resumes(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiting_user),
 ) -> list[ResumeFile]:
-    statement = select(ResumeFile).order_by(ResumeFile.uploaded_at.desc())
     if user.role == "manager":
-        statement = statement.where(_manager_resume_scope_clause(user))
+        raise HTTPException(
+            status_code=403,
+            detail="Resume lists are available to HR and recruiting administrators only",
+        )
+    statement = select(ResumeFile).order_by(ResumeFile.uploaded_at.desc())
     if parse_status:
         statement = statement.where(ResumeFile.parse_status == parse_status)
     elif not include_confirmed:
@@ -387,6 +397,7 @@ def download_resume_file(
     if resume is None:
         raise HTTPException(status_code=404, detail="Resume not found")
     _enforce_targeted_resume_scope(db, user, resume)
+    _enforce_original_file_access(user, resume)
     if not resume.storage_key:
         raise HTTPException(status_code=404, detail="This resume has no downloadable file")
     response = _stored_resume_response(resume, disposition="attachment")
@@ -419,6 +430,7 @@ def preview_resume_file(
     if resume is None:
         raise HTTPException(status_code=404, detail="Resume not found")
     _enforce_targeted_resume_scope(db, user, resume)
+    _enforce_original_file_access(user, resume)
     if not resume.storage_key:
         raise HTTPException(status_code=404, detail="This resume has no previewable file")
 
@@ -464,6 +476,7 @@ def get_resume(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
     _enforce_resume_scope(db, user, resume)
+    _enforce_original_detail_access(user, resume)
     return resume
 
 
@@ -478,6 +491,7 @@ def update_parsed_resume(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
     _enforce_resume_scope(db, user, resume)
+    _enforce_original_detail_access(user, resume)
     if resume.parse_status == "confirmed":
         raise HTTPException(status_code=409, detail="Confirmed resume cannot be edited")
     parsed = ResumeParsedUpdate.model_validate(payload.get("parsed_payload", payload))
@@ -507,6 +521,7 @@ def reparse_resume(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
     _enforce_resume_scope(db, user, resume)
+    _enforce_original_detail_access(user, resume)
     if resume.parse_status == "confirmed":
         raise HTTPException(status_code=409, detail="Confirmed resume cannot be reparsed")
     with _stored_path(resume) as path:
@@ -528,6 +543,7 @@ def review_resume_source(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
     _enforce_resume_scope(db, user, resume)
+    _enforce_original_detail_access(user, resume)
     if resume.parse_status == "confirmed":
         raise HTTPException(status_code=409, detail="Confirmed resume source cannot be edited")
     previous = resume.source_platform
@@ -569,6 +585,7 @@ def confirm_resume(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
     _enforce_resume_scope(db, user, resume)
+    _enforce_original_detail_access(user, resume)
     requested_candidate_id = request.candidate_id if request else None
     if resume.parse_status == "confirmed":
         if resume.candidate_id is None:

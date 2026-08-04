@@ -41,6 +41,7 @@ from app.schemas.hr import (
     RequisitionRead,
 )
 from app.services.applications import normalize_email, normalize_phone
+from app.services.candidate_privacy import candidate_read_for_user
 from app.services.matching import canonical_skill
 from app.services.security import write_audit
 from app.services.storage import StorageProvider, get_storage_provider
@@ -266,7 +267,8 @@ def create_candidate(
 def get_candidate(
     candidate_id: int,
     db: Session = Depends(get_db),
-    audited_user: User = Depends(audit_pii_read),
+    user: User = Depends(get_current_user),
+    _audited_user: User | None = Depends(audit_pii_read),
 ) -> CandidateDetailRead:
     candidate = db.scalar(
         select(Candidate)
@@ -280,8 +282,8 @@ def get_candidate(
     if not candidate or candidate.deleted_at:
         raise HTTPException(status_code=404, detail="人才不存在")
     manager_department_id = (
-        audited_user.department_id
-        if audited_user is not None and audited_user.role == "manager"
+        user.department_id
+        if user.role == "manager"
         else None
     )
     resume_storage = get_storage_provider()
@@ -301,16 +303,10 @@ def get_candidate(
 
     applications: list[CandidateApplicationDetailRead] = []
     for application, requisition, resume in db.execute(application_statement).all():
-        scoped_resume = resume
-        if (
-            manager_department_id is not None
-            and resume is not None
-            and (
-                resume.target_requisition_id != requisition.id
-                or resume.parse_status != "confirmed"
-            )
-        ):
-            scoped_resume = None
+        # Managers may use approved de-identified derivatives through the
+        # dedicated endpoints, but original resume metadata and identifiers are
+        # not part of their candidate-detail response.
+        scoped_resume = None if manager_department_id is not None else resume
         applications.append(
             CandidateApplicationDetailRead(
                 id=application.id,
@@ -341,33 +337,32 @@ def get_candidate(
             )
         )
 
-    resume_statement = (
-        select(ResumeFile, JobRequisition)
-        .outerjoin(JobRequisition, JobRequisition.id == ResumeFile.target_requisition_id)
-        .where(ResumeFile.candidate_id == candidate.id)
-        .order_by(ResumeFile.uploaded_at.desc(), ResumeFile.id.desc())
-    )
-    if manager_department_id is not None:
-        resume_statement = resume_statement.where(
-            ResumeFile.parse_status == "confirmed",
-            JobRequisition.department_id == manager_department_id,
+    resumes: list[CandidateResumeSummaryRead] = []
+    if manager_department_id is None:
+        resume_statement = (
+            select(ResumeFile, JobRequisition)
+            .outerjoin(JobRequisition, JobRequisition.id == ResumeFile.target_requisition_id)
+            .where(ResumeFile.candidate_id == candidate.id)
+            .order_by(ResumeFile.uploaded_at.desc(), ResumeFile.id.desc())
         )
-    resumes = [
-        CandidateResumeSummaryRead(
-            id=resume.id,
-            target_requisition_id=resume.target_requisition_id,
-            target_requisition_title=requisition.title if requisition is not None else None,
-            original_filename=resume.original_filename,
-            source_platform=resume.source_platform,
-            parse_status=resume.parse_status,
-            resume_url=_safe_external_url(resume.resume_url),
-            has_file=_resume_has_file(resume, resume_storage),
-            document_origin=resume.document_origin,
-        )
-        for resume, requisition in db.execute(resume_statement).all()
-    ]
+        resumes = [
+            CandidateResumeSummaryRead(
+                id=resume.id,
+                target_requisition_id=resume.target_requisition_id,
+                target_requisition_title=(
+                    requisition.title if requisition is not None else None
+                ),
+                original_filename=resume.original_filename,
+                source_platform=resume.source_platform,
+                parse_status=resume.parse_status,
+                resume_url=_safe_external_url(resume.resume_url),
+                has_file=_resume_has_file(resume, resume_storage),
+                document_origin=resume.document_origin,
+            )
+            for resume, requisition in db.execute(resume_statement).all()
+        ]
 
-    base = CandidateRead.model_validate(candidate).model_dump()
+    base = candidate_read_for_user(candidate, user).model_dump()
     return CandidateDetailRead(
         **base,
         current_company=candidate.current_company,

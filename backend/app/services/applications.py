@@ -6,10 +6,10 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Candidate, CandidateSkill, JobApplication, ResumeFile
+from app.models import Candidate, CandidateSkill, ConsentNotice, JobApplication, ResumeFile
 from app.repositories.recruitment import RecruitmentRepository
 from app.schemas.public import PublicApplicationCreate, PublicApplicationResult
-from app.services.talent_retention import candidate_retention_until
+from app.services.consent import record_public_consent
 
 
 @dataclass
@@ -58,7 +58,10 @@ def sync_candidate_skills(db: Session, candidate: Candidate, skills: list[str]) 
 
 
 def submit_application(
-    db: Session, payload: PublicApplicationCreate, upload: ResumeUploadData | None = None
+    db: Session,
+    payload: PublicApplicationCreate,
+    consent_notice: ConsentNotice,
+    upload: ResumeUploadData | None = None,
 ) -> PublicApplicationResult:
     repo = RecruitmentRepository(db)
     if repo.public_job(payload.requisition_id) is None:
@@ -67,6 +70,7 @@ def submit_application(
     email_norm = normalize_email(str(payload.email) if payload.email else None)
     phone_norm = normalize_phone(payload.phone)
     candidate = repo.find_candidate(email_norm, phone_norm)
+    candidate_created = candidate is None
     existing_application = None
     if candidate:
         existing_application = repo.existing_application(
@@ -81,9 +85,6 @@ def submit_application(
         candidate.total_years = (
             candidate.total_years if candidate.total_years is not None else payload.total_years
         )
-        # Do NOT (re)set consent from an anonymous public submission on an existing
-        # candidate — someone who knows another person's email/phone could otherwise
-        # flip their consent flag. Consent is recorded only when creating a new candidate.
     else:
         candidate = Candidate(
             code=f"T{datetime.now(UTC).year}-{datetime.now(UTC).strftime('%m%d%H%M%S%f')[-10:]}",
@@ -97,13 +98,24 @@ def submit_application(
             total_years=payload.total_years,
             source="career_site",
             status="new",
-            consent_status="consented",
-            consent_at=datetime.now(UTC),
-            retention_until=candidate_retention_until(db),
         )
         db.add(candidate)
         db.flush()
 
+    consent_result = record_public_consent(
+        db,
+        candidate,
+        consent_notice,
+        candidate_created=candidate_created,
+    )
+    if consent_result is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Existing candidate consent cannot be renewed through the anonymous "
+                "form; contact HR for a verified consent flow"
+            ),
+        )
     sync_candidate_skills(db, candidate, payload.skills)
     resume = None
     if upload:

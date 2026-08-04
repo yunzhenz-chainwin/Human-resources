@@ -16,7 +16,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.dependencies.auth import audit_pii_read, get_current_user
 from app.main import app
-from app.models import AuditLog, Candidate, CandidateSkill, ResumeFile
+from app.models import AuditLog, Candidate, CandidateSkill, ConsentNotice, ResumeFile
 from app.services.resume_parser import parse_text
 
 
@@ -38,6 +38,17 @@ def resume_client():
     test_storage = Path("storage") / f"resume-test-{uuid4().hex}"
     get_settings().resume_storage_path = str(test_storage)
     testing_session = sessionmaker(bind=engine, expire_on_commit=False)
+    with testing_session() as db:
+        db.add(
+            ConsentNotice(
+                version=1,
+                title="人才招募個資告知暨同意書",
+                body="TalentHub 將在招募與人才媒合目的內使用你提供的資料。",
+                purpose_code="recruitment",
+                is_active=True,
+            )
+        )
+        db.commit()
 
     def override_db():
         with testing_session() as db:
@@ -389,6 +400,8 @@ def test_talent_pool_application_without_job_id(resume_client) -> None:
             "email": "wu@example.com",
             "skills": "Vue, TypeScript",
             "consent": "true",
+            "consent_notice_id": "1",
+            "consent_notice_version": "1",
             "source_platform": "direct",
         },
         files={"resume": ("custom.docx", content, "application/octet-stream")},

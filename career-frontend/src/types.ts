@@ -23,6 +23,14 @@ export interface Job {
 
 export type SourcePlatform = 'direct' | 'p104' | 'p1111' | 'generic'
 
+export interface ConsentNotice {
+  id: number
+  version: number
+  title: string
+  body: string
+  purpose_code?: string | null
+}
+
 export interface ApplicationForm {
   job_id: string | number | null
   name: string

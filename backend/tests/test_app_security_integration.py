@@ -103,7 +103,12 @@ def secured_app_client(monkeypatch) -> Generator[tuple[TestClient, sessionmaker,
         ]
         candidate = Candidate(code="SEC-001", name="Security Candidate", source="direct")
         scoped_candidate = Candidate(
-            code="SEC-002", name="Engineering Candidate", source="direct"
+            code="SEC-002",
+            name="Engineering Candidate",
+            email="engineering.candidate@app.test",
+            phone="0912-000-789",
+            city="Taipei",
+            source="direct",
         )
         db.add_all([*users, candidate, scoped_candidate])
         db.flush()
@@ -265,9 +270,13 @@ def test_manager_is_department_scoped_and_read_only(secured_app_client) -> None:
     assert client.get(
         "/api/v1/candidates", headers=headers
     ).status_code == 403
-    assert client.get(
+    scoped_detail = client.get(
         f"/api/v1/candidates/{ids['scoped_candidate']}", headers=headers
-    ).status_code == 200
+    )
+    assert scoped_detail.status_code == 200
+    assert scoped_detail.json()["email"] == "e***@app.test"
+    assert scoped_detail.json()["phone"] == "*******789"
+    assert scoped_detail.json()["city"] is None
     assert client.get(
         f"/api/v1/candidates/{ids['candidate']}", headers=headers
     ).status_code == 403
@@ -473,6 +482,10 @@ def test_department_workspace_contains_only_own_jobs_and_actual_applicants(
     assert [
         item["candidate"]["id"] for item in body["jobs"][0]["applicants"]
     ] == [ids["scoped_candidate"]]
+    workspace_candidate = body["jobs"][0]["applicants"][0]["candidate"]
+    assert workspace_candidate["email"] == "e***@app.test"
+    assert workspace_candidate["phone"] == "*******789"
+    assert workspace_candidate["city"] is None
     assert client.get(
         "/api/v1/department/workspace", headers=login_headers(client, "hr")
     ).status_code == 403

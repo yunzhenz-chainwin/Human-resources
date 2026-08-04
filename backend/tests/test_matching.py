@@ -56,6 +56,8 @@ def matching_client():
             Candidate(
                 code="T-MATCH-1",
                 name="Perfect",
+                email="perfect.candidate@app.test",
+                phone="0912-345-678",
                 current_title="Backend Engineer",
                 total_years=Decimal("5.0"),
                 highest_education="大學",
@@ -398,6 +400,9 @@ def test_manager_match_overview_only_exposes_actual_applicants(
     assert {
         item["candidate"]["id"] for item in manager_response.json()["items"]
     } == {1}
+    manager_candidate = manager_response.json()["items"][0]["candidate"]
+    assert manager_candidate["email"] == "p***@app.test"
+    assert manager_candidate["phone"] == "*******678"
 
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
         id=1, role="hr", department_id=None, is_active=True
@@ -405,6 +410,13 @@ def test_manager_match_overview_only_exposes_actual_applicants(
     hr_response = client.get("/api/v1/requisitions/1/candidate-match-overview")
     assert hr_response.status_code == 200
     assert hr_response.json()["total_candidates"] == 4
+    hr_candidate = next(
+        item["candidate"]
+        for item in hr_response.json()["items"]
+        if item["candidate"]["id"] == 1
+    )
+    assert hr_candidate["email"] == "perfect.candidate@app.test"
+    assert hr_candidate["phone"] == "0912-345-678"
 
 
 def test_manager_can_update_only_matches_for_actual_own_department_applicants(

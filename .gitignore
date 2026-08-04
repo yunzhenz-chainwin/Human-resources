@@ -9,6 +9,7 @@ pytest-cache-files-*/
 backend/.coverage
 backend/*.db
 backend/*.bak
+backend/*.db.bak-*
 backend/.resume-ocr-*
 backend/storage/
 docs/*.before-*.docx

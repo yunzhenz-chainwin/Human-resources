@@ -22,6 +22,16 @@ class PublicJob(BaseModel):
     published_at: datetime | None
 
 
+class PublicConsentNotice(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    version: int
+    title: str
+    body: str
+    purpose_code: str | None
+
+
 class PublicApplicationCreate(BaseModel):
     requisition_id: int
     name: str = Field(min_length=1, max_length=100)
@@ -37,6 +47,8 @@ class PublicApplicationCreate(BaseModel):
     resume_url: HttpUrl | None = None
     resume_text: str | None = Field(default=None, max_length=100000)
     consent: bool
+    consent_notice_id: int = Field(ge=1)
+    consent_notice_version: int = Field(ge=1)
 
     @field_validator("email")
     @classmethod
@@ -63,6 +75,8 @@ class PublicTalentProfileCreate(BaseModel):
     total_years: float | None = Field(default=None, ge=0, le=80)
     skills: list[str] = Field(default_factory=list, max_length=50)
     consent: bool
+    consent_notice_id: int = Field(ge=1)
+    consent_notice_version: int = Field(ge=1)
 
     @field_validator("email")
     @classmethod

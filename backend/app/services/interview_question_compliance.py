@@ -149,7 +149,14 @@ _RULE_DEFINITIONS: dict[str, dict[str, Any]] = {
             "異性戀",
             "跨性別",
         ],
-        "patterns": ["gender", "sexual orientation", "homosexual", "heterosexual", "transgender", "lgbt"],
+        "patterns": [
+            "gender",
+            "sexual orientation",
+            "homosexual",
+            "heterosexual",
+            "transgender",
+            "lgbt",
+        ],
         "suggestion": (
             "建議改問工作能力面向：避免詢問性別或性傾向，"
             "請聚焦職務所需的專業能力與工作表現。"
@@ -171,7 +178,14 @@ _RULE_DEFINITIONS: dict[str, dict[str, Any]] = {
             "老家在哪",
             "老家哪裡",
         ],
-        "patterns": ["race", "ethnicity", "ethnic", "nationality", "native place", "where are you from"],
+        "patterns": [
+            "race",
+            "ethnicity",
+            "ethnic",
+            "nationality",
+            "native place",
+            "where are you from",
+        ],
         "suggestion": (
             "建議改問工作能力面向：避免詢問種族、籍貫或國籍，"
             "可改問是否具備合法工作資格與職務所需語言能力。"
@@ -283,7 +297,8 @@ def _compile_rules() -> dict[str, list[tuple[str, re.Pattern[str]]]]:
         for keyword in spec["keywords"]:
             entries.append((keyword, re.compile(re.escape(keyword))))
         for pattern in spec["patterns"]:
-            entries.append((pattern, re.compile(rf"(?<![A-Za-z]){pattern}(?![A-Za-z])", re.IGNORECASE)))
+            expression = rf"(?<![A-Za-z]){pattern}(?![A-Za-z])"
+            entries.append((pattern, re.compile(expression, re.IGNORECASE)))
         compiled[category] = entries
     return compiled
 

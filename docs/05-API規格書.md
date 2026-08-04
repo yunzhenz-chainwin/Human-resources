@@ -9,7 +9,7 @@
 
 | 項目 | 規格 |
 |---|---|
-| 認證 | `Authorization: Bearer <JWT>`；access token 30 分鐘、refresh token 7 天輪替 |
+| 認證 | `Authorization: Bearer <JWT>`；access token 15 分鐘、refresh token 7 天輪替 |
 | 分頁 | 請求 `page`（1 起）、`page_size`（預設 20、上限 100）；回應 `{ "items": [...], "total": 123, "page": 1, "page_size": 20 }` |
 | 輕量分頁 | 部分清單端點（`GET /requisitions`、`GET /applications`）改採選用 `limit`/`offset` 查詢參數，回應為裸陣列，過濾後真實總數置於 `X-Total-Count` response header |
 | 排序 | `sort=-updated_at,name`（`-` 為降冪） |

@@ -15,7 +15,9 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.dependencies.auth import audit_pii_read, get_current_user
 from app.main import app
-from app.models import Department, JobRequisition
+from app.models import ConsentNotice, Department, JobRequisition
+
+CONSENT_FIELDS = {"consent_notice_id": 1, "consent_notice_version": 1}
 
 
 @pytest.fixture()
@@ -31,6 +33,15 @@ def client() -> TestClient:
         department = Department(name="Engineering")
         db.add(department)
         db.flush()
+        db.add(
+            ConsentNotice(
+                version=1,
+                title="人才招募個資告知暨同意書",
+                body="TalentHub 將在招募與人才媒合目的內使用你提供的資料。",
+                purpose_code="recruitment",
+                is_active=True,
+            )
+        )
         db.add_all(
             [
                 JobRequisition(
@@ -94,6 +105,20 @@ def test_public_jobs_only_returns_published_states(client: TestClient) -> None:
     assert jobs[0]["skills"] == ["Python", "FastAPI"]
 
 
+def test_public_active_consent_notice_exposes_only_candidate_facing_fields(
+    client: TestClient,
+) -> None:
+    response = client.get("/api/v1/public/consent-notices/active")
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": 1,
+        "version": 1,
+        "title": "人才招募個資告知暨同意書",
+        "body": "TalentHub 將在招募與人才媒合目的內使用你提供的資料。",
+        "purpose_code": "recruitment",
+    }
+
+
 def test_multipart_application_persists_and_deduplicates(client: TestClient) -> None:
     data = {
         "job_id": "1",
@@ -104,6 +129,7 @@ def test_multipart_application_persists_and_deduplicates(client: TestClient) -> 
         "portfolio_url": "https://example.com",
         "cover_letter": "Hello",
         "consent": "true",
+        **CONSENT_FIELDS,
     }
     upload = {"resume": ("resume.pdf", b"%PDF-1.4 test", "application/pdf")}
     first = client.post("/api/v1/public/applications", data=data, files=upload)
@@ -117,8 +143,16 @@ def test_multipart_application_persists_and_deduplicates(client: TestClient) -> 
     resumes = client.get("/api/v1/resumes").json()
     assert len(candidates) == 1
     assert candidates[0]["email"] == "USER@Example.com"
+    assert candidates[0]["retention_until"] is not None
     assert len(resumes) == 1
     assert resumes[0]["parse_status"] == "pending"
+    consents = client.get(
+        f"/api/v1/candidates/{candidates[0]['id']}/consents"
+    ).json()
+    assert len(consents) == 1
+    assert consents[0]["notice_id"] == 1
+    assert consents[0]["notice_version"] == 1
+    assert consents[0]["channel"] == "public_form"
 
 
 def test_talent_profile_can_be_created_without_resume(client: TestClient) -> None:
@@ -132,6 +166,7 @@ def test_talent_profile_can_be_created_without_resume(client: TestClient) -> Non
             "total_years": "2",
             "skills": "軟體開發",
             "consent": "true",
+            **CONSENT_FIELDS,
         },
     )
     assert response.status_code == 201
@@ -155,6 +190,7 @@ def test_job_application_can_be_submitted_without_resume(client: TestClient) -> 
             "phone": "0912345678",
             "skills": "資料分析／AI",
             "consent": "true",
+            **CONSENT_FIELDS,
         },
     )
     assert response.status_code == 201
@@ -169,6 +205,7 @@ def test_duplicate_application_still_persists_a_later_resume(client: TestClient)
         "name": "Later Resume Applicant",
         "email": "later-resume@example.com",
         "consent": "true",
+        **CONSENT_FIELDS,
     }
     first = client.post("/api/v1/public/applications", data=data)
     assert first.status_code == 201
@@ -187,8 +224,92 @@ def test_duplicate_application_still_persists_a_later_resume(client: TestClient)
     assert resumes[0]["candidate_id"] is not None
 
 
+def test_public_resubmission_cannot_reactivate_withdrawn_consent(
+    client: TestClient,
+) -> None:
+    data = {
+        "job_id": "1",
+        "name": "Returning Applicant",
+        "email": "returning@example.com",
+        "consent": "true",
+        **CONSENT_FIELDS,
+    }
+    first = client.post("/api/v1/public/applications", data=data)
+    assert first.status_code == 201
+
+    candidate_id = client.get("/api/v1/candidates").json()[0]["id"]
+    initial_consents = client.get(
+        f"/api/v1/candidates/{candidate_id}/consents"
+    ).json()
+    assert len(initial_consents) == 1
+
+    withdrawn = client.post(
+        "/api/v1/consent/candidate-consents/"
+        f"{initial_consents[0]['id']}/withdraw"
+    )
+    assert withdrawn.status_code == 200
+
+    repeated = client.post("/api/v1/public/applications", data=data)
+    assert repeated.status_code == 409
+
+    stored_consents = client.get(
+        f"/api/v1/candidates/{candidate_id}/consents"
+    ).json()
+    assert len(stored_consents) == 1
+    assert stored_consents[0]["withdrawn_at"] is not None
+
+
+def test_existing_candidate_cannot_accept_new_notice_anonymously(
+    client: TestClient,
+) -> None:
+    initial_data = {
+        "job_id": "1",
+        "name": "Existing Applicant",
+        "email": "existing@example.com",
+        "consent": "true",
+        **CONSENT_FIELDS,
+    }
+    assert client.post(
+        "/api/v1/public/applications",
+        data=initial_data,
+    ).status_code == 201
+    candidate_id = client.get("/api/v1/candidates").json()[0]["id"]
+
+    published = client.post(
+        "/api/v1/consent/notices",
+        json={
+            "title": "人才招募個資告知暨同意書 v2",
+            "body": "更新後的招募與人才媒合個資告知事項。",
+            "purpose_code": "recruitment",
+            "activate": True,
+        },
+    )
+    assert published.status_code == 201, published.text
+
+    forged = client.post(
+        "/api/v1/public/applications",
+        data={
+            **initial_data,
+            "consent_notice_id": published.json()["id"],
+            "consent_notice_version": published.json()["version"],
+        },
+    )
+    assert forged.status_code == 409
+
+    consents = client.get(
+        f"/api/v1/candidates/{candidate_id}/consents"
+    ).json()
+    assert len(consents) == 1
+    assert consents[0]["notice_version"] == 1
+
+
 def test_application_rejects_draft_job_and_missing_consent(client: TestClient) -> None:
-    base = {"name": "Test", "email": "test@example.com", "consent": True}
+    base = {
+        "name": "Test",
+        "email": "test@example.com",
+        "consent": True,
+        **CONSENT_FIELDS,
+    }
     assert (
         client.post(
             "/api/v1/public/applications/json", json={**base, "requisition_id": 2}
@@ -204,8 +325,36 @@ def test_application_rejects_draft_job_and_missing_consent(client: TestClient) -
     )
 
 
+def test_public_submission_rejects_a_stale_or_unbound_notice(client: TestClient) -> None:
+    base = {
+        "requisition_id": 1,
+        "name": "Stale Notice",
+        "email": "stale@example.com",
+        "consent": True,
+    }
+    unbound = client.post("/api/v1/public/applications/json", json=base)
+    assert unbound.status_code == 422
+
+    stale = client.post(
+        "/api/v1/public/applications/json",
+        json={
+            **base,
+            "consent_notice_id": 1,
+            "consent_notice_version": 999,
+        },
+    )
+    assert stale.status_code == 409
+    assert client.get("/api/v1/candidates").json() == []
+
+
 def test_resume_upload_rejects_invalid_type_and_oversize(client: TestClient) -> None:
-    data = {"job_id": "1", "name": "Test", "email": "test@example.com", "consent": "true"}
+    data = {
+        "job_id": "1",
+        "name": "Test",
+        "email": "test@example.com",
+        "consent": "true",
+        **CONSENT_FIELDS,
+    }
     invalid = client.post(
         "/api/v1/public/applications",
         data=data,

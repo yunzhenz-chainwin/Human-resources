@@ -65,6 +65,7 @@ const authState = authSession.state
 const sidebarOpen = ref(false)
 const loading = ref(false)
 const saving = ref(false)
+const logoutPending = ref(false)
 const apiOnline = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -429,13 +430,14 @@ async function refreshAll(silent = false) {
       return
     }
     const canEditCandidates = ['admin', 'hr'].includes(authState.user?.role || '')
+    const canReadResumeFiles = canEditCandidates
     if (!canEditCandidates) {
       candidates.value = []
       Object.keys(candidatePhotoPreviews).forEach(id => clearCandidatePhotoPreview(Number(id)))
     }
     const [candidateResult, resumeResult, jobResult, applicationResult, departmentResult] = await Promise.allSettled([
       canEditCandidates ? hrApi.candidates(skillSearch.value.trim() ? { skill: skillSearch.value.trim() } : {}) : Promise.resolve({ data: [] as CandidateDto[] }),
-      hrApi.resumes(),
+      canReadResumeFiles ? hrApi.resumes() : Promise.resolve({ data: [] as ResumeDto[] }),
       hrApi.requisitions(),
       canEditCandidates ? hrApi.applications() : Promise.resolve({ data: [] as ApplicationDto[] }),
       canEditCandidates ? adminApi.departments() : Promise.resolve({ data: [] as Department[] }),
@@ -926,6 +928,10 @@ async function upload() {
         managerUpload ? targetJob?.id : undefined,
       )).data[0]
       applyUploadResult(item, result)
+      if (managerUpload && !result.duplicate && result.parse_status !== 'failed') {
+        item.status = 'ready'
+        item.message = '已安全送交 HR 校對；主管不會取得原始履歷讀取權限'
+      }
     } catch (cause) {
       item.status = 'failed'
       item.message = cause instanceof Error ? cause.message : '上傳或解析失敗'
@@ -934,7 +940,11 @@ async function upload() {
   uploadFiles.value = []
   if (uploadInput.value) uploadInput.value.value = ''
   try {
-    await syncResumeQueue(false)
+    if (!managerUpload) await syncResumeQueue(false)
+    else {
+      resumes.value = []
+      selectedResume.value = null
+    }
   } catch (cause) {
     showError(cause)
   } finally {
@@ -980,6 +990,11 @@ function applyUploadResult(item: UploadItem, result: ResumeUploadResult) {
 }
 
 async function syncResumeQueue(notify = true) {
+  if (authState.user?.role === 'manager') {
+    resumes.value = []
+    selectedResume.value = null
+    return
+  }
   syncingResumes.value = true
   try {
     resumes.value = (await hrApi.resumes()).data
@@ -1177,30 +1192,36 @@ async function authenticated() {
   }
 }
 
-function logout() {
+async function logout() {
+  if (logoutPending.value) return
+  logoutPending.value = true
   closeResumeFilePreview()
-  authSession.logout()
-  candidates.value = []
-  Object.keys(candidatePhotoPreviews).forEach(id => clearCandidatePhotoPreview(Number(id)))
-  applications.value = []
-  applicationsLoaded.value = false
-  departments.value = []
-  resumes.value = []
-  jobs.value = []
-  uploadFiles.value = []
-  uploadItems.value = []
-  uploadValidationError.value = ''
-  intakeTab.value = 'upload'
-  resumeDropActive.value = false
-  recentlyConfirmedCount.value = 0
-  uploadRequisitionId.value = null
-  editingCandidate.value = null
-  editingCandidateApplication.value = null
-  candidateDepartmentId.value = null
-  candidateJobId.value = null
-  selectedCandidate.value = null
-  selectedResume.value = null
-  page.value = 'dashboard'
+  try {
+    await authSession.logout()
+  } finally {
+    candidates.value = []
+    Object.keys(candidatePhotoPreviews).forEach(id => clearCandidatePhotoPreview(Number(id)))
+    applications.value = []
+    applicationsLoaded.value = false
+    departments.value = []
+    resumes.value = []
+    jobs.value = []
+    uploadFiles.value = []
+    uploadItems.value = []
+    uploadValidationError.value = ''
+    intakeTab.value = 'upload'
+    resumeDropActive.value = false
+    recentlyConfirmedCount.value = 0
+    uploadRequisitionId.value = null
+    editingCandidate.value = null
+    editingCandidateApplication.value = null
+    candidateDepartmentId.value = null
+    candidateJobId.value = null
+    selectedCandidate.value = null
+    selectedResume.value = null
+    page.value = 'dashboard'
+    logoutPending.value = false
+  }
 }
 
 watch(() => authState.user?.id, async (userId, previousId) => {
@@ -1245,7 +1266,7 @@ onBeforeUnmount(closeResumeFilePreview)
         <button class="menu-button" aria-label="開啟導覽選單" @click="sidebarOpen = true">☰</button>
         <div class="top-title"><strong>{{ pageTitle }}</strong><small>{{ roleProfile.scope }} · 最後同步 {{ lastSync }}</small></div>
         <button class="button secondary" :disabled="loading" @click="refreshAll()">{{ loading ? '同步中…' : '重新同步' }}</button>
-        <div class="user-session"><span class="avatar">{{ authState.user.display_name.slice(0, 1) }}</span><div><strong>{{ authState.user.display_name }}</strong><small>{{ roleProfile.label }}</small></div><button class="text-button" @click="logout">登出</button></div>
+        <div class="user-session"><span class="avatar">{{ authState.user.display_name.slice(0, 1) }}</span><div><strong>{{ authState.user.display_name }}</strong><small>{{ roleProfile.label }}</small></div><button class="text-button" :disabled="logoutPending" @click="logout">{{ logoutPending ? '登出中…' : '登出' }}</button></div>
       </header>
 
       <div class="content">
@@ -1340,7 +1361,7 @@ onBeforeUnmount(closeResumeFilePreview)
         </section>
 
         <section v-else-if="page === 'resumes'" class="page resume-center-page" data-testid="resume-center">
-          <div class="page-heading resume-center-heading"><div><p class="eyebrow">{{ authState.user.role === 'manager' ? 'RESUME RECOGNITION CENTER' : 'ADD TALENT' }}</p><h1>{{ authState.user.role === 'manager' ? '新增履歷並指派職缺' : '新增人才' }}</h1><p>{{ authState.user.role === 'manager' ? '為本部門職缺新增履歷；確認入庫後，人才會自動出現在該職缺的應徵名單。' : '兩條路都會把人才建進人才庫：用「上傳履歷」讓系統辨識既有履歷，或用「手動填寫」直接建立人才基本資料。' }}</p></div></div>
+          <div class="page-heading resume-center-heading"><div><p class="eyebrow">{{ authState.user.role === 'manager' ? 'SECURE RESUME HANDOFF' : 'ADD TALENT' }}</p><h1>{{ authState.user.role === 'manager' ? '送交履歷並指派職缺' : '新增人才' }}</h1><p>{{ authState.user.role === 'manager' ? '選擇本部門職缺並安全送交履歷；後續原始檔、解析結果與人工校對由 HR 處理。' : '兩條路都會把人才建進人才庫：用「上傳履歷」讓系統辨識既有履歷，或用「手動填寫」直接建立人才基本資料。' }}</p></div></div>
           <div v-if="canManualIntake" class="intake-tab-bar" role="tablist" aria-label="新增人才方式">
             <button type="button" role="tab" class="intake-tab" :class="{ active: intakeTab === 'upload' }" :aria-selected="intakeTab === 'upload'" data-testid="intake-tab-upload" @click="intakeTab = 'upload'">上傳履歷</button>
             <button type="button" role="tab" class="intake-tab" :class="{ active: intakeTab === 'manual' }" :aria-selected="intakeTab === 'manual'" data-testid="intake-tab-manual" @click="setIntakeTab('manual')">手動填寫</button>
@@ -1352,12 +1373,12 @@ onBeforeUnmount(closeResumeFilePreview)
               <span class="resume-center-flow-copy"><strong>上傳履歷</strong><small>{{ uploadFiles.length ? `${uploadFiles.length} 份等待上傳` : '選擇或拖放檔案' }}</small></span>
               <span class="resume-center-flow-arrow" aria-hidden="true">→</span>
             </li>
-            <li class="resume-center-flow-step" :class="{ 'is-active': queueResumes.length && !selectedResume }" data-testid="resume-center-step-2">
+            <li v-if="authState.user.role !== 'manager'" class="resume-center-flow-step" :class="{ 'is-active': queueResumes.length && !selectedResume }" data-testid="resume-center-step-2">
               <span class="resume-center-flow-number" aria-hidden="true">2</span>
               <span class="resume-center-flow-copy"><strong>解析佇列</strong><small>{{ queueResumes.length ? `${queueResumes.length} 份待處理` : '等待系統辨識' }}</small></span>
               <span class="resume-center-flow-arrow" aria-hidden="true">→</span>
             </li>
-            <li class="resume-center-flow-step" :class="{ 'is-active': selectedResume }" data-testid="resume-center-step-3">
+            <li v-if="authState.user.role !== 'manager'" class="resume-center-flow-step" :class="{ 'is-active': selectedResume }" data-testid="resume-center-step-3">
               <span class="resume-center-flow-number" aria-hidden="true">3</span>
               <span class="resume-center-flow-copy"><strong>人工校對</strong><small>{{ selectedResume ? `正在校對 ${selectedResume.original_filename || `履歷 #${selectedResume.id}`}` : '確認後寫入人才庫' }}</small></span>
             </li>
@@ -1367,7 +1388,7 @@ onBeforeUnmount(closeResumeFilePreview)
               <article id="resume-upload-stage" class="panel uploader resume-center-upload-panel" aria-labelledby="resume-upload-heading" data-testid="resume-center-upload">
                 <div class="section-head resume-center-section-head"><div><h2 id="resume-upload-heading">1. 上傳履歷</h2><p>{{ authState.user.role === 'manager' ? '先選擇本部門職缺，再加入履歷檔案。' : '可混合選擇多份履歷，系統會逐檔辨識來源。' }} PDF、DOC、DOCX，單檔最大 10 MB。</p></div></div>
                 <label v-if="authState.user.role === 'manager'" class="manager-job-target"><span>本部門目標職缺 *</span><select v-model="uploadRequisitionId" required><option :value="null" disabled>請選擇履歷要應徵的職缺</option><option v-for="job in jobs" :key="job.id" :value="job.id">{{ job.req_no }} · {{ job.title }}</option></select><small v-if="jobs.length">只能選擇目前登入主管所屬部門的職缺。</small><small v-else class="target-warning">本部門目前沒有可選職缺，請先到「部門後台」建立職缺。</small></label>
-                <p v-if="authState.user.role === 'manager'" class="source-auto-note"><span>✓</span><strong>入庫後自動加入應徵名單</strong><small>請先選定職缺。履歷完成解析與人工確認後，系統會建立人才資料及該職缺的應徵關聯。</small></p>
+                <p v-if="authState.user.role === 'manager'" class="source-auto-note"><span>✓</span><strong>安全送交 HR 校對</strong><small>請先選定職缺。主管無法讀取原始檔或解析內容；HR 確認入庫後，人才才會出現在該職缺的應徵名單。</small></p>
                 <p v-else class="source-auto-note"><span>✦</span><strong>不需要先選來源</strong><small>同一批可混合不同格式；判定結果、信心分數與依據會顯示在右側校對區。</small></p>
                 <button
                   class="dropzone resume-center-dropzone"
@@ -1400,20 +1421,20 @@ onBeforeUnmount(closeResumeFilePreview)
                 </ul>
                 <div v-if="uploadItems.length && !uploadFiles.length" class="upload-batch-summary resume-center-upload-summary" role="status" aria-live="polite" data-testid="resume-upload-summary">
                   <strong>本批處理結果</strong>
-                  <span>可入庫 {{ uploadSummary.ready }} · 需確認 {{ uploadSummary.needs_review }} · 等待中 {{ uploadSummary.pending + uploadSummary.processing }} · 重複 {{ uploadSummary.duplicate }} · 失敗 {{ uploadSummary.failed }}</span>
+                  <span v-if="authState.user.role === 'manager'">已送交 HR {{ uploadSummary.ready }} · 重複 {{ uploadSummary.duplicate }} · 失敗 {{ uploadSummary.failed }}</span><span v-else>可入庫 {{ uploadSummary.ready }} · 需確認 {{ uploadSummary.needs_review }} · 等待中 {{ uploadSummary.pending + uploadSummary.processing }} · 重複 {{ uploadSummary.duplicate }} · 失敗 {{ uploadSummary.failed }}</span>
                 </div>
                 <button class="button primary upload-button resume-center-upload-action" type="button" aria-controls="resume-upload-list" :aria-label="uploadFiles.length ? `開始上傳 ${uploadFiles.length} 份履歷` : '請先加入履歷檔案'" data-testid="resume-upload-start" :disabled="saving || !uploadFiles.length || (authState.user.role === 'manager' && !selectedUploadJob)" @click="upload">{{ saving ? '逐檔處理中…' : authState.user.role === 'manager' ? `上傳至${selectedUploadJob ? `「${selectedUploadJob.title}」` : '目標職缺'}` : `上傳 ${uploadFiles.length || ''} 份履歷` }}</button>
               </article>
-              <article id="resume-queue-stage" class="panel queue resume-center-queue-panel" aria-labelledby="resume-queue-heading" data-testid="resume-center-queue"><div class="section-head resume-center-section-head"><div><h2 id="resume-queue-heading">2. 解析佇列</h2><p>查看等待解析、需校對或尚未入庫的檔案；選取一份即可進到人工校對。</p></div><div class="queue-controls"><label class="visually-hidden" for="resume-queue-filter">篩選解析狀態</label><select id="resume-queue-filter" v-model="resumeStatus" aria-label="篩選解析狀態" data-testid="resume-queue-filter"><option value="all">全部狀態</option><option v-for="(label, key) in resumeQueueStatusLabels" :key="key" :value="key">{{ label }}</option></select><button class="button secondary" type="button" aria-controls="resume-queue-list" data-testid="resume-queue-sync" :disabled="syncingResumes" @click="syncResumeQueue()">{{ syncingResumes ? '同步中…' : '更新進度' }}</button></div></div>
-                <div v-if="recentlyConfirmedCount" class="queue-completed-summary" data-testid="resume-confirmed-summary"><strong>✓ 本次已入庫 {{ recentlyConfirmedCount }} 份</strong><span>{{ authState.user.role === 'manager' ? '已加入指定職缺的應徵名單，請到「部門後台」查看。' : '已從辨識佇列移除，請到「人才庫」查看。' }}</span></div>
+              <article v-if="authState.user.role !== 'manager'" id="resume-queue-stage" class="panel queue resume-center-queue-panel" aria-labelledby="resume-queue-heading" data-testid="resume-center-queue"><div class="section-head resume-center-section-head"><div><h2 id="resume-queue-heading">2. 解析佇列</h2><p>查看等待解析、需校對或尚未入庫的檔案；選取一份即可進到人工校對。</p></div><div class="queue-controls"><label class="visually-hidden" for="resume-queue-filter">篩選解析狀態</label><select id="resume-queue-filter" v-model="resumeStatus" aria-label="篩選解析狀態" data-testid="resume-queue-filter"><option value="all">全部狀態</option><option v-for="(label, key) in resumeQueueStatusLabels" :key="key" :value="key">{{ label }}</option></select><button class="button secondary" type="button" aria-controls="resume-queue-list" data-testid="resume-queue-sync" :disabled="syncingResumes" @click="syncResumeQueue()">{{ syncingResumes ? '同步中…' : '更新進度' }}</button></div></div>
+                <div v-if="recentlyConfirmedCount" class="queue-completed-summary" data-testid="resume-confirmed-summary"><strong>✓ 本次已入庫 {{ recentlyConfirmedCount }} 份</strong><span>已從辨識佇列移除，請到「人才庫」查看。</span></div>
                 <div id="resume-queue-list" class="resume-center-queue-list" role="region" :aria-label="`解析佇列，共 ${filteredResumes.length} 份履歷`" aria-live="polite">
                   <button v-for="resume in filteredResumes" :key="resume.id" class="resume-row resume-center-queue-item" :class="{ active: selectedResume?.id === resume.id }" type="button" :aria-pressed="selectedResume?.id === resume.id" :aria-label="`${resume.original_filename || `履歷 #${resume.id}`}，${resume.source_review_required ? '來源待確認' : resumeQueueStatusLabels[resume.parse_status] || resume.parse_status}`" :data-testid="`resume-queue-row-${resume.id}`" @click="openResume(resume)"><span class="file-badge">{{ resume.original_filename?.split('.').pop()?.toUpperCase() || 'FILE' }}</span><span><strong>{{ resume.original_filename || `履歷 #${resume.id}` }}</strong><small>{{ sourceLabels[resume.source_platform] || resume.source_platform }} · 信心 {{ Math.round((resume.source_confidence || 0) * 100) }}% · {{ date(resume.uploaded_at) }}<template v-if="resume.target_requisition_id"> · {{ targetJobName(resume.target_requisition_id) }}</template></small></span><span class="status" role="status" :data-status="resume.source_review_required ? 'needs_review' : resume.parse_status">{{ resume.source_review_required ? '來源待確認' : resumeQueueStatusLabels[resume.parse_status] || resume.parse_status }}</span></button>
                 </div>
                 <div v-if="loading && !filteredResumes.length" class="empty"><span class="spinner"></span><p>正在載入解析佇列…</p></div>
-                <div v-else-if="!filteredResumes.length" class="empty"><strong>{{ resumeStatus === 'all' ? '沒有待處理履歷' : '這個狀態目前沒有履歷' }}</strong><p>{{ resumeStatus === 'all' ? (authState.user.role === 'manager' ? '已入庫履歷不會留在這裡，請至部門後台查看本部門應徵者。' : '已入庫履歷不會留在這裡，請至人才庫查看。') : '可調整篩選條件或按「更新進度」。' }}</p></div>
+                <div v-else-if="!filteredResumes.length" class="empty"><strong>{{ resumeStatus === 'all' ? '沒有待處理履歷' : '這個狀態目前沒有履歷' }}</strong><p>{{ resumeStatus === 'all' ? '已入庫履歷不會留在這裡，請至人才庫查看。' : '可調整篩選條件或按「更新進度」。' }}</p></div>
               </article>
             </div>
-            <article id="resume-review-stage" class="panel review-panel resume-center-review-panel" aria-labelledby="resume-review-heading" data-testid="resume-center-review">
+            <article v-if="authState.user.role !== 'manager'" id="resume-review-stage" class="panel review-panel resume-center-review-panel" aria-labelledby="resume-review-heading" data-testid="resume-center-review">
               <template v-if="selectedResume"><div class="section-head resume-center-section-head"><div><h2 id="resume-review-heading">3. 人工校對</h2><p>{{ selectedResume.original_filename }}</p></div><span class="status" role="status" :aria-label="`校對狀態：${resumeStatusLabels[selectedResume.parse_status] || selectedResume.parse_status}`" :data-status="selectedResume.parse_status">{{ resumeStatusLabels[selectedResume.parse_status] || selectedResume.parse_status }}</span></div>
                 <div v-if="selectedResume.target_requisition_id" class="resume-target-summary"><small>指定應徵職缺</small><strong>{{ targetJobName(selectedResume.target_requisition_id) }}</strong><p>確認寫入人才庫後，系統會自動建立這項職缺的應徵紀錄。</p></div>
                 <div class="source-verdict" :class="{ uncertain: selectedResume.source_review_required }"><div><small>逐檔來源判別</small><strong>{{ sourceLabels[selectedResume.source_platform] || selectedResume.source_platform }} · {{ Math.round((selectedResume.source_confidence || 0) * 100) }}%</strong><p>依據：{{ sourceEvidence(selectedResume) }}</p></div><div v-if="selectedResume.source_review_required" class="source-review-buttons"><button v-for="value in (['p104','p1111','direct','generic'] as ResumeSource[])" :key="value" type="button" class="button secondary" :disabled="saving" @click="reviewResumeSource(value)">{{ sourceLabels[value] }}</button></div></div>
@@ -1423,9 +1444,9 @@ onBeforeUnmount(closeResumeFilePreview)
                   <div v-if="selectedResume.error_message" class="inline-error wide"><strong>解析錯誤</strong>{{ selectedResume.error_message }}</div>
                 </div>
                 <div v-else class="review-message"><strong>這份履歷已確認入庫</strong><p>人才編號已建立，確認後的履歷不可再次編輯。</p></div>
-                <footer v-if="selectedResume.parse_status !== 'confirmed'" class="review-actions"><button v-if="['pending','failed'].includes(selectedResume.parse_status)" class="button secondary" data-testid="resume-reparse" :disabled="saving" @click="reparse(selectedResume)">{{ selectedResume.parse_status === 'pending' ? '立即解析' : '重新解析' }}</button><span></span><button class="button secondary" :disabled="saving || ['pending','processing'].includes(selectedResume.parse_status)" @click="saveParsed(false)">儲存校對</button><button class="button primary" data-testid="resume-confirm" :disabled="saving || selectedResume.source_review_required || ['pending','processing'].includes(selectedResume.parse_status)" @click="saveParsed(true)">{{ selectedResume.source_review_required ? '請先確認來源' : authState.user.role === 'manager' && selectedResume.target_requisition_id ? '確認入庫並加入應徵者' : '確認並寫入人才庫' }}</button></footer>
+                <footer v-if="selectedResume.parse_status !== 'confirmed'" class="review-actions"><button v-if="['pending','failed'].includes(selectedResume.parse_status)" class="button secondary" data-testid="resume-reparse" :disabled="saving" @click="reparse(selectedResume)">{{ selectedResume.parse_status === 'pending' ? '立即解析' : '重新解析' }}</button><span></span><button class="button secondary" :disabled="saving || ['pending','processing'].includes(selectedResume.parse_status)" @click="saveParsed(false)">儲存校對</button><button class="button primary" data-testid="resume-confirm" :disabled="saving || selectedResume.source_review_required || ['pending','processing'].includes(selectedResume.parse_status)" @click="saveParsed(true)">{{ selectedResume.source_review_required ? '請先確認來源' : '確認並寫入人才庫' }}</button></footer>
               </template>
-              <div v-else class="empty review-empty"><h2 id="resume-review-heading">3. 人工校對</h2><strong>從解析佇列選擇一份履歷</strong><p>系統解析結果會顯示在這裡，{{ authState.user.role === 'manager' ? '確認後會加入指定職缺的應徵名單；主管不會取得人才庫瀏覽權限。' : 'HR 可修正後再寫入人才庫。' }}</p></div>
+              <div v-else class="empty review-empty"><h2 id="resume-review-heading">3. 人工校對</h2><strong>從解析佇列選擇一份履歷</strong><p>系統解析結果會顯示在這裡，HR 可修正後再寫入人才庫。</p></div>
             </article>
           </div>
           </div>
@@ -1493,7 +1514,7 @@ onBeforeUnmount(closeResumeFilePreview)
 
         <nav class="candidate-detail-tabs" role="tablist" aria-label="人才詳情分頁">
           <button id="candidate-tab-profile" type="button" role="tab" :class="{ active: candidateDetailTab === 'profile' }" :aria-selected="candidateDetailTab === 'profile'" aria-controls="candidate-panel-profile" data-testid="candidate-detail-tab-profile" @click="selectCandidateDetailTab('profile')"><span>1</span><span><strong>基本資料</strong><small>聯絡、技能與經歷</small></span></button>
-          <button id="candidate-tab-documents" type="button" role="tab" :class="{ active: candidateDetailTab === 'documents' }" :aria-selected="candidateDetailTab === 'documents'" aria-controls="candidate-panel-documents" data-testid="candidate-detail-tab-documents" @click="selectCandidateDetailTab('documents')"><span>2</span><span><strong>履歷與去識別化</strong><small>{{ selectedCandidate.resumes.length }} 份原始履歷</small></span></button>
+          <button id="candidate-tab-documents" type="button" role="tab" :class="{ active: candidateDetailTab === 'documents' }" :aria-selected="candidateDetailTab === 'documents'" aria-controls="candidate-panel-documents" data-testid="candidate-detail-tab-documents" @click="selectCandidateDetailTab('documents')"><span>2</span><span><strong>履歷與去識別化</strong><small>{{ authState.user.role === 'manager' ? '僅顯示已核准去識別化文件' : `${selectedCandidate.resumes.length} 份原始履歷` }}</small></span></button>
           <button id="candidate-tab-activity" type="button" role="tab" :class="{ active: candidateDetailTab === 'activity' }" :aria-selected="candidateDetailTab === 'activity'" aria-controls="candidate-panel-activity" data-testid="candidate-detail-tab-activity" @click="selectCandidateDetailTab('activity')"><span>3</span><span><strong>應徵與紀錄</strong><small>{{ selectedCandidate.applications.length }} 筆應徵 · {{ candidateActivities.length }} 筆活動</small></span></button>
         </nav>
 
@@ -1505,7 +1526,8 @@ onBeforeUnmount(closeResumeFilePreview)
         <div ref="candidateDetailBody" class="detail-body candidate-detail-body">
           <section id="candidate-panel-profile" v-show="candidateDetailTab === 'profile'" role="tabpanel" aria-labelledby="candidate-tab-profile" data-testid="candidate-detail-panel-profile">
             <div class="candidate-section-heading"><div><small>PROFILE</small><h3>基本資料</h3><p>聯絡方式、保存期限與人才經歷集中在這一頁。</p></div></div>
-            <div class="detail-grid candidate-contact-grid"><div><small>Email</small><strong>{{ selectedCandidate.email || '未提供' }}</strong></div><div><small>電話</small><strong>{{ selectedCandidate.phone || '未提供' }}</strong></div><div><small>地區</small><strong>{{ selectedCandidate.city || '未提供' }}</strong></div><div><small>來源</small><strong>{{ sourceLabels[selectedCandidate.source || ''] || selectedCandidate.source || '未知' }}</strong></div></div>
+            <div class="detail-grid candidate-contact-grid"><div><small>Email</small><strong>{{ selectedCandidate.email || '未提供' }}</strong></div><div><small>電話</small><strong>{{ selectedCandidate.phone || '未提供' }}</strong></div><div><small>居住地</small><strong>{{ authState.user.role === 'manager' ? '依權限隱藏' : selectedCandidate.city || '未提供' }}</strong></div><div><small>來源</small><strong>{{ sourceLabels[selectedCandidate.source || ''] || selectedCandidate.source || '未知' }}</strong></div></div>
+            <p v-if="authState.user.role === 'manager'" class="shared-activity-hint">主管畫面僅顯示遮罩後的聯絡方式；居住地址、生日與原始履歷由 HR 保管。</p>
             <div v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" class="candidate-retention-control drawer-retention-control" :class="{ custom: selectedCandidate.retention_years_override !== null }">
               <div><span>{{ selectedCandidate.retention_years_override === null ? `公司預設 ${retentionPolicyYears} 年` : `個別設定 ${selectedCandidate.retention_years_override} 年` }}</span><small>{{ selectedCandidate.retention_until ? `保存至 ${dateOnly(selectedCandidate.retention_until)}` : '尚未計算到期日' }}</small></div>
               <label>保存年限<select :value="selectedCandidate.retention_years_override ?? ''" :disabled="retentionSavingCandidateId === selectedCandidate.id" :aria-label="`${selectedCandidate.name}的保存年限`" @change="updateCandidateRetention(selectedCandidate, $event)"><option value="">沿用公司預設（{{ retentionPolicyYears }} 年）</option><option v-for="years in retentionYearOptions" :key="years" :value="years">個別設定 {{ years }} 年</option></select></label>
@@ -1523,7 +1545,7 @@ onBeforeUnmount(closeResumeFilePreview)
           </section>
 
           <section id="candidate-panel-documents" v-show="candidateDetailTab === 'documents'" role="tabpanel" aria-labelledby="candidate-tab-documents" data-testid="candidate-resumes">
-            <div class="candidate-section-heading"><div><small>FILES &amp; PRIVACY</small><h3>履歷與去識別化檔案</h3><p>先管理檔案，再決定是否使用已核准版本進行職位分析。</p></div><span>{{ selectedCandidate.resumes.length }} 份原始履歷</span></div>
+            <div class="candidate-section-heading"><div><small>FILES &amp; PRIVACY</small><h3>履歷與去識別化檔案</h3><p>{{ authState.user.role === 'manager' ? '主管僅可查看 HR 已核准的去識別化版本。' : '先管理檔案，再決定是否使用已核准版本進行職位分析。' }}</p></div><span v-if="authState.user.role !== 'manager'">{{ selectedCandidate.resumes.length }} 份原始履歷</span></div>
             <div class="candidate-storage-guide" data-testid="candidate-deidentification-storage-guide"><span aria-hidden="true">檔</span><div><strong>原始履歷與去識別化檔案會分開保存</strong><p>展開下方原始履歷後按「上傳此履歷的去識別化檔案」，選擇一份已去識別化的 PDF 檔；系統會新增版本化檔案並自動掃描是否殘留個資，不會覆蓋原始檔。預覽確認並核准後，才能提供職位分析使用。</p></div></div>
             <CandidateAnalysisPanel
               :key="selectedCandidate.id"
@@ -1569,7 +1591,7 @@ onBeforeUnmount(closeResumeFilePreview)
       <section class="resume-file-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="resume-file-preview-title">
         <header>
           <div><small>{{ resumeFilePreviewIsGenerated ? 'SYSTEM-GENERATED PROFILE' : resumeFilePreviewIsPdf ? 'ORIGINAL PDF' : 'WORD TEXT PREVIEW' }}</small><h2 id="resume-file-preview-title">{{ resumeFilePreview.original_filename || `履歷 #${resumeFilePreview.id}` }}</h2><p>{{ resumeFilePreviewIsGenerated ? '依人才庫資料補建的 PDF，並非應徵者原始上傳檔' : resumeFilePreviewIsPdf ? '應徵者提供的原始 PDF 檔案' : '瀏覽器無法原樣呈現 Word，以下顯示安全的解析文字' }}</p></div>
-          <div class="resume-file-preview-actions"><button class="button secondary" type="button" @click="downloadCandidateResume(resumeFilePreview.id, resumeFilePreview.original_filename)">下載原檔</button><button class="resume-file-preview-close" type="button" aria-label="關閉履歷預覽" @click="closeResumeFilePreview">×</button></div>
+          <div class="resume-file-preview-actions"><button v-if="authState.user.role !== 'manager'" class="button secondary" type="button" @click="downloadCandidateResume(resumeFilePreview.id, resumeFilePreview.original_filename)">下載原檔</button><button class="resume-file-preview-close" type="button" aria-label="關閉履歷預覽" @click="closeResumeFilePreview">×</button></div>
         </header>
         <div v-if="resumeFilePreviewIsPdf && resumeFilePreviewUrl" class="resume-file-preview-canvas">
           <iframe :src="resumeFilePreviewUrl" :title="`${resumeFilePreview.original_filename || '履歷'}預覽`"></iframe>

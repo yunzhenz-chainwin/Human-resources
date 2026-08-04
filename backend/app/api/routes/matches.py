@@ -32,6 +32,7 @@ from app.schemas.matching import (
     MatchSource,
     MatchStatusUpdate,
 )
+from app.services.candidate_privacy import mask_email, mask_phone
 from app.services.interview_questions import suggest_interview_questions
 from app.services.matching import (
     assess_matching_readiness,
@@ -252,7 +253,7 @@ def list_matches(
     if limit is not None:
         statement = statement.limit(limit)
     items = list(db.scalars(statement).all())
-    return MatchList(items=[MatchRead.model_validate(item) for item in items], total=total)
+    return MatchList(items=[_match_read(item, user) for item in items], total=total)
 
 
 @router.get(
@@ -312,8 +313,8 @@ def candidate_match_overview(
     rows = db.execute(statement).all()
     items = [
         CandidateMatchOverviewItem(
-            candidate=MatchCandidateRead.model_validate(candidate),
-            match=MatchRead.model_validate(result) if result else None,
+            candidate=_match_candidate_read(candidate, user),
+            match=_match_read(result, user) if result else None,
             source="applicant" if application_id is not None else "talent_pool",
             application_id=application_id,
         )
@@ -531,7 +532,7 @@ def match_feedback(
     payload: MatchFeedback,
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
-) -> MatchResult:
+) -> MatchRead:
     result = _match(db, match_id)
     _enforce_match_action_scope(db, result, user)
     _guard_status_transition(result, payload.status)
@@ -549,7 +550,7 @@ def match_feedback(
     result.feedback_at = now
     db.commit()
     db.refresh(result)
-    return result
+    return _match_read(result, user)
 
 
 @router.post("/matches/{match_id}/status", response_model=MatchRead)
@@ -558,7 +559,7 @@ def update_match_status(
     payload: MatchStatusUpdate,
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
-) -> MatchResult:
+) -> MatchRead:
     result = _match(db, match_id)
     _enforce_match_action_scope(db, result, user)
     _guard_status_transition(result, payload.status)
@@ -567,7 +568,28 @@ def update_match_status(
     result.stage_updated_at = datetime.now(UTC)
     db.commit()
     db.refresh(result)
-    return result
+    return _match_read(result, user)
+
+
+def _match_candidate_read(candidate: Candidate, user: User) -> MatchCandidateRead:
+    result = MatchCandidateRead.model_validate(candidate)
+    if user.role != "manager":
+        return result
+    return result.model_copy(
+        update={
+            "email": mask_email(result.email),
+            "phone": mask_phone(result.phone),
+        }
+    )
+
+
+def _match_read(result: MatchResult, user: User) -> MatchRead:
+    response = MatchRead.model_validate(result)
+    if user.role != "manager":
+        return response
+    return response.model_copy(
+        update={"candidate": _match_candidate_read(result.candidate, user)}
+    )
 
 
 @router.post("/matches/{match_id}/manual-override", response_model=MatchRead)
@@ -577,7 +599,7 @@ def manual_override_match(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
-) -> MatchResult:
+) -> MatchRead:
     """Document a human exception before advancing a failed system gate."""
 
     result = _match(db, match_id)
@@ -612,4 +634,4 @@ def manual_override_match(
     )
     db.commit()
     db.refresh(result)
-    return result
+    return _match_read(result, user)

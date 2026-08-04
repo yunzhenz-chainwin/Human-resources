@@ -237,11 +237,11 @@ def test_manager_upload_scope_confirmation_and_department_workspace(
         assert resume.uploaded_by == ids["engineering_manager"]
 
     manager_list = client.get("/api/v1/resumes")
-    assert manager_list.status_code == 200
-    assert [item["id"] for item in manager_list.json()] == [resume_id]
-    assert manager_list.json()[0]["uploaded_by"] == ids["engineering_manager"]
-    assert client.get(f"/api/v1/resumes/{resume_id}").status_code == 200
-    assert client.post(f"/api/v1/resumes/{resume_id}/reparse").status_code == 200
+    assert manager_list.status_code == 403
+    assert client.get(f"/api/v1/resumes/{resume_id}").status_code == 403
+    assert client.get(f"/api/v1/resumes/{resume_id}/file").status_code == 403
+    assert client.get(f"/api/v1/resumes/{resume_id}/preview").status_code == 403
+    assert client.post(f"/api/v1/resumes/{resume_id}/reparse").status_code == 403
 
     _as_user(
         current_user,
@@ -249,7 +249,7 @@ def test_manager_upload_scope_confirmation_and_department_workspace(
         "manager",
         sales_department_id,
     )
-    assert client.get("/api/v1/resumes").json() == []
+    assert client.get("/api/v1/resumes").status_code == 403
     assert client.get(f"/api/v1/resumes/{resume_id}").status_code == 403
     assert (
         client.put(
@@ -300,6 +300,23 @@ def test_manager_upload_scope_confirmation_and_department_workspace(
     assert duplicate_item["target_requisition_id"] == ids["engineering_job"]
     assert duplicate_item["duplicate"] is True
 
+    assert client.put(
+        f"/api/v1/resumes/{resume_id}/parsed",
+        json={"parsed_payload": {"name": "Manager must not inspect this"}},
+    ).status_code == 403
+    assert client.put(
+        f"/api/v1/resumes/{resume_id}/source",
+        json={"source_platform": "direct"},
+    ).status_code == 403
+    assert client.post(f"/api/v1/resumes/{resume_id}/confirm", json={}).status_code == 403
+
+    _as_user(current_user, ids["hr"], "hr", None)
+    hr_list = client.get("/api/v1/resumes")
+    assert hr_list.status_code == 200
+    assert [item["id"] for item in hr_list.json()] == [resume_id]
+    assert client.get(f"/api/v1/resumes/{resume_id}").status_code == 200
+    assert client.post(f"/api/v1/resumes/{resume_id}/reparse").status_code == 200
+
     reviewed = client.put(
         f"/api/v1/resumes/{resume_id}/parsed",
         json={
@@ -341,6 +358,12 @@ def test_manager_upload_scope_confirmation_and_department_workspace(
         assert applications[0].status == "submitted"
         assert applications[0].source == "manager_upload"
 
+    _as_user(
+        current_user,
+        ids["engineering_manager"],
+        "manager",
+        engineering_department_id,
+    )
     workspace = client.get("/api/v1/department/workspace")
     assert workspace.status_code == 200
     matching_job = next(
@@ -348,10 +371,13 @@ def test_manager_upload_scope_confirmation_and_department_workspace(
         for job in workspace.json()["jobs"]
         if job["requisition"]["id"] == ids["engineering_job"]
     )
-    assert [item["candidate"]["id"] for item in matching_job["applicants"]] == [
-        candidate_id
-    ]
+    applicant = matching_job["applicants"][0]["candidate"]
+    assert applicant["id"] == candidate_id
+    assert applicant["email"] == "m***@example.test"
+    assert applicant["phone"] == "*******678"
+    assert applicant["city"] is None
 
+    _as_user(current_user, ids["hr"], "hr", None)
     repeated = client.post(f"/api/v1/resumes/{resume_id}/confirm", json={})
     assert repeated.status_code == 200
     assert repeated.json()["created"] is False

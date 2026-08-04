@@ -142,6 +142,8 @@ def application_client(
                 code="APP-CAND-001",
                 name="Alice Applicant",
                 email="alice@app.test",
+                phone="0912-345-678",
+                city="Taipei",
                 source="direct",
             ),
             Candidate(
@@ -252,6 +254,12 @@ def test_application_listing_is_role_and_department_scoped(application_client) -
     assert all(set(item) == APPLICATION_KEYS for item in hr_response.json())
     assert all(item["candidate"]["id"] == item["candidate_id"] for item in hr_response.json())
     assert all(item["requisition"]["id"] == item["requisition_id"] for item in hr_response.json())
+    hr_alice = next(
+        item for item in hr_response.json() if item["candidate_id"] == ids["alice"]
+    )
+    assert hr_alice["candidate"]["email"] == "alice@app.test"
+    assert hr_alice["candidate"]["phone"] == "0912-345-678"
+    assert hr_alice["candidate"]["city"] == "Taipei"
     for item in hr_response.json():
         _assert_aware(item["applied_at"])
 
@@ -259,6 +267,9 @@ def test_application_listing_is_role_and_department_scoped(application_client) -
     own = client.get("/api/v1/applications", headers=engineering_headers)
     assert own.status_code == 200
     assert [item["id"] for item in own.json()] == [ids["engineering_application"]]
+    assert own.json()[0]["candidate"]["email"] == "a***@app.test"
+    assert own.json()[0]["candidate"]["phone"] == "*******678"
+    assert own.json()[0]["candidate"]["city"] is None
     assert (
         client.get(
             f"/api/v1/applications?department_id={ids['design']}",
@@ -404,13 +415,17 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
     assert engineering_body["skills"] == ["Python"]
     assert engineering_body["experiences"][0]["title"] == "Senior Engineer"
     assert engineering_body["educations"][0]["school"] == "Example University"
+    assert engineering_body["email"] == "a***@app.test"
+    assert engineering_body["phone"] == "*******678"
+    assert engineering_body["city"] is None
     assert len(engineering_body["applications"]) == 1
     assert engineering_body["applications"][0]["requisition_id"] == ids["engineering_job"]
+    assert engineering_body["applications"][0]["resume_id"] is None
+    assert engineering_body["applications"][0]["resume"] is None
     assert engineering_body["applications"][0]["cover_letter"] == ("Engineering-only cover letter")
     assert engineering_body["applications"][0]["linkedin_url"] is None
     assert "Design-only private cover letter" not in engineering_detail.text
-    assert [item["id"] for item in engineering_body["resumes"]] == [engineering_resume_id]
-    assert engineering_body["resumes"][0]["has_file"] is True
+    assert engineering_body["resumes"] == []
 
     design_detail = client.get(f"/api/v1/candidates/{ids['alice']}", headers=design_headers)
     assert design_detail.status_code == 200
@@ -418,12 +433,29 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
     assert len(design_body["applications"]) == 1
     assert design_body["applications"][0]["requisition_id"] == ids["design_job"]
     assert "Engineering-only cover letter" not in design_detail.text
-    assert [item["id"] for item in design_body["resumes"]] == [design_resume_id]
-    assert design_body["resumes"][0]["resume_url"] is None
+    assert design_body["resumes"] == []
 
-    own_download = client.get(
+    denied_download = client.get(
         f"/api/v1/resumes/{engineering_resume_id}/file",
         headers={**engineering_headers, "User-Agent": "candidate-detail-test"},
+    )
+    assert denied_download.status_code == 403
+    denied_preview = client.get(
+        f"/api/v1/resumes/{engineering_resume_id}/preview",
+        headers={**engineering_headers, "User-Agent": "candidate-preview-test"},
+    )
+    assert denied_preview.status_code == 403
+    assert client.get("/api/v1/resumes", headers=engineering_headers).status_code == 403
+    assert (
+        client.get(f"/api/v1/resumes/{engineering_resume_id}", headers=engineering_headers)
+        .status_code
+        == 403
+    )
+
+    hr_headers = _headers(client, "hr")
+    own_download = client.get(
+        f"/api/v1/resumes/{engineering_resume_id}/file",
+        headers={**hr_headers, "User-Agent": "candidate-detail-test"},
     )
     assert own_download.status_code == 200
     assert own_download.content == engineering_bytes
@@ -432,7 +464,7 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
 
     own_preview = client.get(
         f"/api/v1/resumes/{engineering_resume_id}/preview",
-        headers={**engineering_headers, "User-Agent": "candidate-preview-test"},
+        headers={**hr_headers, "User-Agent": "candidate-preview-test"},
     )
     assert own_preview.status_code == 200
     assert own_preview.content == engineering_bytes
@@ -474,7 +506,7 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
 
     missing_preview = client.get(
         f"/api/v1/resumes/{missing_resume_id}/preview",
-        headers=engineering_headers,
+        headers=hr_headers,
     )
     assert missing_preview.status_code == 404
     assert missing_preview.json()["detail"] == "Stored resume file was not found"
@@ -487,7 +519,7 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
             )
         )
         assert download_audit is not None
-        assert download_audit.department_id == ids["engineering"]
+        assert download_audit.department_id is None
         assert download_audit.details["candidate_id"] == ids["alice"]
         assert download_audit.ip_address is not None
 
@@ -498,7 +530,7 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
             )
         )
         assert preview_audit is not None
-        assert preview_audit.department_id == ids["engineering"]
+        assert preview_audit.department_id is None
         assert preview_audit.details == {
             "candidate_id": ids["alice"],
             "target_requisition_id": ids["engineering_job"],
@@ -514,6 +546,69 @@ def test_manager_candidate_detail_is_department_scoped_and_resume_download_is_au
             )
             is None
         )
+
+
+def test_manager_cannot_read_unconfirmed_or_system_generated_resume_files(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    with testing_session() as db:
+        unconfirmed = ResumeFile(
+            candidate_id=ids["alice"],
+            target_requisition_id=ids["engineering_job"],
+            original_filename="unconfirmed-private.pdf",
+            storage_key="scoped/unconfirmed-private.pdf",
+            mime="application/pdf",
+            source_platform="direct",
+            source_review_required=False,
+            parse_status="parsed",
+            parsed_payload={"email": "alice@app.test", "description": "private prose"},
+            resume_text="private unconfirmed resume text",
+        )
+        generated = ResumeFile(
+            candidate_id=ids["alice"],
+            target_requisition_id=ids["engineering_job"],
+            original_filename="generated-profile.pdf",
+            storage_key="scoped/generated-profile.pdf",
+            mime="application/pdf",
+            source_platform="direct",
+            source_review_required=False,
+            parse_status="confirmed",
+            parsed_payload={
+                "_document_origin": "system_generated_profile",
+                "name": "Alice Applicant",
+                "email": "alice@app.test",
+                "phone": "0912-345-678",
+            },
+            resume_text="generated profile with direct identifiers",
+        )
+        db.add_all([unconfirmed, generated])
+        db.commit()
+        resume_ids = (unconfirmed.id, generated.id)
+
+    manager_headers = _headers(client, "engineering-manager")
+    assert client.get("/api/v1/resumes", headers=manager_headers).status_code == 403
+    for resume_id in resume_ids:
+        assert (
+            client.get(f"/api/v1/resumes/{resume_id}", headers=manager_headers).status_code
+            == 403
+        )
+        assert (
+            client.get(
+                f"/api/v1/resumes/{resume_id}/file", headers=manager_headers
+            ).status_code
+            == 403
+        )
+        assert (
+            client.get(
+                f"/api/v1/resumes/{resume_id}/preview", headers=manager_headers
+            ).status_code
+            == 403
+        )
+
+    hr_headers = _headers(client, "hr")
+    assert client.get(f"/api/v1/resumes/{resume_ids[0]}", headers=hr_headers).status_code == 200
+    assert client.get(f"/api/v1/resumes/{resume_ids[1]}", headers=hr_headers).status_code == 200
 
 
 def test_hr_assignment_returns_full_dto_and_rejects_duplicates(application_client) -> None:
@@ -719,14 +814,18 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         "/api/v1/resumes?include_confirmed=true",
         headers=_headers(client, "engineering-manager"),
     )
-    assert engineering_resumes.status_code == 200
-    assert reassigned_resume_ids.isdisjoint({item["id"] for item in engineering_resumes.json()})
+    assert engineering_resumes.status_code == 403
     design_resumes = client.get(
         "/api/v1/resumes?include_confirmed=true",
         headers=_headers(client, "design-manager"),
     )
-    assert design_resumes.status_code == 200
-    assert reassigned_resume_ids.issubset({item["id"] for item in design_resumes.json()})
+    assert design_resumes.status_code == 403
+    hr_resumes = client.get(
+        "/api/v1/resumes?include_confirmed=true",
+        headers=_headers(client, "hr"),
+    )
+    assert hr_resumes.status_code == 200
+    assert reassigned_resume_ids.issubset({item["id"] for item in hr_resumes.json()})
     for reassigned_resume_id in reassigned_resume_ids:
         assert client.get(
             f"/api/v1/resumes/{reassigned_resume_id}",
@@ -735,7 +834,7 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         assert client.get(
             f"/api/v1/resumes/{reassigned_resume_id}",
             headers=_headers(client, "design-manager"),
-        ).status_code == 200
+        ).status_code == 403
 
     engineering_candidates = client.get(
         "/api/v1/candidates",
@@ -847,8 +946,7 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         "/api/v1/resumes?include_confirmed=true",
         headers=_headers(client, "engineering-manager"),
     )
-    assert engineering_resumes.status_code == 200
-    assert reassigned_resume_ids.isdisjoint({item["id"] for item in engineering_resumes.json()})
+    assert engineering_resumes.status_code == 403
     for reassigned_resume_id in reassigned_resume_ids:
         assert client.get(
             f"/api/v1/resumes/{reassigned_resume_id}",

@@ -13,11 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models import Candidate, JobRequisition, ResumeFile
+from app.models import Candidate, ConsentNotice, JobRequisition, ResumeFile
 from app.repositories.recruitment import RecruitmentRepository
 from app.schemas.public import (
     PublicApplicationCreate,
     PublicApplicationResult,
+    PublicConsentNotice,
     PublicJob,
     PublicTalentPoolResult,
     PublicTalentProfileCreate,
@@ -28,9 +29,13 @@ from app.services.applications import (
     submit_application,
     sync_candidate_skills,
 )
+from app.services.consent import (
+    active_notice,
+    record_public_consent,
+    selected_active_notice,
+)
 from app.services.resume_parser import PARSER_VERSION, parse_resume
 from app.services.storage import prepare_resume_upload
-from app.services.talent_retention import candidate_retention_until
 
 router = APIRouter(prefix="/public")
 SourcePlatform = Literal["direct", "p104", "p1111", "generic"]
@@ -134,6 +139,20 @@ def _validate_public_phone(phone: str | None) -> None:
         raise HTTPException(status_code=422, detail="Invalid phone number")
 
 
+def _require_public_notice(
+    db: Session,
+    notice_id: int,
+    notice_version: int,
+) -> ConsentNotice:
+    notice = selected_active_notice(db, notice_id, notice_version)
+    if notice is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The consent notice has changed. Refresh and review the current notice.",
+        )
+    return notice
+
+
 def _save_talent_profile(
     db: Session,
     *,
@@ -144,6 +163,7 @@ def _save_talent_profile(
     current_title: str | None,
     total_years: float | None,
     skills: list[str],
+    consent_notice: ConsentNotice,
     commit: bool = True,
 ) -> tuple[Candidate, bool]:
     email_norm = normalize_email(email)
@@ -164,9 +184,6 @@ def _save_talent_profile(
             total_years=total_years,
             source="career_site",
             status="new",
-            consent_status="consented",
-            consent_at=now,
-            retention_until=candidate_retention_until(db, now),
         )
         db.add(candidate)
         db.flush()
@@ -181,6 +198,20 @@ def _save_talent_profile(
         candidate.total_years = (
             candidate.total_years if candidate.total_years is not None else total_years
         )
+    consent_result = record_public_consent(
+        db,
+        candidate,
+        consent_notice,
+        candidate_created=created,
+    )
+    if consent_result is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Existing candidate consent cannot be renewed through the anonymous "
+                "form; contact HR for a verified consent flow"
+            ),
+        )
     sync_candidate_skills(db, candidate, skills)
     if commit:
         db.commit()
@@ -193,6 +224,17 @@ def _save_talent_profile(
 @router.get("/jobs", response_model=list[PublicJob])
 def list_jobs(db: Session = Depends(get_db)) -> list[PublicJob]:
     return [to_public_job(job) for job in RecruitmentRepository(db).public_jobs()]
+
+
+@router.get("/consent-notices/active", response_model=PublicConsentNotice)
+def get_public_active_notice(db: Session = Depends(get_db)) -> ConsentNotice:
+    notice = active_notice(db)
+    if notice is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No active consent notice is available",
+        )
+    return notice
 
 
 @router.get("/jobs/{job_id}", response_model=PublicJob)
@@ -223,6 +265,8 @@ async def create_application(
     cover_letter: str | None = Form(None),
     source_platform: SourcePlatform = Form("direct"),
     consent: bool = Form(...),
+    consent_notice_id: int = Form(..., ge=1),
+    consent_notice_version: int = Form(..., ge=1),
     resume: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ) -> PublicApplicationResult | PublicTalentPoolResult:
@@ -240,6 +284,8 @@ async def create_application(
             cover_letter=cover_letter,
             source_platform=source_platform,
             consent=consent,
+            consent_notice_id=consent_notice_id,
+            consent_notice_version=consent_notice_version,
             resume=resume,
             db=db,
         )
@@ -262,20 +308,27 @@ async def create_application(
             portfolio_url=portfolio_url,
             cover_letter=cover_letter,
             consent=consent,
+            consent_notice_id=consent_notice_id,
+            consent_notice_version=consent_notice_version,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
     _validate_public_phone(payload.phone)
+    consent_notice = _require_public_notice(
+        db,
+        payload.consent_notice_id,
+        payload.consent_notice_version,
+    )
 
     if resume is None:
-        return submit_application(db, payload)
+        return submit_application(db, payload, consent_notice)
 
     prepared = await prepare_resume_upload(resume)
     upload_data = prepared.upload_data
     try:
         stored_path = prepared.promote()
-        result = submit_application(db, payload, upload_data)
+        result = submit_application(db, payload, consent_notice, upload_data)
         stored = db.scalar(
             select(ResumeFile).where(ResumeFile.storage_key == upload_data.storage_key)
         )
@@ -312,6 +365,8 @@ async def join_talent_pool(
     cover_letter: str | None = Form(None),
     source_platform: SourcePlatform = Form("direct"),
     consent: bool = Form(...),
+    consent_notice_id: int = Form(..., ge=1),
+    consent_notice_version: int = Form(..., ge=1),
     resume: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ) -> PublicTalentPoolResult:
@@ -335,10 +390,17 @@ async def join_talent_pool(
             total_years=total_years,
             skills=submitted_skills,
             consent=consent,
+            consent_notice_id=consent_notice_id,
+            consent_notice_version=consent_notice_version,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
     _validate_public_phone(profile.phone)
+    consent_notice = _require_public_notice(
+        db,
+        profile.consent_notice_id,
+        profile.consent_notice_version,
+    )
     if resume is None:
         candidate, created = _save_talent_profile(
             db,
@@ -349,6 +411,7 @@ async def join_talent_pool(
             current_title=current_title,
             total_years=total_years,
             skills=submitted_skills,
+            consent_notice=consent_notice,
         )
         return PublicTalentPoolResult(
             candidate_id=candidate.id,
@@ -368,6 +431,7 @@ async def join_talent_pool(
             current_title=current_title,
             total_years=total_years,
             skills=submitted_skills,
+            consent_notice=consent_notice,
             commit=False,
         )
         existing = db.scalar(
@@ -454,6 +518,11 @@ def join_talent_pool_json(
     payload: PublicTalentProfileCreate,
     db: Session = Depends(get_db),
 ) -> PublicTalentPoolResult:
+    consent_notice = _require_public_notice(
+        db,
+        payload.consent_notice_id,
+        payload.consent_notice_version,
+    )
     candidate, created = _save_talent_profile(
         db,
         name=payload.name,
@@ -463,6 +532,7 @@ def join_talent_pool_json(
         current_title=payload.current_title,
         total_years=payload.total_years,
         skills=payload.skills,
+        consent_notice=consent_notice,
     )
     return PublicTalentPoolResult(
         candidate_id=candidate.id,
@@ -480,7 +550,12 @@ def create_application_json(
     payload: PublicApplicationCreate, db: Session = Depends(get_db)
 ) -> PublicApplicationResult:
     try:
-        return submit_application(db, payload)
+        consent_notice = _require_public_notice(
+            db,
+            payload.consent_notice_id,
+            payload.consent_notice_version,
+        )
+        return submit_application(db, payload, consent_notice)
     except Exception:
         db.rollback()
         raise

@@ -17,13 +17,13 @@ from app.models import (
     User,
 )
 from app.schemas.hr import (
-    CandidateRead,
     DepartmentApplicantRead,
     DepartmentJobWorkspaceRead,
     DepartmentRequisitionCreate,
     DepartmentWorkspaceRead,
     RequisitionRead,
 )
+from app.services.candidate_privacy import candidate_read_for_user
 from app.services.security import write_audit
 
 router = APIRouter(prefix="/department")
@@ -250,7 +250,7 @@ def department_workspace(
                     applied_at=application.created_at,
                     match_score=float(match.total_score) if match else None,
                     match_status=match.status if match else None,
-                    candidate=CandidateRead.model_validate(candidate),
+                    candidate=candidate_read_for_user(candidate, user),
                 )
             )
 

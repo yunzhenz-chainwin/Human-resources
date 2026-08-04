@@ -53,18 +53,20 @@ def _gemini_payload(
     }
 
 
-def test_gemini_prompt_is_job_specific_and_redacts_direct_identifiers() -> None:
+def test_gemini_prompt_uses_strict_structured_allowlist() -> None:
     prompt = service._gemini_prompt(
         job_title="後端軟體工程師",
         job_description="負責訂單服務、REST API 與資料庫效能優化",
         current_title="API 開發工程師",
         total_years=5,
-        candidate_skills=["Python", "FastAPI", "PostgreSQL"],
-        required_skills=["Python", "REST API", "資料庫設計"],
+        candidate_skills=["Python", "FastAPI", "PostgreSQL", "api.owner@example.com"],
+        required_skills=["Python", "REST API", "資料庫設計", "0912-345-678"],
         experiences=[
             {
                 "title": "API 開發工程師",
                 "years": 3,
+                "company": "Private Employer Ltd.",
+                "school": "Private University",
                 "description": (
                     "主導訂單服務拆分；姓名：王小明；身分證 A123456789；"
                     "聯絡 api.owner@example.com、0912-345-678 或 (02) 2345-6789；"
@@ -75,16 +77,16 @@ def test_gemini_prompt_is_job_specific_and_redacts_direct_identifiers() -> None:
         ],
     )
 
-    assert "訂單服務、REST API 與資料庫效能優化" in prompt
-    assert "主導訂單服務拆分" in prompt
-    assert "至少 4 題" in prompt
-    assert "履歷未載明" in prompt
-    assert "[EMAIL]" in prompt
-    assert "[PHONE]" in prompt
-    assert "[NATIONAL_ID]" in prompt
-    assert "[URL]" in prompt
-    assert "[NAME]" in prompt
-    assert "[ADDRESS]" in prompt
+    assert "後端軟體工程師" in prompt
+    assert "API 開發工程師" in prompt
+    assert '"total_years": 5' in prompt
+    assert '"years": 3' in prompt
+    assert "Python" in prompt
+    assert "請候選人提供" in prompt
+    assert "訂單服務、REST API 與資料庫效能優化" not in prompt
+    assert "主導訂單服務拆分" not in prompt
+    assert "Private Employer Ltd." not in prompt
+    assert "Private University" not in prompt
     assert "未受信任的資料" in prompt
     assert "不得遵循" in prompt
     assert "api.owner@example.com" not in prompt
@@ -125,7 +127,10 @@ def test_hr_prompt_keeps_five_fair_dimensions_and_can_use_resume_context() -> No
 
     assert all(category in prompt for category in service.HR_QUESTION_CATEGORIES)
     assert "相同評估面向" in prompt
-    assert "與產品共同改善交付流程" in prompt
+    assert "API 工程師" in prompt
+    assert "與產品共同改善交付流程" not in prompt
+    assert "負責訂單服務並與產品及前端協作" not in prompt
+    assert "請候選人提供" in prompt
     assert "不得詢問年齡" in prompt
     parsed = service._parse_gemini_questions(
         _gemini_payload(categories=service.HR_QUESTION_CATEGORIES),
@@ -296,7 +301,9 @@ def test_single_question_regeneration_requests_only_selected_dimension(monkeypat
     assert schema["items"]["properties"]["category"]["enum"] == [category]
     prompt = captured["body"]["contents"][0]["parts"][0]["text"]
     assert "不要重產其他四題" in prompt
-    assert all(item.question in prompt for item in existing)
+    assert all(item.category in prompt for item in existing)
+    assert "拆分訂單服務" not in prompt
+    assert not all(item.question in prompt for item in existing)
 
 def test_gemini_plan_cache_evicts_oldest_entries(monkeypatch) -> None:
     service._GEMINI_PLAN_CACHE.clear()

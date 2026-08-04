@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { createApplication, getJob, getJobs } from './api'
-import type { ApplicationForm, Job } from './types'
+import { createApplication, getActiveConsentNotice, getJob, getJobs } from './api'
+import type { ApplicationForm, ConsentNotice, Job } from './types'
 
 type View = 'home' | 'jobs' | 'detail' | 'apply' | 'success'
 type JourneyAction = 'jobs' | 'talent'
@@ -20,8 +20,11 @@ interface JourneyStep {
   compactY: number
 }
 
-// 暫時只開放『加入人才庫』；改回 false 即恢復職缺瀏覽等頁面
-const PUBLIC_ONLY_APPLY: boolean = true
+// 預設只開放「加入人才庫」；VITE_PUBLIC_ONLY_APPLY=false 可恢復職缺頁面。
+const PUBLIC_ONLY_APPLY = !['false', '0', 'no', 'off'].includes(
+  String(import.meta.env.VITE_PUBLIC_ONLY_APPLY ?? 'true').trim().toLowerCase(),
+)
+const careersEmail = String(import.meta.env.VITE_CAREERS_EMAIL ?? '').trim()
 
 const view = ref<View>('apply')
 const jobs = ref<Job[]>([])
@@ -35,6 +38,9 @@ const submitting = ref(false)
 const submitError = ref('')
 const fileError = ref('')
 const contactError = ref('')
+const consentNotice = ref<ConsentNotice | null>(null)
+const consentLoading = ref(false)
+const consentError = ref('')
 const resultId = ref<number | undefined>()
 const fileInput = ref<HTMLInputElement | null>(null)
 const MAX_FILE_SIZE = 10 * 1024 * 1024
@@ -152,6 +158,21 @@ async function loadJobs() {
   finally { loading.value = false }
 }
 
+async function loadConsentNotice() {
+  consentLoading.value = true
+  consentError.value = ''
+  try {
+    consentNotice.value = await getActiveConsentNotice()
+  } catch (cause) {
+    consentNotice.value = null
+    consentError.value = cause instanceof Error
+      ? cause.message
+      : '目前無法取得個資告知事項，請稍後再試。'
+  } finally {
+    consentLoading.value = false
+  }
+}
+
 function go(next: View) {
   // 旗標開啟時，導向被隱藏的頁面（home／jobs／detail）一律回到『加入人才庫』
   const target: View = PUBLIC_ONLY_APPLY && next !== 'apply' && next !== 'success' ? 'apply' : next
@@ -231,14 +252,26 @@ async function submit() {
     contactError.value = 'Email 或手機請至少填寫一項，方便 HR 與你聯絡。'
     return
   }
+  if (!consentNotice.value) {
+    submitError.value = consentError.value || '目前無法取得個資告知事項，請稍後再試。'
+    return
+  }
   submitError.value = ''
   submitting.value = true
+  const submittedNotice = consentNotice.value
   try {
-    const response = await createApplication(form.value, resume.value)
+    const response = await createApplication(form.value, resume.value, submittedNotice)
     resultId.value = response.application_id || response.candidate_id || response.resume_id
     go('success')
   } catch (cause) {
-    submitError.value = cause instanceof Error ? cause.message : '送出失敗，請稍後再試。'
+    await loadConsentNotice()
+    if (consentNotice.value && (consentNotice.value.id !== submittedNotice.id
+      || consentNotice.value.version !== submittedNotice.version)) {
+      form.value.consent = false
+      submitError.value = '個資告知事項已更新，請閱讀新版內容並重新勾選同意。'
+    } else {
+      submitError.value = cause instanceof Error ? cause.message : '送出失敗，請稍後再試。'
+    }
   } finally {
     submitting.value = false
   }
@@ -247,7 +280,7 @@ async function submit() {
 onMounted(async () => {
   compactJourney.value = window.matchMedia('(max-width: 600px)').matches
   window.addEventListener('resize', syncJourneyLayout)
-  await loadJobs()
+  await Promise.all([loadJobs(), loadConsentNotice()])
   const jobId = new URLSearchParams(window.location.search).get('job_id')
   if (!jobId) return
   const job = jobs.value.find(item => String(item.id) === jobId)
@@ -266,7 +299,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', syncJourneyLayout))
   <header class="site-header">
     <button class="brand" @click="go(PUBLIC_ONLY_APPLY ? 'apply' : 'home')" :aria-label="PUBLIC_ONLY_APPLY ? '加入人才庫' : '回到首頁'">
       <span class="brand-mark">T</span>
-      <span>TalentBridge<small>CAREERS</small></span>
+      <span>TalentHub<small>CAREERS</small></span>
     </button>
     <nav aria-label="主要導覽">
       <button v-if="!PUBLIC_ONLY_APPLY" @click="go('jobs')">查看職缺</button>
@@ -290,7 +323,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', syncJourneyLayout))
             role="img"
             aria-labelledby="journey-map-title journey-map-description"
           >
-            <title id="journey-map-title">TalentBridge 求職旅程</title>
+            <title id="journey-map-title">TalentHub 求職旅程</title>
             <desc id="journey-map-description">依序經過探索機會、留下資料、HR 媒合與展開對話四個階段。</desc>
             <path class="journey-road-halo" :d="journeyRoadPath" fill="none" />
             <path class="journey-road" :d="journeyRoadPath" fill="none" />
@@ -385,9 +418,21 @@ onBeforeUnmount(() => window.removeEventListener('resize', syncJourneyLayout))
             <label class="upload" :class="{ chosen: resume }"><input ref="fileInput" aria-label="履歷檔案" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" @change="selectResume"><span class="upload-icon">↑</span><b>{{ resume ? resume.name : '有履歷再上傳即可' }}</b><small>可不提供；若上傳，支援 PDF、DOC、DOCX，最大 10 MB</small></label>
             <p v-if="fileError" class="field-error" role="alert">{{ fileError }}</p>
           </section>
-          <label class="consent"><input v-model="form.consent" type="checkbox" required><span>我同意 TalentBridge 蒐集與使用上述資料及履歷，作為招募聯繫與人才媒合用途。 *</span></label>
+          <div v-if="consentLoading" class="consent-state" role="status">正在載入個資告知事項…</div>
+          <div v-else-if="consentError" class="consent-state error" role="alert">
+            <span>{{ consentError }}</span>
+            <button class="text-button" type="button" @click="loadConsentNotice">重新載入</button>
+          </div>
+          <label v-else-if="consentNotice" class="consent">
+            <input v-model="form.consent" type="checkbox" required>
+            <span>
+              <strong>{{ consentNotice.title }}（版本 {{ consentNotice.version }}）</strong>
+              <span class="consent-body">{{ consentNotice.body }}</span>
+              <span>我已閱讀並同意上述告知事項。 *</span>
+            </span>
+          </label>
           <div v-if="submitError" class="submit-error" role="alert"><strong>尚未送出</strong><span>{{ submitError }}</span></div>
-          <button class="primary submit" :disabled="submitting" type="submit"><span v-if="submitting" class="button-spinner"></span>{{ submitting ? '正在送出…' : (selectedJob ? '送出應徵' : '加入人才庫') }}</button>
+          <button class="primary submit" :disabled="submitting || !consentNotice" type="submit"><span v-if="submitting" class="button-spinner"></span>{{ submitting ? '正在送出…' : (selectedJob ? '送出應徵' : '加入人才庫') }}</button>
           <p class="privacy-note">送出前請確認聯絡資料正確。成功後畫面會顯示完成通知。</p>
         </form>
       </section>
@@ -398,5 +443,5 @@ onBeforeUnmount(() => window.removeEventListener('resize', syncJourneyLayout))
     </template>
   </main>
 
-  <footer v-if="view !== 'home'"><div><strong>TalentBridge Careers</strong><p>讓合適的人才，遇見合適的機會。</p></div><a href="mailto:careers@talentbridge.tw">careers@talentbridge.tw</a></footer>
+  <footer v-if="view !== 'home'"><div><strong>TalentHub Careers</strong><p>讓合適的人才，遇見合適的機會。</p></div><a v-if="careersEmail" :href="`mailto:${careersEmail}`">{{ careersEmail }}</a></footer>
 </template>
