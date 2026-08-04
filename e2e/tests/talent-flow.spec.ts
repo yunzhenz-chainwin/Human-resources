@@ -462,13 +462,13 @@ test.describe.serial('public submission to HR review', () => {
     await expect(hrApplicationCard).toContainText('HR 已確認技術面試，請主管參與。')
     await expect(hrApplicationCard).toContainText(legacyHrQuestion)
 
-    const hrQuestionGenerated = page.waitForResponse(response => (
-      response.url().includes(`/api/v1/applications/${application.id}/interview-question-plan/generate`)
+    const hrQuestionRegenerated = page.waitForResponse(response => (
+      response.url().includes(`/api/v1/applications/${application.id}/interview-question-plan/questions/0/regenerate`)
       && response.url().includes('stage=hr')
       && response.request().method() === 'POST'
     ))
-    await hrApplicationCard.getByTestId(`question-plan-generate-${application.id}-hr`).click()
-    const hrQuestionResponse = await hrQuestionGenerated
+    await hrApplicationCard.getByTestId(`question-regenerate-${application.id}-hr-0`).click()
+    const hrQuestionResponse = await hrQuestionRegenerated
     expect(hrQuestionResponse.status()).toBe(200)
     const generatedHrPlan = await hrQuestionResponse.json() as {
       questions: Array<{ question: string }>
@@ -529,6 +529,25 @@ test.describe.serial('public submission to HR review', () => {
     await managerApplicationCard.getByTestId(`question-plan-generate-${application.id}-manager`).click()
     expect((await managerQuestionGenerated).status()).toBe(200)
     await expect(managerApplicationCard.locator('.question-preview-list li')).toHaveCount(5)
+    const managerQuestionsBefore = await managerApplicationCard.locator('.question-preview-list li strong').allTextContents()
+    const managerQuestionRegenerated = page.waitForResponse(response => (
+      response.url().includes(`/api/v1/applications/${application.id}/interview-question-plan/questions/1/regenerate`)
+      && response.url().includes('stage=manager')
+      && response.request().method() === 'POST'
+    ))
+    await managerApplicationCard.getByTestId(`question-regenerate-${application.id}-manager-1`).click()
+    const managerRegeneratedResponse = await managerQuestionRegenerated
+    expect(managerRegeneratedResponse.status()).toBe(200)
+    const managerRegeneratedPlan = await managerRegeneratedResponse.json() as {
+      questions: Array<{ question: string }>
+      version: number
+    }
+    expect(managerRegeneratedPlan.version).toBe(2)
+    expect(managerRegeneratedPlan.questions[1].question).not.toBe(managerQuestionsBefore[1])
+    expect(managerRegeneratedPlan.questions.filter((_, index) => index !== 1).map(item => item.question)).toEqual(
+      managerQuestionsBefore.filter((_, index) => index !== 1),
+    )
+    await expect(managerApplicationCard).toContainText('題目版本 v2')
     await managerApplicationCard.getByTestId(`interview-edit-${application.id}-manager`).click()
     const managerInterviewForm = managerApplicationCard.getByTestId(`interview-form-${application.id}-manager`)
     await managerInterviewForm.getByTestId('interview-at-input').fill('2026-08-21T10:00')

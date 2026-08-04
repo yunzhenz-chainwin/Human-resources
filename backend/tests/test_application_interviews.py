@@ -20,6 +20,7 @@ from app.models import (
     CandidateExperience,
     CandidateSkill,
     Department,
+    InterviewQuestionPlan,
     InterviewRecord,
     JobApplication,
     JobRequisition,
@@ -1517,6 +1518,128 @@ def test_hr_and_manager_have_independent_five_question_versions(
         ).status_code
         == 422
     )
+
+
+def test_single_question_regeneration_preserves_other_four_and_old_versions(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    application_id = ids["engineering_application"]
+    manager_headers = _headers(client, "engineering-manager")
+
+    initial_response = client.post(
+        f"/api/v1/applications/{application_id}/interview-question-plan/generate",
+        headers=manager_headers,
+    )
+    assert initial_response.status_code == 200, initial_response.text
+    initial = initial_response.json()
+    selected_index = 2
+
+    regenerated_response = client.post(
+        f"/api/v1/applications/{application_id}/interview-question-plan/questions/"
+        f"{selected_index}/regenerate?stage=manager",
+        headers=manager_headers,
+    )
+    assert regenerated_response.status_code == 200, regenerated_response.text
+    regenerated = regenerated_response.json()
+    assert regenerated["version"] == 2
+    assert regenerated["id"] != initial["id"]
+    assert len(regenerated["questions"]) == 5
+    assert [item["category"] for item in regenerated["questions"]] == [
+        item["category"] for item in initial["questions"]
+    ]
+    for index in range(5):
+        if index == selected_index:
+            assert (
+                regenerated["questions"][index]["question"]
+                != initial["questions"][index]["question"]
+            )
+        else:
+            assert regenerated["questions"][index] == initial["questions"][index]
+    assert any("其餘四題沿用" in item for item in regenerated["personalization_basis"])
+
+    second_response = client.post(
+        f"/api/v1/applications/{application_id}/interview-question-plan/questions/"
+        f"{selected_index}/regenerate?stage=manager",
+        headers=manager_headers,
+    )
+    assert second_response.status_code == 200, second_response.text
+    second = second_response.json()
+    assert second["version"] == 3
+    assert (
+        second["questions"][selected_index]["question"]
+        != regenerated["questions"][selected_index]["question"]
+    )
+    assert [
+        item for index, item in enumerate(second["questions"]) if index != selected_index
+    ] == [
+        item for index, item in enumerate(regenerated["questions"]) if index != selected_index
+    ]
+
+    with testing_session() as db:
+        stored = list(
+            db.scalars(
+                select(InterviewQuestionPlan)
+                .where(
+                    InterviewQuestionPlan.application_id == application_id,
+                    InterviewQuestionPlan.stage == "manager",
+                )
+                .order_by(InterviewQuestionPlan.version)
+            ).all()
+        )
+        assert [plan.version for plan in stored] == [1, 2, 3]
+        assert (
+            stored[0].questions[selected_index]["question"]
+            == initial["questions"][selected_index]["question"]
+        )
+        audit = db.scalar(
+            select(AuditLog)
+            .where(AuditLog.action == "application.interview_question_plan.generate")
+            .order_by(AuditLog.id.desc())
+        )
+        assert audit is not None
+        assert audit.details["question_index"] == selected_index
+        assert (
+            audit.details["question_category"]
+            == initial["questions"][selected_index]["category"]
+        )
+
+    no_initial_plan = client.post(
+        f"/api/v1/applications/{ids['design_application']}/interview-question-plan/"
+        "questions/0/regenerate?stage=manager",
+        headers=_headers(client, "design-manager"),
+    )
+    assert no_initial_plan.status_code == 409
+    assert client.post(
+        f"/api/v1/applications/{application_id}/interview-question-plan/questions/5/"
+        "regenerate?stage=manager",
+        headers=manager_headers,
+    ).status_code == 422
+    assert client.post(
+        f"/api/v1/applications/{application_id}/interview-question-plan/questions/0/"
+        "regenerate?stage=hr",
+        headers=manager_headers,
+    ).status_code == 403
+    assert client.post(
+        f"/api/v1/applications/{application_id}/interview-question-plan/questions/0/"
+        "regenerate?stage=manager",
+        headers=_headers(client, "admin"),
+    ).status_code == 403
+
+    default_hr = client.get(
+        f"/api/v1/applications/{application_id}/interview-question-plan?stage=hr",
+        headers=_headers(client, "hr"),
+    ).json()
+    regenerated_hr_response = client.post(
+        f"/api/v1/applications/{application_id}/interview-question-plan/questions/0/"
+        "regenerate?stage=hr",
+        headers=_headers(client, "hr"),
+    )
+    assert regenerated_hr_response.status_code == 200, regenerated_hr_response.text
+    regenerated_hr = regenerated_hr_response.json()
+    assert regenerated_hr["version"] == 1
+    assert regenerated_hr["questions"][0]["question"] != default_hr["questions"][0]["question"]
+    assert regenerated_hr["questions"][1:] == default_hr["questions"][1:]
 
 
 def test_interview_record_is_linked_to_exact_question_plan_version(

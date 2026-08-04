@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -36,11 +36,14 @@ from app.schemas.interviews import (
     InterviewStage,
 )
 from app.services.interview_questions import (
+    HR_QUESTION_CATEGORIES,
     HR_QUESTION_PROMPT_VERSION,
+    MANAGER_QUESTION_CATEGORIES,
     MANAGER_QUESTION_PROMPT_VERSION,
     annotate_question_compliance,
     gemini_hr_question_plan,
     gemini_manager_question_plan,
+    gemini_question_replacement,
     personalized_trait_interview_questions,
     standard_hr_question_plan,
 )
@@ -326,7 +329,7 @@ def _stored_plan_response(
         personalization_basis=plan.personalization_basis,
         guidance=(
             f"已載入保存的{'HR' if stage == 'hr' else '主管'}五題；"
-            "重新整理不會再次呼叫 AI，不滿意可建立新版本。"
+            "重新整理不會再次呼叫 AI；可只重新產生不適合的單一題目。"
         ),
         generation_mode=plan.generation_mode,
         generation_warning=plan.generation_warning,
@@ -351,6 +354,7 @@ def _generate_question_plan_locked(
     candidate: Candidate,
     stage: InterviewStage,
     force: bool,
+    question_index: int | None = None,
 ) -> InterviewQuestionPlanResponse:
     # PostgreSQL row locks protect against duplicate API calls across workers.
     # SQLite ignores FOR UPDATE, so the fixed in-process locks remain necessary.
@@ -364,7 +368,12 @@ def _generate_question_plan_locked(
     skills, experiences = _candidate_resume_context(db, candidate.id)
     context_hash = _question_context_hash(candidate, requisition, skills, experiences, stage)
     latest = _latest_question_plan(db, application.id, stage)
-    if latest is not None and latest.context_hash == context_hash and not force:
+    if (
+        question_index is None
+        and latest is not None
+        and latest.context_hash == context_hash
+        and not force
+    ):
         return _stored_plan_response(application, requisition, latest, context_hash, stage)
 
     settings = get_settings()
@@ -388,17 +397,69 @@ def _generate_question_plan_locked(
                 headers={"Retry-After": str(retry_after)},
             )
 
-    generator = gemini_hr_question_plan if stage == "hr" else gemini_manager_question_plan
-    questions, basis, generation_mode, token_usage = generator(
-        job_title=requisition.title,
-        job_description=requisition.jd,
-        current_title=candidate.current_title,
-        total_years=candidate.total_years,
-        candidate_skills=skills,
-        required_skills=requisition.skills or [],
-        experiences=experiences,
-        bypass_cache=force,
-    )
+    next_version = (latest.version + 1) if latest else 1
+    regenerated_category: str | None = None
+    if question_index is None:
+        generator = gemini_hr_question_plan if stage == "hr" else gemini_manager_question_plan
+        questions, basis, generation_mode, token_usage = generator(
+            job_title=requisition.title,
+            job_description=requisition.jd,
+            current_title=candidate.current_title,
+            total_years=candidate.total_years,
+            candidate_skills=skills,
+            required_skills=requisition.skills or [],
+            experiences=experiences,
+            bypass_cache=force,
+        )
+    else:
+        if latest is not None:
+            base_questions = annotate_question_compliance(
+                [
+                    InterviewQuestionPlanItem.model_validate(item)
+                    for item in latest.questions
+                ]
+            )
+        elif stage == "hr":
+            base_questions = standard_hr_question_plan()
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Generate the initial five manager questions before regenerating "
+                    "one question"
+                ),
+            )
+
+        expected_categories = (
+            HR_QUESTION_CATEGORIES if stage == "hr" else MANAGER_QUESTION_CATEGORIES
+        )
+        if (
+            len(base_questions) != 5
+            or tuple(item.category for item in base_questions) != expected_categories
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "The current interview question plan is not eligible for "
+                    "single-question regeneration"
+                ),
+            )
+        regenerated_category = base_questions[question_index].category
+        replacement, basis, generation_mode, token_usage = gemini_question_replacement(
+            stage=stage,
+            category=regenerated_category,
+            existing_questions=base_questions,
+            job_title=requisition.title,
+            job_description=requisition.jd,
+            current_title=candidate.current_title,
+            total_years=candidate.total_years,
+            candidate_skills=skills,
+            required_skills=requisition.skills or [],
+            experiences=experiences,
+            variant_seed=next_version,
+        )
+        questions = list(base_questions)
+        questions[question_index] = replacement
     warning_by_marker = {
         "GEMINI_QUOTA_EXCEEDED": (
             "Gemini API 已達目前使用上限，暫時改用規則式備援題目；"
@@ -409,7 +470,9 @@ def _generate_question_plan_locked(
             "請由系統管理員確認 GEMINI_MODEL 設定。"
         ),
         "GEMINI_INVALID_RESPONSE": (
-            "Gemini 有回覆，但未產生完整的五個客製化評估面向，已改用規則式備援題目。"
+            "Gemini 有回覆，但未產生有效且不重複的"
+            f"{'單題' if question_index is not None else '五個客製化評估面向'}，"
+            "已改用規則式備援題目。"
         ),
         "GEMINI_SERVICE_UNAVAILABLE": (
             "Gemini 目前無法連線或服務異常，已改用規則式備援題目，稍後可重新產生。"
@@ -420,7 +483,6 @@ def _generate_question_plan_locked(
         None,
     )
     visible_basis = [item for item in basis if item not in warning_by_marker]
-    next_version = (latest.version + 1) if latest else 1
     plan = InterviewQuestionPlan(
         application_id=application.id,
         stage=stage,
@@ -455,6 +517,8 @@ def _generate_question_plan_locked(
                 "version": plan.version,
                 "generation_mode": generation_mode,
                 "force": force,
+                "question_index": question_index,
+                "question_category": regenerated_category,
                 "total_tokens": token_usage.total_tokens,
             },
         )
@@ -529,6 +593,35 @@ def generate_interview_question_plan(
             candidate=candidate,
             stage=stage,
             force=force,
+        )
+
+
+@router.post(
+    "/{application_id}/interview-question-plan/questions/{question_index}/regenerate",
+    response_model=InterviewQuestionPlanResponse,
+)
+def regenerate_interview_question(
+    application_id: int,
+    question_index: int = Path(ge=0, le=4),
+    stage: InterviewStage = Query(),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_user),
+) -> InterviewQuestionPlanResponse:
+    application, requisition = _application_requisition(db, application_id, user)
+    candidate = db.get(Candidate, application.candidate_id)
+    if candidate is None or candidate.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    _enforce_question_plan_generate(user, stage)
+    with _question_generation_scope(application.id, stage, user.id):
+        return _generate_question_plan_locked(
+            db=db,
+            user=user,
+            application=application,
+            requisition=requisition,
+            candidate=candidate,
+            stage=stage,
+            force=True,
+            question_index=question_index,
         )
 
 

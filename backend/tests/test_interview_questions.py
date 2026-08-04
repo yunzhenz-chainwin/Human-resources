@@ -229,6 +229,75 @@ def test_gemini_generation_uses_structured_schema_and_key_header(monkeypatch) ->
     assert captured["call_count"] == 2
 
 
+def test_single_question_regeneration_requests_only_selected_dimension(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+    category = "專業能力"
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return _gemini_payload(categories=(category,))
+
+    class FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def post(self, endpoint: str, *, json: dict[str, Any], headers: dict[str, str]):
+            captured.update(endpoint=endpoint, body=json, headers=headers)
+            return FakeResponse()
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "gemini_enabled", True)
+    monkeypatch.setattr(settings, "gemini_api_key", "single-question-test-key")
+    monkeypatch.setattr(settings, "gemini_model", "gemini-3.6-flash")
+    monkeypatch.setattr(settings, "gemini_timeout_seconds", 45.0)
+    monkeypatch.setattr(settings, "gemini_max_output_tokens", 4096)
+    monkeypatch.setattr(service.httpx, "Client", FakeClient)
+    monkeypatch.setattr(service, "_GEMINI_QUOTA_COOLDOWN_UNTIL", 0.0)
+
+    existing, _ = service.personalized_manager_question_plan(
+        job_title="後端軟體工程師",
+        current_title="API 開發工程師",
+        candidate_skills=["Python"],
+        required_skills=["Python", "PostgreSQL"],
+        experiences=[{"title": "API 工程師", "description": "拆分訂單服務"}],
+    )
+    replacement, basis, mode, usage = service.gemini_question_replacement(
+        stage="manager",
+        category=category,
+        existing_questions=existing,
+        job_title="後端軟體工程師",
+        job_description="負責訂單 API 與資料庫設計",
+        current_title="API 開發工程師",
+        candidate_skills=["Python"],
+        required_skills=["Python", "PostgreSQL"],
+        experiences=[{"title": "API 工程師", "description": "拆分訂單服務"}],
+        variant_seed=2,
+    )
+
+    assert mode == "gemini"
+    assert replacement.category == category
+    assert replacement.question not in {item.question for item in existing}
+    assert any("單題重新產生" in item for item in basis)
+    assert usage.total_tokens == 1740
+    schema = captured["body"]["generationConfig"]["responseJsonSchema"]
+    assert schema["minItems"] == 1
+    assert schema["maxItems"] == 1
+    assert schema["items"]["properties"]["category"]["enum"] == [category]
+    prompt = captured["body"]["contents"][0]["parts"][0]["text"]
+    assert "不要重產其他四題" in prompt
+    assert all(item.question in prompt for item in existing)
+
 def test_gemini_plan_cache_evicts_oldest_entries(monkeypatch) -> None:
     service._GEMINI_PLAN_CACHE.clear()
     monkeypatch.setattr(service, "_GEMINI_PLAN_CACHE_MAX_ENTRIES", 3)

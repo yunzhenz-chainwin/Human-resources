@@ -64,6 +64,7 @@ const recordEditorOpen = ref(false)
 const questionSuggestions = ref<InterviewQuestionSuggestions | null>(null)
 const questionLoading = ref(false)
 const questionPlanGenerating = ref<Record<string, boolean>>({})
+const questionRegenerating = ref<Record<string, boolean>>({})
 const cardInterviewErrors = ref<Record<number, string>>({})
 const cardQuestionErrors = ref<Record<string, string>>({})
 const recordsByApplication = ref<Record<number, InterviewRecordDto[]>>({})
@@ -451,6 +452,10 @@ function planKey(applicationId: number, stage: InterviewStage) {
   return `${applicationId}:${stage}`
 }
 
+function questionRegenerationKey(applicationId: number, stage: InterviewStage, questionIndex: number) {
+  return `${planKey(applicationId, stage)}:${questionIndex}`
+}
+
 function sortInterviewRecords(records: InterviewRecordDto[]) {
   return [...records].sort((left, right) => (
     parseApiDateTime(right.interviewed_at).getTime() - parseApiDateTime(left.interviewed_at).getTime()
@@ -567,6 +572,92 @@ async function generateQuestionPlan(
   }
 }
 
+async function regenerateQuestionPlanItem(
+  application: ApplicationDto,
+  stage: InterviewStage,
+  questionIndex: number,
+) {
+  const key = planKey(application.id, stage)
+  const itemKey = questionRegenerationKey(application.id, stage, questionIndex)
+  const currentPlan = plansByApplicationStage.value[key]
+  const originalQuestion = currentPlan?.questions[questionIndex]
+  if (!originalQuestion || questionPlanGenerating.value[key]) return
+  if (!canGenerateQuestionStage(stage)) {
+    cardQuestionErrors.value = {
+      ...cardQuestionErrors.value,
+      [key]: stage === 'hr' ? '只有 HR 能重新產生 HR 題目' : '只有部門主管能重新產生主管題目',
+    }
+    return
+  }
+
+  questionPlanGenerating.value = { ...questionPlanGenerating.value, [key]: true }
+  questionRegenerating.value = { ...questionRegenerating.value, [itemKey]: true }
+  cardQuestionErrors.value = { ...cardQuestionErrors.value, [key]: '' }
+  if (workspaceApplication.value?.id === application.id && workspaceQuestionStage.value === stage) {
+    workspaceError.value = ''
+  }
+  try {
+    const plan = (await hrApi.regenerateInterviewQuestion(
+      application.id,
+      stage,
+      questionIndex,
+    )).data
+    plansByApplicationStage.value = {
+      ...plansByApplicationStage.value,
+      [key]: plan,
+    }
+
+    const replacement = plan.questions[questionIndex]
+    const inCurrentWorkspace = workspaceApplication.value?.id === application.id
+      && recordEditorOpen.value
+      && recordForm.stage === stage
+    if (inCurrentWorkspace && replacement) {
+      if (editingRecord.value) {
+        recordNotice.value = `第 ${questionIndex + 1} 題已建立新版；既有面試紀錄與回答維持原題。`
+      } else {
+        const draftQuestion = recordForm.questions[questionIndex]
+        const targetHasProgress = Boolean(
+          draftQuestion?.response?.trim()
+          || draftQuestion?.notes?.trim()
+          || (draftQuestion?.rating !== null && draftQuestion?.rating !== undefined),
+        )
+        const targetWasEdited = !draftQuestion || draftQuestion.question !== originalQuestion.question
+        if (draftQuestion && !targetHasProgress && !targetWasEdited) {
+          recordForm.question_plan_id = plan.id ?? null
+          recordForm.questions[questionIndex] = {
+            ...draftQuestion,
+            question: replacement.question,
+            trait: replacement.category,
+            purpose: replacement.purpose,
+            follow_up: replacement.follow_up,
+            source: replacement.source,
+          }
+          recordNotice.value = `第 ${questionIndex + 1} 題已替換，其餘題目與目前填寫內容都已保留。`
+        } else {
+          recordNotice.value = `第 ${questionIndex + 1} 題已建立新版；這題已有回答、評分或手動修改，因此目前草稿未被覆蓋。`
+        }
+      }
+    }
+
+    const stageLabel = stage === 'hr' ? 'HR' : '主管'
+    notice.value = plan.generation_mode === 'gemini'
+      ? `${stageLabel} 第 ${questionIndex + 1} 題已由 Gemini 重新產生，其餘四題維持不變。`
+      : `${stageLabel} 第 ${questionIndex + 1} 題已使用規則式備援重新產生，其餘四題維持不變。`
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : '無法重新產生這一題'
+    cardQuestionErrors.value = {
+      ...cardQuestionErrors.value,
+      [key]: message,
+    }
+    if (workspaceApplication.value?.id === application.id && workspaceQuestionStage.value === stage) {
+      workspaceError.value = message
+    }
+  } finally {
+    questionPlanGenerating.value = { ...questionPlanGenerating.value, [key]: false }
+    questionRegenerating.value = { ...questionRegenerating.value, [itemKey]: false }
+  }
+}
+
 function latestStageRecord(applicationId: number, stage: InterviewStage) {
   return (recordsByApplication.value[applicationId] || []).find(record => record.stage === stage) || null
 }
@@ -653,6 +744,12 @@ async function generateWorkspaceQuestionPlan() {
         : '新版題目已建立；目前尚未儲存的內容已保留，未自動替換題目。'
     }
   }
+}
+
+async function regenerateWorkspaceQuestion(questionIndex: number) {
+  const application = workspaceApplication.value
+  if (!application) return
+  await regenerateQuestionPlanItem(application, workspaceQuestionStage.value, questionIndex)
 }
 
 function tokenSummary(plan: InterviewQuestionPlan | null | undefined) {
@@ -1189,13 +1286,13 @@ onMounted(load)
             <div class="question-plan-meta">
               <span :data-stage="inlineStage(application.id)">{{ inlineStage(application.id) === 'hr' ? 'HR 五題' : '主管五題' }}</span>
               <button
-                v-if="canGenerateQuestionStage(inlineStage(application.id))"
+                v-if="canGenerateQuestionStage(inlineStage(application.id)) && !plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions.length"
                 type="button"
                 class="button generation-button"
                 :disabled="questionPlanGenerating[planKey(application.id, inlineStage(application.id))]"
                 :data-testid="`question-plan-generate-${application.id}-${inlineStage(application.id)}`"
-                @click="generateQuestionPlan(application, inlineStage(application.id), Boolean(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions.length && plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.context_matches))"
-              >{{ questionPlanGenerating[planKey(application.id, inlineStage(application.id))] ? '產生中…' : plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.version ? '不喜歡？重新產生' : '使用 Gemini 產生 5 題' }}</button>
+                @click="generateQuestionPlan(application, inlineStage(application.id))"
+              >{{ questionPlanGenerating[planKey(application.id, inlineStage(application.id))] ? '產生中…' : '使用 Gemini 產生 5 題' }}</button>
               <b class="evaluation-release-chip" :class="{ unlocked: peerEvaluationsReleased(application.id) }">{{ peerEvaluationsReleased(application.id) ? '雙方已提交 · 評分已公開' : '評分鎖定至雙方提交' }}</b>
               <small v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.version">題目版本 v{{ plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.version }} · {{ formatDate(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.generated_at || null) }}</small>
               <small v-else-if="currentPlanRecord(application.id, inlineStage(application.id))">紀錄更新：{{ formatDate(currentPlanRecord(application.id, inlineStage(application.id))?.updated_at || null) }}</small>
@@ -1227,7 +1324,7 @@ onMounted(load)
               v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions.length && plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.context_matches === false"
               class="question-context-warning"
               role="status"
-            >履歷或職缺內容已更新，現有題目仍可查看；按下「重新產生」才會呼叫 AI 並建立新版本。</div>
+            >履歷或職缺內容已更新，現有題目仍可查看；請針對需要更新的題目逐題重新產生。</div>
             <div
               v-if="hasOlderPlanRecord(application.id, inlineStage(application.id))"
               class="question-context-warning"
@@ -1242,7 +1339,18 @@ onMounted(load)
               >
                 <span>{{ questionIsAnswered(question) ? '✓' : index + 1 }}</span>
                 <div>
-                  <strong>{{ question.question }}</strong>
+                  <div class="question-preview-heading">
+                    <strong>{{ question.question }}</strong>
+                    <button
+                      v-if="canGenerateQuestionStage(inlineStage(application.id)) && plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions[index]"
+                      type="button"
+                      class="question-regenerate-button"
+                      :disabled="questionPlanGenerating[planKey(application.id, inlineStage(application.id))]"
+                      :aria-label="`重新產生第 ${index + 1} 題`"
+                      :data-testid="`question-regenerate-${application.id}-${inlineStage(application.id)}-${index}`"
+                      @click="regenerateQuestionPlanItem(application, inlineStage(application.id), index)"
+                    >{{ questionRegenerating[questionRegenerationKey(application.id, inlineStage(application.id), index)] ? '重新產生中…' : '重新產生此題' }}</button>
+                  </div>
                   <p v-if="questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert">
                     <b>⚠ 疑似違法提問</b>
                     <span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span>
@@ -1325,26 +1433,42 @@ onMounted(load)
             <div class="workspace-gemini-copy">
               <small>{{ workspaceQuestionStage === 'hr' ? 'HR 五題' : '主管五題' }}</small>
               <strong>目前面試題目</strong>
-              <span>重新產生只會建立新版題庫；既有面試紀錄與正在填寫的內容都會保留。</span>
+              <span>初次建立會產生五題；之後請在需要調整的題目旁按「重新產生此題」，其餘四題與既有紀錄都會保留。</span>
             </div>
             <div class="workspace-gemini-actions">
               <button
-                v-if="canGenerateQuestionStage(workspaceQuestionStage)"
+                v-if="canGenerateQuestionStage(workspaceQuestionStage) && !workspaceQuestionPlan?.questions.length"
                 class="button primary"
                 type="button"
                 :disabled="questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)]"
                 :data-testid="`workspace-question-plan-generate-${workspaceQuestionStage}`"
                 @click="generateWorkspaceQuestionPlan"
-              >{{ questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)] ? 'Gemini 產生中…' : workspaceQuestionPlan?.version ? '不喜歡？重新產生 5 題' : '使用 Gemini 產生 5 題' }}</button>
+              >{{ questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)] ? 'Gemini 產生中…' : '使用 Gemini 產生 5 題' }}</button>
             </div>
             <p v-if="workspaceQuestionPlan?.generation_warning" class="workspace-gemini-warning">⚠ {{ workspaceQuestionPlan.generation_warning }}</p>
             <details v-if="workspaceQuestionPlan" class="workspace-generation-details">
               <summary>查看產生資訊</summary>
               <p>{{ generationModeLabel(workspaceQuestionPlan) }}<template v-if="tokenSummary(workspaceQuestionPlan)"> · {{ tokenSummary(workspaceQuestionPlan) }}</template></p>
             </details>
-            <details v-if="workspaceQuestionPlan?.questions.length" class="workspace-gemini-preview">
-              <summary>預覽目前 {{ workspaceQuestionPlan.questions.length }} 題</summary>
-              <ol><li v-for="question in workspaceQuestionPlan.questions" :key="question.question">{{ question.question }}<span v-if="questionCompliance(question).status === 'warning'" class="question-compliance-inline warning" role="alert" :title="questionCompliance(question).suggestion">⚠ 疑似違法（{{ complianceCategoryText(questionCompliance(question)) }}）</span><span v-else class="question-compliance-inline ok">✓ 合法</span></li></ol>
+            <details v-if="workspaceQuestionPlan?.questions.length" class="workspace-gemini-preview" open>
+              <summary>目前 {{ workspaceQuestionPlan.questions.length }} 題，可逐題選擇重新產生</summary>
+              <ol>
+                <li v-for="(question, index) in workspaceQuestionPlan.questions" :key="question.question">
+                  <div>
+                    <strong>{{ question.question }}</strong>
+                    <span v-if="questionCompliance(question).status === 'warning'" class="question-compliance-inline warning" role="alert" :title="questionCompliance(question).suggestion">⚠ 疑似違法（{{ complianceCategoryText(questionCompliance(question)) }}）</span>
+                    <span v-else class="question-compliance-inline ok">✓ 合法</span>
+                  </div>
+                  <button
+                    v-if="canGenerateQuestionStage(workspaceQuestionStage)"
+                    type="button"
+                    class="question-regenerate-button"
+                    :disabled="questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)]"
+                    :data-testid="`workspace-question-regenerate-${workspaceQuestionStage}-${index}`"
+                    @click="regenerateWorkspaceQuestion(index)"
+                  >{{ questionRegenerating[questionRegenerationKey(workspaceApplication.id, workspaceQuestionStage, index)] ? '重新產生中…' : '重新產生此題' }}</button>
+                </li>
+              </ol>
             </details>
           </section>
 
@@ -1505,11 +1629,20 @@ onMounted(load)
 .question-prompt-details>div{display:grid;gap:7px;padding:0 10px 10px}
 .question-preview-list .question-prompt-details p{display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;margin:0;padding:0;border:0;background:transparent;color:#627873;font-size:11px;line-height:1.55}
 .question-prompt-details b{color:#397268}
+.question-preview-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.question-preview-heading>strong{min-width:0;flex:1}
+.question-regenerate-button{flex:0 0 auto;min-height:34px;padding:6px 10px;border:1px solid #78b8aa;border-radius:8px;background:#f2faf7;color:#1f7165;font-size:11px;font-weight:800;white-space:nowrap;cursor:pointer}
+.question-regenerate-button:hover:not(:disabled){border-color:#287f72;background:#e5f5f0}
+.question-regenerate-button:disabled{cursor:not-allowed;opacity:.55}
 .workspace-gemini-panel{position:static;border:1px solid #cfe0db;box-shadow:none}
 .workspace-gemini-panel>.workspace-gemini-warning,.workspace-generation-details,.workspace-gemini-preview{grid-column:1/-1}
 .workspace-generation-details{border-top:1px solid #e0e9e6;padding-top:9px}
 .workspace-generation-details>summary{cursor:pointer;color:#2f7166;font-size:11px;font-weight:700}
 .workspace-generation-details p{margin:7px 0 0;color:#5d756f;font-size:11px}
+.workspace-gemini-preview ol{padding-left:24px}
+.workspace-gemini-preview li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:10px;margin-bottom:8px;padding:9px 10px;border:1px solid #e0eae7;border-radius:8px;background:#fbfdfc}
+.workspace-gemini-preview li>div{min-width:0}
+.workspace-gemini-preview li strong{color:#345d56;font-size:11px;line-height:1.6}
 .interview-sharing-policy{display:block;grid-template-columns:none;padding:0}
 .interview-sharing-policy>summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:9px 14px;color:#315a53;font-size:11px}
 .interview-sharing-policy>summary span{color:#39776d;font-size:10px}
@@ -1518,6 +1651,7 @@ onMounted(load)
 .sharing-policy-details b{color:#2e6d62;font-size:10px}
 .sharing-policy-details span{color:#71817d;font-size:9px;line-height:1.45}
 @media(max-width:900px){.interview-sharing-policy>.sharing-policy-details{grid-template-columns:1fr}}
+@media(max-width:680px){.question-preview-heading,.workspace-gemini-preview li{grid-template-columns:1fr;align-items:stretch;flex-direction:column}.question-regenerate-button{width:100%}}
 
 /* 應徵者採一人一列，排程、題目與紀錄只在點開該列後顯示。 */
 .interview-list{grid-template-columns:1fr;gap:10px}

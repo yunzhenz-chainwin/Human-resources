@@ -502,6 +502,11 @@ export const hrApi = {
     apiRequest<InterviewQuestionPlan>(`/applications/${applicationId}/interview-question-plan/generate?stage=${stage}&force=${force}`, {
       method: 'POST',
     }),
+  regenerateInterviewQuestion: (applicationId: number, stage: InterviewStage, questionIndex: number) =>
+    apiRequest<InterviewQuestionPlan>(
+      `/applications/${applicationId}/interview-question-plan/questions/${questionIndex}/regenerate?stage=${stage}`,
+      { method: 'POST' },
+    ),
   interviewRecords: (applicationId: number) =>
     apiRequest<InterviewRecordDto[]>(`/applications/${applicationId}/interview-records`),
   createInterviewRecord: (applicationId: number, payload: InterviewRecordWrite) =>
