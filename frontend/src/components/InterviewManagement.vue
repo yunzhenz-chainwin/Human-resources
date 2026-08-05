@@ -1727,12 +1727,18 @@ onMounted(load)
         </header>
 
         <div v-if="expandedApplicationId === application.id" :id="`interview-detail-${application.id}`" class="interview-card-detail" @keydown.esc="requestCollapseApplicationCard">
-          <div class="application-job"><small>{{ application.requisition.department_name || `部門 #${application.requisition.department_id || '—'}` }}</small><strong>{{ application.requisition.req_no }} · {{ application.requisition.title }}</strong><span>{{ application.requisition.work_city }} · 應徵於 {{ formatDate(application.applied_at) }}</span></div>
-          <div class="application-details">
-            <div><small>Email</small><strong>{{ application.candidate.email || '未提供' }}</strong></div>
-            <div><small>電話</small><strong>{{ application.candidate.phone || '未提供' }}</strong></div>
-            <div><small>應徵來源</small><strong>{{ application.source || '未提供' }}</strong></div>
-          </div>
+          <details class="application-meta">
+            <summary>
+              <strong>{{ application.requisition.req_no }} · {{ application.requisition.title }}</strong>
+              <span>{{ application.requisition.department_name || `部門 #${application.requisition.department_id || '—'}` }} · {{ application.requisition.work_city }} · 應徵於 {{ formatDate(application.applied_at) }}</span>
+              <em>聯絡資訊</em>
+            </summary>
+            <div class="application-details">
+              <div><small>Email</small><strong>{{ application.candidate.email || '未提供' }}</strong></div>
+              <div><small>電話</small><strong>{{ application.candidate.phone || '未提供' }}</strong></div>
+              <div><small>應徵來源</small><strong>{{ application.source || '未提供' }}</strong></div>
+            </div>
+          </details>
 
           <div v-if="cardInterviewErrors[application.id]" class="workspace-message error" role="alert"><strong>!</strong><span>{{ cardInterviewErrors[application.id] }}</span></div>
           <div v-if="workspaceError" class="workspace-message error" role="alert"><strong>!</strong><span>{{ workspaceError }}</span><button type="button" aria-label="關閉錯誤訊息" @click="workspaceError = ''">×</button></div>
@@ -1816,7 +1822,7 @@ onMounted(load)
                 <div><button class="button secondary" type="button" :disabled="recordReopening" @click="cancelReopenPrompt">取消</button><button class="button primary" type="button" :disabled="recordReopening || !reopenReason.trim()" @click="reopenRecord">{{ recordReopening ? '重新開啟中…' : '確認重新開啟' }}</button></div>
               </section>
 
-              <div v-if="editingRecord" class="record-audit-strip">
+              <div v-if="editingRecord && (editingRecord.revision_number > 0 || editingRecord.submitted_at || editingRecord.question_plan_version)" class="record-audit-strip">
                 <span><b>題目版本</b>{{ editingRecord.question_plan_version ? `v${editingRecord.question_plan_version}` : '自訂題目' }}</span>
                 <span><b>紀錄修訂</b>{{ editingRecord.revision_number > 0 ? `#${editingRecord.revision_number}` : '尚未提交（#0）' }}</span>
                 <span v-if="editingRecord.submitted_at"><b>最近提交</b>{{ editingRecord.submitted_by_name || '原面試官' }} · {{ formatDate(editingRecord.submitted_at) }}</span>
@@ -2045,8 +2051,12 @@ onMounted(load)
 .row-chevron{width:30px;height:30px;display:grid;place-items:center;border:1px solid #cfe0db;border-radius:50%;background:#f3f8f6;color:#236f64;font-size:18px;font-weight:500}
 .interview-card-detail{display:grid;gap:12px;padding:14px 16px 16px;border-top:1px solid #e0ebe7;background:#fff}
 
-.application-job{display:grid;gap:3px;padding:11px 12px;border-radius:9px;background:#f3f8f6}.application-job small{color:#2c786c;font-size:var(--fs-xs);font-weight:700}.application-job strong{font-size:var(--fs-md)}.application-job span{color:var(--muted);font-size:var(--fs-sm)}
-.application-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.application-details>div{min-width:0;padding:9px 10px;border:1px solid #e8eeec;border-radius:8px}.application-details small,.application-details strong{display:block}.application-details small{color:var(--muted);font-size:var(--fs-xs)}.application-details strong{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-sm)}
+/* 職缺與聯絡資訊在評分當下不是主角：一行帶過，需要時再展開。 */
+.application-meta{border-radius:9px;background:#f3f8f6}
+.application-meta>summary{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;list-style:none;cursor:pointer;padding:10px 12px}.application-meta>summary::-webkit-details-marker{display:none}
+.application-meta>summary strong{font-size:var(--fs-md);color:#245f56}.application-meta>summary span{min-width:0;flex:1;color:var(--muted);font-size:var(--fs-sm)}
+.application-meta>summary em{flex:0 0 auto;color:#2f7166;font-size:var(--fs-xs);font-style:normal;font-weight:700}.application-meta>summary em:before{content:'＋';margin-right:4px}.application-meta[open]>summary em:before{content:'－'}
+.application-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0 12px 11px}.application-details>div{min-width:0;padding:9px 10px;border:1px solid #e8eeec;border-radius:8px}.application-details small,.application-details strong{display:block}.application-details small{color:var(--muted);font-size:var(--fs-xs)}.application-details strong{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-sm)}
 
 .workspace-message{display:flex;align-items:center;gap:8px;padding:10px 13px;border:1px solid;border-radius:9px;font-size:var(--fs-sm)}.workspace-message>span{flex:1}.workspace-message>button{border:0;background:transparent;color:inherit;font-size:18px}.workspace-message.error{border-color:#eac6c2;background:#fff0ef;color:#8e403b}.workspace-message.success{border-color:#c7dfcf;background:#edf8f1;color:#2d674a}
 
