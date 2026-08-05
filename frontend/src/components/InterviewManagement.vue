@@ -723,6 +723,31 @@ function currentPlanRecord(applicationId: number, stage: InterviewStage) {
   return records[0] || null
 }
 
+function recordHasContent(record: InterviewRecordDto) {
+  return Boolean(
+    record.summary?.trim()
+    || record.recommendation
+    || record.overall_rating !== null && record.overall_rating !== undefined
+    || record.overall_score !== null && record.overall_score !== undefined
+    || record.questions.some(question => (
+      Boolean(question.response?.trim())
+      || Boolean(question.notes?.trim())
+      || Boolean(question.not_asked_reason?.trim())
+      || (question.rating !== null && question.rating !== undefined)
+    )),
+  )
+}
+
+// Opening a card must never hide work that was already saved. A record created
+// against an older question version no longer matches currentPlanRecord(), so
+// fall back to it whenever it actually holds answers or scores.
+function editableStageRecord(applicationId: number, stage: InterviewStage) {
+  const current = currentPlanRecord(applicationId, stage)
+  if (current) return current
+  const latest = latestStageRecord(applicationId, stage)
+  return latest && recordHasContent(latest) ? latest : null
+}
+
 function hasOlderPlanRecord(applicationId: number, stage: InterviewStage) {
   return Boolean(
     plansByApplicationStage.value[planKey(applicationId, stage)]?.id
@@ -1170,8 +1195,9 @@ async function bindStageEditor(application: ApplicationDto, stage: InterviewStag
   inlineStageByApplication[application.id] = stage
   questionTextEditing.value = {}
   pendingDiscard.value = null
-  const record = currentPlanRecord(application.id, stage)
+  const record = editableStageRecord(application.id, stage)
   if (record) {
+    const isOlderPlanRecord = !currentPlanRecord(application.id, stage)
     editRecord(record)
     if (canEditStage(stage) && record.status !== 'completed' && recordForm.questions.length < 5) {
       try {
@@ -1182,6 +1208,9 @@ async function bindStageEditor(application: ApplicationDto, stage: InterviewStag
       } catch (cause) {
         workspaceError.value = cause instanceof Error ? cause.message : '無法載入系統面試題'
       }
+    }
+    if (isOlderPlanRecord) {
+      recordNotice.value = '已載入你先前填寫的內容（題目版本較舊）。可直接接續修改；需要換成新版題目時，按該題的「重新產生此題」。'
     }
     return
   }
@@ -1232,7 +1261,8 @@ function cancelPendingDiscard() {
 // plan version stays in the history, the card moves on to the new five.
 async function realignEditorWithPlan(application: ApplicationDto, stage: InterviewStage) {
   if (recordFormIsDirty.value || inlineStage(application.id) !== stage) return
-  const record = currentPlanRecord(application.id, stage)
+  // Only move on to a fresh record when the bound one holds no saved work.
+  const record = editableStageRecord(application.id, stage)
   if ((record?.id ?? null) === (editingRecord.value?.id ?? null)) return
   if (record) {
     editRecord(record)
@@ -1823,7 +1853,7 @@ onMounted(load)
                   <div v-if="cardStagePlan?.generation_warning" class="question-generation-warning" role="alert"><strong>⚠ Gemini 生成提醒</strong><span>{{ cardStagePlan.generation_warning }}</span></div>
                   <div v-if="cardStageQuestionError" class="question-generation-error" role="alert"><strong>無法更新題目</strong><span>{{ cardStageQuestionError }}；目前題目仍保留。</span></div>
                   <div v-if="cardStagePlan?.questions.length && cardStagePlan.context_matches === false" class="question-context-warning" role="status">履歷或職缺內容已更新，現有題目仍可查看；請針對需要更新的題目逐題重新產生。</div>
-                  <div v-if="hasOlderPlanRecord(application.id, stage.key)" class="question-context-warning" role="status">目前顯示新版題目，尚未建立填答紀錄；舊版問答仍保留在下方「面試紀錄歷程」中。</div>
+                  <div v-if="hasOlderPlanRecord(application.id, stage.key) && !editingRecord" class="question-context-warning" role="status">目前顯示新版題目，尚未建立填答紀錄；舊版問答仍保留在下方「面試紀錄歷程」中。</div>
 
                   <div v-if="cardDataLoading[application.id] && !cardStageQuestions.length" class="question-progress-loading"><span class="spinner"></span>正在準備 5 題…</div>
                   <template v-else>
