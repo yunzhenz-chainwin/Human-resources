@@ -163,6 +163,27 @@ SYSTEM_ISSUE_SEED: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "title": "結構化面試逐題評分、提交鎖定與盲評修訂",
+        "description": (
+            "HR 與部門主管可用統一 1–5 量表逐題評分；未詢問題須說明原因，"
+            "完成後鎖定並以帶原因的重開流程保留修訂軌跡。"
+        ),
+        "page": "/matching",
+        "category": "feature",
+        "severity": "high",
+        "status": "resolved",
+        "progress_percent": 100,
+        "expected_completion_date": date(2026, 8, 5),
+        "reproduction_steps": (
+            "分別以 HR、該部門主管、其他部門主管及 IT 帳號驗證草稿、逐題評分、"
+            "完成鎖定、帶原因重開、修訂編號與雙方盲評釋出。"
+        ),
+        "resolution_notes": (
+            "已完成資料庫 migration、API 完成態驗證、提交者與修訂中繼資料、"
+            "盲評遮罩、唯讀鎖定與前端 radio 評分介面；正式發布仍依既有 PR／UAT 項追蹤。"
+        ),
+    },
+    {
         "title": "最新招募與面試功能完成 PR、全量 CI 與 UAT 發布",
         "description": (
             "最新功能仍在功能分支；須經 PostgreSQL migration、全量測試與瀏覽器驗收後進主線。"

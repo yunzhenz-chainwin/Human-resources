@@ -31,9 +31,12 @@ from app.schemas.interview_questions import (
 )
 from app.schemas.interviews import (
     InterviewRecordCreate,
+    InterviewRecordQuestion,
     InterviewRecordRead,
+    InterviewRecordReopenRequest,
     InterviewRecordUpdate,
     InterviewStage,
+    validate_completed_evaluation,
 )
 from app.services.interview_questions import (
     HR_QUESTION_CATEGORIES,
@@ -164,14 +167,66 @@ def _record_read(
     if not evaluation_revealed:
         updates.update(
             questions=[
-                question.model_copy(update={"rating": None, "notes": None})
+                question.model_copy(
+                    update={
+                        "rating": None,
+                        "not_asked_reason": None,
+                        "notes": None,
+                    }
+                )
                 for question in result.questions
             ],
             summary=None,
             recommendation=None,
             overall_rating=None,
+            submitted_by_id=None,
+            submitted_by_name=None,
+            last_reopen_reason=None,
         )
     return result.model_copy(update=updates)
+
+
+def _evaluation_audit_details(record: InterviewRecord) -> dict[str, object]:
+    questions = record.questions or []
+    rated_count = sum(item.get("rating") is not None for item in questions)
+    not_asked_count = sum(bool(item.get("not_asked_reason")) for item in questions)
+    return {
+        "question_count": len(questions),
+        "rated_question_count": rated_count,
+        "not_asked_question_count": not_asked_count,
+        "completed_question_count": rated_count + not_asked_count,
+        "overall_rating_present": record.overall_rating is not None,
+        "recommendation_present": record.recommendation is not None,
+        "summary_present": bool(record.summary and record.summary.strip()),
+        "revision_number": record.revision_number,
+    }
+
+
+def _validate_completed_update(
+    *,
+    status_value: str,
+    questions_value: list[dict],
+    summary_value: str | None,
+    recommendation_value: str | None,
+    overall_rating_value: int | None,
+) -> None:
+    try:
+        questions = [
+            InterviewRecordQuestion.model_validate(question)
+            for question in questions_value
+        ]
+        validate_completed_evaluation(
+            status=status_value,  # type: ignore[arg-type]
+            questions=questions,
+            summary=summary_value,
+            recommendation=recommendation_value,  # type: ignore[arg-type]
+            overall_rating=overall_rating_value,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
 
 def _application_records(db: Session, application_id: int) -> list[InterviewRecord]:
@@ -712,6 +767,7 @@ def create_interview_record(
                 detail="Question plan does not belong to this application and interview stage",
             )
     actor_name = _actor_name(user)
+    submitted_at = datetime.now(UTC) if payload.status == "completed" else None
     record = InterviewRecord(
         application_id=application_id,
         question_plan_id=question_plan.id if question_plan else None,
@@ -726,6 +782,10 @@ def create_interview_record(
         private_notes=payload.private_notes,
         recommendation=payload.recommendation,
         overall_rating=payload.overall_rating,
+        submitted_at=submitted_at,
+        submitted_by_id=user.id if submitted_at else None,
+        submitted_by_name=actor_name if submitted_at else None,
+        revision_number=1 if submitted_at else 0,
         interviewer_id=user.id,
         interviewer_name=actor_name,
         updated_by_id=user.id,
@@ -746,7 +806,7 @@ def create_interview_record(
             "question_plan_id": record.question_plan_id,
             "question_plan_version": record.question_plan_version,
             "status": record.status,
-            "question_count": len(record.questions),
+            **_evaluation_audit_details(record),
         },
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
@@ -788,6 +848,11 @@ def update_interview_record(
     _, requisition = _application_requisition(db, application_id, user)
     record = _record(db, application_id, record_id)
     _enforce_stage_write(user, record.stage)  # type: ignore[arg-type]
+    if record.status == "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Completed interview records are locked; reopen before editing",
+        )
     _enforce_private_notes_write(
         user,
         record.stage,  # type: ignore[arg-type]
@@ -796,13 +861,33 @@ def update_interview_record(
     updates = payload.model_dump(exclude_unset=True)
     if updates.get("interviewed_at") is not None:
         updates["interviewed_at"] = updates["interviewed_at"].astimezone(UTC)
-    if updates.get("questions") is not None:
-        updates["questions"] = [item.model_dump() for item in updates["questions"]]
+    if "questions" in payload.model_fields_set:
+        updates["questions"] = [
+            item.model_dump() for item in (payload.questions or [])
+        ]
     previous_status = record.status
+    next_status = updates.get("status", record.status)
+    next_questions = updates.get("questions", record.questions)
+    next_summary = updates.get("summary", record.summary)
+    next_recommendation = updates.get("recommendation", record.recommendation)
+    next_overall_rating = updates.get("overall_rating", record.overall_rating)
+    _validate_completed_update(
+        status_value=next_status,
+        questions_value=next_questions,
+        summary_value=next_summary,
+        recommendation_value=next_recommendation,
+        overall_rating_value=next_overall_rating,
+    )
     for field, value in updates.items():
         setattr(record, field, value)
+    actor_name = _actor_name(user)
     record.updated_by_id = user.id
-    record.updated_by_name = _actor_name(user)
+    record.updated_by_name = actor_name
+    if previous_status != "completed" and record.status == "completed":
+        record.submitted_at = datetime.now(UTC)
+        record.submitted_by_id = user.id
+        record.submitted_by_name = actor_name
+        record.revision_number = (record.revision_number or 0) + 1
     write_audit(
         db,
         user,
@@ -815,6 +900,56 @@ def update_interview_record(
             "stage": record.stage,
             "fields": sorted(updates),
             "status": {"from": previous_status, "to": record.status},
+            **_evaluation_audit_details(record),
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    db.commit()
+    db.refresh(record)
+    records = _application_records(db, application_id)
+    return _record_read(record, user, _peer_evaluations_released(records))
+
+
+@router.post(
+    "/{application_id}/interview-records/{record_id}/reopen",
+    response_model=InterviewRecordRead,
+)
+def reopen_interview_record(
+    application_id: int,
+    record_id: int,
+    payload: InterviewRecordReopenRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_user),
+) -> InterviewRecordRead:
+    _, requisition = _application_requisition(db, application_id, user)
+    record = _record(db, application_id, record_id)
+    _enforce_stage_write(user, record.stage)  # type: ignore[arg-type]
+    if record.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only completed interview records can be reopened",
+        )
+
+    record.status = "in_progress"
+    record.last_reopen_reason = payload.reason
+    record.updated_by_id = user.id
+    record.updated_by_name = _actor_name(user)
+    write_audit(
+        db,
+        user,
+        "application.interview_record.reopen",
+        "interview_record",
+        record.id,
+        requisition.department_id,
+        details={
+            "application_id": application_id,
+            "stage": record.stage,
+            "status": {"from": "completed", "to": "in_progress"},
+            "revision_number": record.revision_number,
+            "reopen_reason": payload.reason[:500],
+            **_evaluation_audit_details(record),
         },
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),

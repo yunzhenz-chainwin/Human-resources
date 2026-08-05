@@ -1,3 +1,4 @@
+import json
 from collections.abc import Generator
 from contextlib import nullcontext
 from datetime import UTC, datetime
@@ -1282,10 +1283,7 @@ def test_structured_interview_records_preserve_session_and_actor_history(
         headers=hr_headers,
         json={"status": "completed", "summary": "Final HR interview summary"},
     )
-    assert updated.status_code == 200, updated.text
-    assert updated.json()["interviewer_name"] == "Application HR"
-    assert updated.json()["updated_by_name"] == "Application HR"
-    assert updated.json()["summary"] == "Final HR interview summary"
+    assert updated.status_code == 409
 
     manager_created = client.post(
         endpoint,
@@ -1294,6 +1292,7 @@ def test_structured_interview_records_preserve_session_and_actor_history(
             **payload,
             "stage": "manager",
             "interviewed_at": "2030-08-22T14:00:00+08:00",
+            "status": "in_progress",
             "questions": [],
         },
     )
@@ -1315,10 +1314,261 @@ def test_structured_interview_records_preserve_session_and_actor_history(
                 )
             ).all()
         )
-        assert audit_actions == {
+        assert audit_actions == {"application.interview_record.create"}
+
+
+def test_completed_interview_validation_lock_reopen_revision_and_safe_audit(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    application_id = ids["design_application"]
+    endpoint = f"/api/v1/applications/{application_id}/interview-records"
+    hr_headers = _headers(client, "hr")
+    manager_headers = _headers(client, "design-manager")
+
+    valid_completed = {
+        "stage": "hr",
+        "interviewed_at": "2030-09-01T09:00:00+08:00",
+        "duration_minutes": 45,
+        "mode": "video",
+        "status": "completed",
+        "questions": [
+            {
+                "question": "Describe a difficult stakeholder conversation.",
+                "response": "Sensitive answer must not enter the audit log.",
+                "rating": 4,
+                "notes": "Sensitive scoring note must not enter the audit log.",
+            }
+        ],
+        "summary": "Clear evidence and reflection.",
+        "private_notes": "Sensitive HR-only note must not enter the audit log.",
+        "recommendation": "advance",
+        "overall_rating": 4,
+    }
+    invalid_completed = [
+        {**valid_completed, "questions": []},
+        {
+            **valid_completed,
+            "questions": [{"question": "A question without an evaluation"}],
+        },
+        {**valid_completed, "overall_rating": None},
+        {**valid_completed, "recommendation": None},
+        {**valid_completed, "summary": "   "},
+        {
+            **valid_completed,
+            "questions": [{"question": "Out-of-range rating", "rating": 6}],
+        },
+    ]
+    for payload in invalid_completed:
+        assert client.post(endpoint, headers=hr_headers, json=payload).status_code == 422
+
+    mutually_exclusive = client.post(
+        endpoint,
+        headers=hr_headers,
+        json={
+            **valid_completed,
+            "status": "in_progress",
+            "questions": [
+                {
+                    "question": "This cannot be rated and skipped.",
+                    "rating": 3,
+                    "not_asked_reason": "No time",
+                }
+            ],
+        },
+    )
+    assert mutually_exclusive.status_code == 422
+
+    draft_without_evaluation = client.post(
+        endpoint,
+        headers=hr_headers,
+        json={
+            "stage": "hr",
+            "interviewed_at": "2030-08-30T09:00:00+08:00",
+            "mode": "phone",
+            "status": "in_progress",
+            "questions": [{"question": "Draft question"}],
+        },
+    )
+    assert draft_without_evaluation.status_code == 201
+    assert draft_without_evaluation.json()["revision_number"] == 0
+    assert draft_without_evaluation.json()["submitted_at"] is None
+
+    for offset, terminal_status in enumerate(("cancelled", "no_show"), start=1):
+        terminal = client.post(
+            endpoint,
+            headers=hr_headers,
+            json={
+                "stage": "hr",
+                "interviewed_at": f"2030-08-{offset + 20:02d}T09:00:00+08:00",
+                "mode": "phone",
+                "status": terminal_status,
+                "questions": [],
+            },
+        )
+        assert terminal.status_code == 201
+        assert terminal.json()["revision_number"] == 0
+        assert terminal.json()["submitted_at"] is None
+
+    draft_payload = {
+        **valid_completed,
+        "status": "in_progress",
+        "questions": [
+            valid_completed["questions"][0],
+            {
+                "question": "Discuss another project example.",
+                "not_asked_reason": "  Interview time expired.  ",
+            },
+        ],
+    }
+    created = client.post(endpoint, headers=hr_headers, json=draft_payload)
+    assert created.status_code == 201, created.text
+    record_id = created.json()["id"]
+    assert created.json()["questions"][1]["not_asked_reason"] == (
+        "Interview time expired."
+    )
+    assert created.json()["revision_number"] == 0
+
+    submitted = client.patch(
+        f"{endpoint}/{record_id}",
+        headers=hr_headers,
+        json={"status": "completed"},
+    )
+    assert submitted.status_code == 200, submitted.text
+    first_submission = submitted.json()
+    assert first_submission["revision_number"] == 1
+    assert first_submission["submitted_at"] is not None
+    assert first_submission["submitted_by_name"] == "Application HR"
+    assert first_submission["last_reopen_reason"] is None
+
+    locked = client.patch(
+        f"{endpoint}/{record_id}",
+        headers=hr_headers,
+        json={"summary": "A completed record cannot be edited directly."},
+    )
+    assert locked.status_code == 409
+    assert client.post(
+        f"{endpoint}/{record_id}/reopen",
+        headers=manager_headers,
+        json={"reason": "Manager cannot reopen the HR stage."},
+    ).status_code == 403
+    assert client.post(
+        f"{endpoint}/{record_id}/reopen",
+        headers=_headers(client, "engineering-manager"),
+        json={"reason": "Wrong department."},
+    ).status_code == 403
+    assert client.post(
+        f"{endpoint}/{record_id}/reopen",
+        headers=_headers(client, "admin"),
+        json={"reason": "Admin is not an interview author."},
+    ).status_code == 403
+    assert client.post(
+        f"{endpoint}/{record_id}/reopen",
+        headers=hr_headers,
+        json={"reason": "   "},
+    ).status_code == 422
+
+    reopen_reason = "Correct a documented scoring error: " + "x" * 700
+    reopened = client.post(
+        f"{endpoint}/{record_id}/reopen",
+        headers=hr_headers,
+        json={"reason": f"  {reopen_reason}  "},
+    )
+    assert reopened.status_code == 200, reopened.text
+    assert reopened.json()["status"] == "in_progress"
+    assert reopened.json()["revision_number"] == 1
+    assert reopened.json()["last_reopen_reason"] == reopen_reason
+    assert reopened.json()["submitted_at"] == first_submission["submitted_at"]
+    assert client.post(
+        f"{endpoint}/{record_id}/reopen",
+        headers=hr_headers,
+        json={"reason": "Cannot reopen a draft twice."},
+    ).status_code == 409
+
+    masked = client.get(f"{endpoint}/{record_id}", headers=manager_headers)
+    assert masked.status_code == 200
+    assert masked.json()["evaluation_revealed"] is False
+    assert masked.json()["questions"][0]["rating"] is None
+    assert masked.json()["questions"][1]["not_asked_reason"] is None
+    assert masked.json()["submitted_by_id"] is None
+    assert masked.json()["submitted_by_name"] is None
+    assert masked.json()["last_reopen_reason"] is None
+
+    incomplete_draft = client.patch(
+        f"{endpoint}/{record_id}",
+        headers=hr_headers,
+        json={"questions": [{"question": "Needs evaluation before resubmission"}]},
+    )
+    assert incomplete_draft.status_code == 200
+    assert client.patch(
+        f"{endpoint}/{record_id}",
+        headers=hr_headers,
+        json={"status": "completed"},
+    ).status_code == 422
+
+    resubmitted = client.patch(
+        f"{endpoint}/{record_id}",
+        headers=hr_headers,
+        json={
+            "status": "completed",
+            "questions": [
+                {
+                    "question": "Needs evaluation before resubmission",
+                    "response": "Corrected sensitive answer.",
+                    "rating": 5,
+                    "notes": "Corrected sensitive note.",
+                }
+            ],
+            "summary": "Corrected official summary.",
+            "recommendation": "offer",
+            "overall_rating": 5,
+        },
+    )
+    assert resubmitted.status_code == 200, resubmitted.text
+    assert resubmitted.json()["revision_number"] == 2
+    assert resubmitted.json()["submitted_by_name"] == "Application HR"
+    assert resubmitted.json()["last_reopen_reason"] == reopen_reason
+
+    with testing_session() as db:
+        audits = list(
+            db.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.resource_type == "interview_record",
+                    AuditLog.resource_id == str(record_id),
+                )
+                .order_by(AuditLog.id)
+            ).all()
+        )
+        actions = [audit.action for audit in audits]
+        assert actions == [
             "application.interview_record.create",
             "application.interview_record.update",
-        }
+            "application.interview_record.reopen",
+            "application.interview_record.update",
+            "application.interview_record.update",
+        ]
+        serialized_audit = json.dumps(
+            [audit.details for audit in audits],
+            ensure_ascii=False,
+        )
+        for secret in (
+            "Sensitive answer must not enter the audit log.",
+            "Sensitive scoring note must not enter the audit log.",
+            "Sensitive HR-only note must not enter the audit log.",
+            "Corrected sensitive answer.",
+            "Corrected sensitive note.",
+        ):
+            assert secret not in serialized_audit
+        reopen_audit = next(
+            audit
+            for audit in audits
+            if audit.action == "application.interview_record.reopen"
+        )
+        assert len(reopen_audit.details["reopen_reason"]) == 500
+        assert audits[-1].details["revision_number"] == 2
+        assert audits[-1].details["rated_question_count"] == 1
+        assert audits[-1].details["completed_question_count"] == 1
 
 
 def test_interview_answers_are_shared_but_peer_evaluations_wait_for_both_submissions(
@@ -1342,7 +1592,11 @@ def test_interview_answers_are_shared_but_peer_evaluations_wait_for_both_submiss
                 "response": "The candidate wants to own end-to-end product design.",
                 "rating": 4,
                 "notes": "Clear motivation with specific examples.",
-            }
+            },
+            {
+                "question": "What compensation range are you considering?",
+                "not_asked_reason": "Deferred until role scope is confirmed.",
+            },
         ],
         "summary": "Strong communication and motivation.",
         "private_notes": "HR-only compensation context.",
@@ -1364,6 +1618,7 @@ def test_interview_answers_are_shared_but_peer_evaluations_wait_for_both_submiss
     )
     assert masked_hr["questions"][0]["rating"] is None
     assert masked_hr["questions"][0]["notes"] is None
+    assert masked_hr["questions"][1]["not_asked_reason"] is None
     assert masked_hr["summary"] is None
     assert masked_hr["recommendation"] is None
     assert masked_hr["overall_rating"] is None
@@ -1428,6 +1683,7 @@ def test_interview_answers_are_shared_but_peer_evaluations_wait_for_both_submiss
     still_masked = client.get(f"{endpoint}/{hr_record_id}", headers=manager_headers).json()
     assert still_masked["evaluation_revealed"] is False
     assert still_masked["overall_rating"] is None
+    assert still_masked["submitted_by_name"] is None
 
     manager_submitted = client.patch(
         f"{endpoint}/{manager_record_id}",
@@ -1452,6 +1708,9 @@ def test_interview_answers_are_shared_but_peer_evaluations_wait_for_both_submiss
     ).json()
     assert manager_view_after_both_submit["evaluation_revealed"] is True
     assert manager_view_after_both_submit["questions"][0]["rating"] == 4
+    assert manager_view_after_both_submit["questions"][1]["not_asked_reason"] == (
+        "Deferred until role scope is confirmed."
+    )
     assert manager_view_after_both_submit["summary"] == ("Strong communication and motivation.")
     assert manager_view_after_both_submit["private_notes"] is None
     assert manager_view_after_both_submit["private_notes_visible"] is False

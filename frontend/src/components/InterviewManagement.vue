@@ -57,10 +57,15 @@ const workspaceApplication = ref<ApplicationDto | null>(null)
 const interviewRecords = ref<InterviewRecordDto[]>([])
 const recordsLoading = ref(false)
 const recordSaving = ref(false)
+const recordSaveIntent = ref<'draft' | 'submit' | null>(null)
+const recordReopening = ref(false)
 const workspaceError = ref('')
 const recordNotice = ref('')
 const editingRecord = ref<InterviewRecordDto | null>(null)
 const recordEditorOpen = ref(false)
+const reopenReasonInput = ref<HTMLInputElement | null>(null)
+const reopenPromptOpen = ref(false)
+const reopenReason = ref('')
 const questionSuggestions = ref<InterviewQuestionSuggestions | null>(null)
 const questionLoading = ref(false)
 const questionPlanGenerating = ref<Record<string, boolean>>({})
@@ -121,6 +126,19 @@ const commonTraits = ['主動積極', '溝通表達', '團隊合作', '適應變
 const recordModeLabels: Record<InterviewRecordMode, string> = { onsite: '現場面試', video: '視訊面試', phone: '電話訪談', other: '其他' }
 const recordStatusLabels: Record<InterviewRecordStatus, string> = { planned: '已規劃', in_progress: '填寫中', completed: '已提交評分', cancelled: '已取消', no_show: '未到場' }
 const recommendationLabels: Record<InterviewRecommendation, string> = { advance: '進入下一階段', hold: '保留觀察', reject: '不建議錄用', offer: '建議發 Offer' }
+const ratingScale = [
+  { value: 1, label: '明顯不足' },
+  { value: 2, label: '未達期待' },
+  { value: 3, label: '符合期待' },
+  { value: 4, label: '優於期待' },
+  { value: 5, label: '卓越表現' },
+] as const
+const recordValidationErrors = reactive({
+  questions: {} as Record<number, string>,
+  overall: '',
+  recommendation: '',
+  summary: '',
+})
 
 // --- Interview-question compliance (就服法§5 / 性平法§7·§11) ---------------
 // The backend attaches a `compliance` result to AI-generated / suggested
@@ -619,6 +637,7 @@ async function regenerateQuestionPlanItem(
         const targetHasProgress = Boolean(
           draftQuestion?.response?.trim()
           || draftQuestion?.notes?.trim()
+          || (draftQuestion?.not_asked_reason !== null && draftQuestion?.not_asked_reason !== undefined)
           || (draftQuestion?.rating !== null && draftQuestion?.rating !== undefined),
         )
         const targetWasEdited = !draftQuestion || draftQuestion.question !== originalQuestion.question
@@ -685,6 +704,7 @@ function planQuestions(applicationId: number, stage: InterviewStage): InterviewR
     trait: item.category,
     response: '',
     rating: null,
+    not_asked_reason: null,
     notes: '',
     purpose: item.purpose,
     follow_up: item.follow_up,
@@ -724,6 +744,7 @@ async function generateWorkspaceQuestionPlan() {
   const hasQuestionProgress = recordForm.questions.some(question => (
     Boolean(question.response?.trim())
     || Boolean(question.notes?.trim())
+    || (question.not_asked_reason !== null && question.not_asked_reason !== undefined)
     || (question.rating !== null && question.rating !== undefined)
   ))
   const hasQuestionEdits = recordForm.questions.length !== originalPlanQuestions.length
@@ -814,6 +835,7 @@ function structuredRecordSummary(record: InterviewRecordDto) {
   }
   const details: string[] = []
   if (record.summary?.trim()) details.push(`總結：${record.summary.trim()}`)
+  if (validRating(record.overall_rating)) details.push(`整體評分：${record.overall_rating} / 5`)
   if (record.recommendation) details.push(`建議：${recommendationLabels[record.recommendation]}`)
   return details.join('；') || '已建立紀錄，尚未填寫評估內容。'
 }
@@ -841,9 +863,96 @@ function peerEvaluationsReleased(applicationId: number) {
 const editorEvaluationVisible = computed(() => (
   !editingRecord.value || editingRecord.value.evaluation_revealed
 ))
+const recordIsCompleted = computed(() => editingRecord.value?.status === 'completed')
+const recordCanEdit = computed(() => (
+  canEditStage(recordForm.stage) && !recordIsCompleted.value
+))
 const recordAnsweredCount = computed(() => (
   recordForm.questions.filter(questionIsAnswered).length
 ))
+const recordQuestionTotal = computed(() => recordForm.questions.length)
+
+function validRating(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 5
+}
+
+function questionIsSkipped(question: InterviewRecordQuestion) {
+  return question.not_asked_reason !== null && question.not_asked_reason !== undefined
+}
+
+function questionSkipIsComplete(question: InterviewRecordQuestion) {
+  return Boolean(question.not_asked_reason?.trim())
+}
+
+const recordRatedCount = computed(() => recordForm.questions.filter(question => (
+  !questionIsSkipped(question) && validRating(question.rating)
+)).length)
+const recordSkippedCount = computed(() => recordForm.questions.filter(questionSkipIsComplete).length)
+const recordEvaluatedCount = computed(() => recordRatedCount.value + recordSkippedCount.value)
+const recordAverageRating = computed(() => {
+  const ratings = recordForm.questions
+    .filter(question => !questionIsSkipped(question) && validRating(question.rating))
+    .map(question => Number(question.rating))
+  if (!ratings.length) return '—'
+  return (ratings.reduce((total, rating) => total + rating, 0) / ratings.length).toFixed(1)
+})
+const recordHasExceptionalStatus = computed(() => (
+  recordForm.status === 'cancelled' || recordForm.status === 'no_show'
+))
+
+function recordControlPrefix() {
+  return `interview-record-${editingRecord.value?.id ?? 'new'}`
+}
+
+function questionRatingName(index: number) {
+  return `${recordControlPrefix()}-question-${index}-rating`
+}
+
+function questionRatingId(index: number, value: number | 'not-asked') {
+  return `${questionRatingName(index)}-${value}`
+}
+
+function questionNotAskedReasonId(index: number) {
+  return `${recordControlPrefix()}-question-${index}-not-asked-reason`
+}
+
+function overallRatingId(value: number) {
+  return `${recordControlPrefix()}-overall-rating-${value}`
+}
+
+function clearRecordValidation() {
+  recordValidationErrors.questions = {}
+  recordValidationErrors.overall = ''
+  recordValidationErrors.recommendation = ''
+  recordValidationErrors.summary = ''
+}
+
+function clearQuestionValidation(index: number) {
+  if (!recordValidationErrors.questions[index]) return
+  const next = { ...recordValidationErrors.questions }
+  delete next[index]
+  recordValidationErrors.questions = next
+}
+
+function setQuestionRating(question: InterviewRecordQuestion, index: number, rating: number) {
+  question.rating = rating
+  question.not_asked_reason = null
+  clearQuestionValidation(index)
+}
+
+async function setQuestionNotAsked(question: InterviewRecordQuestion, index: number) {
+  question.rating = null
+  if (question.not_asked_reason === null || question.not_asked_reason === undefined) {
+    question.not_asked_reason = ''
+  }
+  clearQuestionValidation(index)
+  await nextTick()
+  document.getElementById(questionNotAskedReasonId(index))?.focus()
+}
+
+function focusRecordControl(id: string) {
+  void nextTick(() => document.getElementById(id)?.focus())
+}
 
 function inlineActionLabel(applicationId: number, stage: InterviewStage) {
   const record = currentPlanRecord(applicationId, stage)
@@ -856,7 +965,17 @@ function inlineActionLabel(applicationId: number, stage: InterviewStage) {
 }
 
 function canEditRecord(record: InterviewRecordDto) {
-  return canEditStage(record.stage)
+  return canEditStage(record.stage) && record.status !== 'completed'
+}
+
+function canReopenRecord(record: InterviewRecordDto | null) {
+  return Boolean(record && record.status === 'completed' && canEditStage(record.stage))
+}
+
+function recordHistoryActionLabel(record: InterviewRecordDto) {
+  if (canEditRecord(record)) return '可編輯'
+  if (canReopenRecord(record)) return '唯讀 · 可重新開啟'
+  return '唯讀'
 }
 
 async function loadInterviewRecords(applicationId: number) {
@@ -887,13 +1006,16 @@ async function openRecordWorkspace(application: ApplicationDto) {
 }
 
 function closeRecordWorkspace() {
-  if (recordSaving.value) return
+  if (recordSaving.value || recordReopening.value) return
   workspaceApplication.value = null
   editingRecord.value = null
   recordEditorOpen.value = false
   interviewRecords.value = []
   questionSuggestions.value = null
   workspaceError.value = ''
+  reopenPromptOpen.value = false
+  reopenReason.value = ''
+  clearRecordValidation()
 }
 
 async function newRecord(stage: InterviewStage = defaultRecordStage()) {
@@ -901,6 +1023,9 @@ async function newRecord(stage: InterviewStage = defaultRecordStage()) {
   const scheduledAt = stageData(workspaceApplication.value, stage).interview_at
   editingRecord.value = null
   recordEditorOpen.value = true
+  reopenPromptOpen.value = false
+  reopenReason.value = ''
+  clearRecordValidation()
   Object.assign(recordForm, {
     stage,
     question_plan_id: null,
@@ -953,6 +1078,9 @@ async function openInlineRecord(application: ApplicationDto) {
 function editRecord(record: InterviewRecordDto) {
   editingRecord.value = record
   recordEditorOpen.value = true
+  reopenPromptOpen.value = false
+  reopenReason.value = ''
+  clearRecordValidation()
   Object.assign(recordForm, {
     stage: record.stage,
     question_plan_id: record.question_plan_id,
@@ -971,24 +1099,35 @@ function editRecord(record: InterviewRecordDto) {
 }
 
 function cancelRecordEdit() {
-  if (recordSaving.value) return
+  if (recordSaving.value || recordReopening.value) return
   editingRecord.value = null
   recordEditorOpen.value = false
   recordForm.questions = []
+  reopenPromptOpen.value = false
+  reopenReason.value = ''
+  clearRecordValidation()
 }
 
 function addBlankQuestion() {
   workspaceError.value = ''
-  recordForm.questions.push({ question: '', trait: null, response: '', rating: null, notes: '' })
+  clearRecordValidation()
+  recordForm.questions.push({ question: '', trait: null, response: '', rating: null, not_asked_reason: null, notes: '' })
 }
 
 function removeRecordQuestion(index: number) {
   workspaceError.value = ''
+  clearRecordValidation()
   recordForm.questions.splice(index, 1)
 }
 
 async function addSuggestedQuestion(question: InterviewQuestion, trait: string) {
   if (!workspaceApplication.value) return
+  if (recordEditorOpen.value && !recordCanEdit.value) {
+    workspaceError.value = recordIsCompleted.value
+      ? '已提交的評分為唯讀；重新開啟後才能調整題目'
+      : '目前帳號不能修改這筆面試紀錄'
+    return
+  }
   if (!recordEditorOpen.value || !canEditStage(recordForm.stage)) await newRecord()
   if (recordForm.questions.some(item => item.question === question.question)) return
   workspaceError.value = ''
@@ -997,6 +1136,7 @@ async function addSuggestedQuestion(question: InterviewQuestion, trait: string) 
     trait,
     response: '',
     rating: null,
+    not_asked_reason: null,
     notes: '',
     purpose: question.purpose,
     follow_up: question.follow_up,
@@ -1045,11 +1185,59 @@ function optionalText(value: string | null | undefined) {
   return value?.trim() || null
 }
 
-async function saveRecord() {
+function validateRecordForSubmission() {
+  clearRecordValidation()
+  let firstInvalidId = ''
+  const questionErrors: Record<number, string> = {}
+  if (!recordForm.questions.length) {
+    workspaceError.value = '提交評分前至少需要一題面試題'
+    focusRecordControl('interview-record-add-question')
+    return false
+  }
+  recordForm.questions.forEach((question, index) => {
+    if (!question.question.trim()) {
+      questionErrors[index] = '請先填寫問題內容'
+      firstInvalidId ||= `${recordControlPrefix()}-question-${index}-text`
+      return
+    }
+    if (questionIsSkipped(question)) {
+      if (!question.not_asked_reason?.trim()) {
+        questionErrors[index] = '選擇「未詢問」時，必須填寫原因'
+        firstInvalidId ||= questionNotAskedReasonId(index)
+      }
+      return
+    }
+    if (!validRating(question.rating)) {
+      questionErrors[index] = '請選擇 1–5 分，或標記為「未詢問」並說明原因'
+      firstInvalidId ||= questionRatingId(index, 1)
+    }
+  })
+  recordValidationErrors.questions = questionErrors
+  if (!validRating(recordForm.overall_rating)) {
+    recordValidationErrors.overall = '請選擇整體 1–5 分'
+    firstInvalidId ||= overallRatingId(1)
+  }
+  if (!recordForm.recommendation) {
+    recordValidationErrors.recommendation = '請選擇錄用建議'
+    firstInvalidId ||= `${recordControlPrefix()}-recommendation`
+  }
+  if (!recordForm.summary?.trim()) {
+    recordValidationErrors.summary = '請填寫面試總評'
+    firstInvalidId ||= `${recordControlPrefix()}-summary`
+  }
+  if (!firstInvalidId) return true
+  workspaceError.value = '尚有必填評分未完成，請依下方提示補齊後再提交'
+  focusRecordControl(firstInvalidId)
+  return false
+}
+
+async function saveRecord(intent: 'draft' | 'submit') {
   const application = workspaceApplication.value
   if (!application) return
-  if (!canEditStage(recordForm.stage)) {
-    workspaceError.value = '目前帳號不能維護這個面試階段的紀錄'
+  if (!recordCanEdit.value) {
+    workspaceError.value = recordIsCompleted.value
+      ? '已提交的評分為唯讀；請先使用「重新開啟評分」'
+      : '目前帳號不能維護這個面試階段的紀錄'
     return
   }
   const interviewedAt = new Date(recordForm.interviewed_at)
@@ -1062,19 +1250,31 @@ async function saveRecord() {
     workspaceError.value = '面試時長必須介於 1 到 1440 分鐘'
     return
   }
+  if (intent === 'submit' && !recordHasExceptionalStatus.value && !validateRecordForSubmission()) {
+    return
+  }
+  if (intent === 'draft') clearRecordValidation()
   const questions = recordForm.questions
     .filter(item => item.question.trim())
-    .map(item => ({
-      question: item.question.trim(),
-      trait: optionalText(item.trait),
-      response: optionalText(item.response),
-      rating: item.rating ? Number(item.rating) : null,
-      notes: optionalText(item.notes),
-      purpose: optionalText(item.purpose),
-      follow_up: optionalText(item.follow_up),
-      source: optionalText(item.source),
-    }))
+    .map(item => {
+      const notAskedReason = optionalText(item.not_asked_reason)
+      return {
+        question: item.question.trim(),
+        trait: optionalText(item.trait),
+        response: optionalText(item.response),
+        rating: !notAskedReason && validRating(item.rating) ? Number(item.rating) : null,
+        not_asked_reason: notAskedReason,
+        notes: optionalText(item.notes),
+        purpose: optionalText(item.purpose),
+        follow_up: optionalText(item.follow_up),
+        source: optionalText(item.source),
+      }
+    })
+  const targetStatus: InterviewRecordStatus = recordHasExceptionalStatus.value
+    ? recordForm.status
+    : intent === 'submit' ? 'completed' : 'in_progress'
   recordSaving.value = true
+  recordSaveIntent.value = intent
   workspaceError.value = ''
   try {
     const payload: InterviewRecordWrite = {
@@ -1083,7 +1283,7 @@ async function saveRecord() {
       interviewed_at: interviewedAt.toISOString(),
       duration_minutes: recordForm.duration_minutes ? Number(recordForm.duration_minutes) : null,
       mode: recordForm.mode,
-      status: recordForm.status,
+      status: targetStatus,
       questions,
       summary: optionalText(recordForm.summary),
       private_notes: recordForm.stage === 'hr' ? optionalText(recordForm.private_notes) : undefined,
@@ -1103,7 +1303,13 @@ async function saveRecord() {
           overall_rating: payload.overall_rating,
         })).data
       : (await hrApi.createInterviewRecord(application.id, payload)).data
-    const successMessage = editingRecord.value ? '面試過程紀錄已更新' : '面試過程紀錄已建立'
+    const successMessage = targetStatus === 'completed'
+      ? '評分已提交；這筆紀錄現在為唯讀'
+      : targetStatus === 'cancelled'
+        ? '面試取消狀態已儲存'
+        : targetStatus === 'no_show'
+          ? '未到場狀態已儲存'
+          : editingRecord.value ? '面試草稿已更新' : '面試草稿已建立'
     await loadInterviewRecords(application.id)
     editRecord(saved)
     workspaceError.value = ''
@@ -1112,6 +1318,48 @@ async function saveRecord() {
     workspaceError.value = cause instanceof Error ? cause.message : '無法儲存面試過程紀錄'
   } finally {
     recordSaving.value = false
+    recordSaveIntent.value = null
+  }
+}
+
+async function showReopenPrompt() {
+  if (!canReopenRecord(editingRecord.value)) return
+  reopenPromptOpen.value = true
+  reopenReason.value = ''
+  workspaceError.value = ''
+  await nextTick()
+  reopenReasonInput.value?.focus()
+}
+
+function cancelReopenPrompt() {
+  if (recordReopening.value) return
+  reopenPromptOpen.value = false
+  reopenReason.value = ''
+}
+
+async function reopenRecord() {
+  const application = workspaceApplication.value
+  const record = editingRecord.value
+  if (!application || !record || !canReopenRecord(record)) return
+  const reason = reopenReason.value.trim()
+  if (!reason) {
+    workspaceError.value = '重新開啟評分前，請填寫原因'
+    reopenReasonInput.value?.focus()
+    return
+  }
+  recordReopening.value = true
+  workspaceError.value = ''
+  try {
+    const reopened = (await hrApi.reopenInterviewRecord(application.id, record.id, reason)).data
+    await loadInterviewRecords(application.id)
+    editRecord(reopened)
+    recordNotice.value = reopened.revision_number > 0
+      ? `評分已重新開啟；目前正式修訂為 #${reopened.revision_number}，再次提交後修訂編號會遞增`
+      : '評分已重新開啟'
+  } catch (cause) {
+    workspaceError.value = cause instanceof Error ? cause.message : '無法重新開啟這筆評分'
+  } finally {
+    recordReopening.value = false
   }
 }
 
@@ -1367,6 +1615,7 @@ onMounted(load)
                   </details>
                   <p :class="{ empty: !questionIsAnswered(question) }">{{ questionAnswer(question) }}</p>
                   <em v-if="question.rating">{{ question.rating }} / 5 分</em>
+                  <em v-else-if="question.not_asked_reason">未詢問：{{ question.not_asked_reason }}</em>
                   <em v-else-if="currentPlanRecord(application.id, inlineStage(application.id)) && !currentPlanRecord(application.id, inlineStage(application.id))?.evaluation_revealed" class="evaluation-locked">🔒 評分與觀察於雙方提交後顯示</em>
                 </div>
               </li>
@@ -1422,8 +1671,9 @@ onMounted(load)
             <strong>{{ record.stage === 'hr' ? 'HR 初談' : '主管複試' }} · {{ formatDate(record.interviewed_at) }}</strong>
             <small>{{ recordModeLabels[record.mode] }}<template v-if="record.duration_minutes"> · {{ record.duration_minutes }} 分鐘</template></small>
             <small>{{ record.interviewer_name }} · 已記錄 {{ answeredQuestionCount(record) }}/{{ record.questions.length }} 題<template v-if="record.question_plan_version"> · 題目 v{{ record.question_plan_version }}</template></small>
+            <small><template v-if="record.revision_number > 0">紀錄修訂 #{{ record.revision_number }}</template><template v-else>尚未正式提交</template><template v-if="record.submitted_at"> · {{ record.submitted_by_name || '原面試官' }} 於 {{ formatDate(record.submitted_at) }} 提交</template></small>
             <small class="history-visibility" :class="{ unlocked: record.evaluation_revealed }">{{ record.evaluation_revealed ? '評分可見' : '僅共享問答 · 評分保護中' }}</small>
-            <em>{{ canEditRecord(record) ? '可編輯' : '唯讀' }} →</em>
+            <em>{{ recordHistoryActionLabel(record) }} →</em>
           </button>
           <div v-if="!recordsLoading && !interviewRecords.length" class="record-history-empty"><strong>尚無過程紀錄</strong><p>建立第一筆紀錄，面試中即可逐題輸入回答與評分。</p></div>
         </aside>
@@ -1492,7 +1742,7 @@ onMounted(load)
                   <header><strong>{{ suggestion.trait }}</strong><span>{{ questionSuggestions.job_title }}</span></header>
                   <div v-for="question in suggestion.questions" :key="question.question" class="suggested-question">
                     <div><small v-if="question.source" class="question-source">履歷依據｜{{ question.source }}</small><strong>{{ question.question }}</strong><p v-if="questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert"><b>⚠ 疑似違法提問</b><span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span><em>{{ questionCompliance(question).suggestion }}</em></p><p v-else class="question-compliance ok"><b>✓ 合法</b></p><p><b>提問目的</b>{{ question.purpose }}</p><p><b>追問方向</b>{{ question.follow_up }}</p></div>
-                    <button class="button secondary" type="button" :disabled="recordForm.questions.some(item => item.question === question.question) || (recordEditorOpen && !canEditStage(recordForm.stage))" @click="addSuggestedQuestion(question, suggestion.trait)">{{ recordForm.questions.some(item => item.question === question.question) ? '已加入' : '加入紀錄' }}</button>
+                    <button class="button secondary" type="button" :disabled="recordForm.questions.some(item => item.question === question.question) || (recordEditorOpen && !recordCanEdit)" @click="addSuggestedQuestion(question, suggestion.trait)">{{ recordForm.questions.some(item => item.question === question.question) ? '已加入' : '加入紀錄' }}</button>
                   </div>
                 </article>
               </div>
@@ -1500,25 +1750,38 @@ onMounted(load)
             </div>
           </details>
 
-          <form v-if="recordEditorOpen" class="record-editor" data-testid="interview-record-form" @submit.prevent="saveRecord">
-            <header><div><small>{{ editingRecord ? `RECORD #${editingRecord.id}` : 'NEW INTERVIEW RECORD' }}</small><h3>{{ editingRecord ? '快速更新面試紀錄' : '開始面試紀錄' }}</h3><p>先記候選人的回答即可；評分、觀察與結論可在面試後再補。</p></div><div class="record-answer-progress"><strong>{{ recordAnsweredCount }}/{{ recordForm.questions.length }}</strong><span>已回答</span></div><span v-if="!canEditStage(recordForm.stage)" class="read-only-badge">唯讀</span></header>
+          <form v-if="recordEditorOpen" class="record-editor" data-testid="interview-record-form" @submit.prevent>
+            <header><div><small>{{ editingRecord ? `RECORD #${editingRecord.id}${editingRecord.revision_number > 0 ? ` · REVISION #${editingRecord.revision_number}` : ' · 尚未正式提交'}` : 'NEW INTERVIEW RECORD' }}</small><h3>{{ recordIsCompleted ? '已提交的面試評分' : editingRecord ? '更新面試紀錄' : '開始面試紀錄' }}</h3><p>{{ recordIsCompleted ? '已提交內容為唯讀；合法階段的面試官可填寫原因後重新開啟。' : '可先儲存草稿；提交前須完成逐題評分與整體總評。' }}</p></div><div class="record-answer-progress"><strong>{{ recordAnsweredCount }}/{{ recordForm.questions.length }}</strong><span>已回答</span></div><span v-if="!recordCanEdit" class="read-only-badge">{{ recordIsCompleted ? '已提交 · 唯讀' : '唯讀' }}</span></header>
+            <div v-if="editingRecord" class="record-audit-strip">
+              <span><b>題目版本</b>{{ editingRecord.question_plan_version ? `v${editingRecord.question_plan_version}` : '自訂題目' }}</span>
+              <span><b>紀錄修訂</b>{{ editingRecord.revision_number > 0 ? `#${editingRecord.revision_number}` : '尚未提交（#0）' }}</span>
+              <span v-if="editingRecord.submitted_at"><b>最近提交</b>{{ editingRecord.submitted_by_name || '原面試官' }} · {{ formatDate(editingRecord.submitted_at) }}</span>
+              <span v-else><b>最近提交</b>尚未提交</span>
+            </div>
+            <div v-if="editingRecord?.last_reopen_reason" class="record-reopen-history"><strong>最近重新開啟原因</strong><p>{{ editingRecord.last_reopen_reason }}</p></div>
             <div v-if="editingRecord && !editorEvaluationVisible" class="evaluation-lock-notice"><span>🔒</span><div><strong>對方的問答已與你共享，評分仍保持獨立</strong><p>待 HR 與主管都將最新紀錄標記為「已提交評分」，系統才會顯示單題評分、面試官觀察、總結與錄用建議。</p></div></div>
-            <fieldset :disabled="recordSaving || !canEditStage(recordForm.stage)">
+            <fieldset :disabled="recordSaving || recordReopening || !recordCanEdit">
               <details class="record-basic-details">
                 <summary><div><strong>面試基本資料</strong><span>{{ recordForm.stage === 'hr' ? 'HR 初談' : '主管複試' }} · {{ recordModeLabels[recordForm.mode] }} · {{ recordStatusLabels[recordForm.status] }}</span></div><em>查看／修改</em></summary>
               <div class="record-meta-grid">
                 <label>面試階段<select v-model="recordForm.stage" disabled><option value="hr">HR 初談</option><option value="manager">主管複試</option></select></label>
                 <label>面試日期與時間 *<input v-model="recordForm.interviewed_at" type="datetime-local" required></label>
                 <label>面試方式<select v-model="recordForm.mode"><option v-for="(label, value) in recordModeLabels" :key="value" :value="value">{{ label }}</option></select></label>
-                <label>目前狀態<select v-model="recordForm.status"><option v-for="(label, value) in recordStatusLabels" :key="value" :value="value">{{ label }}</option></select></label>
+                <label>紀錄狀態<select v-model="recordForm.status" aria-describedby="record-status-help"><option value="in_progress">填寫中</option><option value="cancelled">已取消</option><option value="no_show">未到場</option><option v-if="recordForm.status === 'planned'" value="planned" disabled>已規劃</option><option v-if="recordForm.status === 'completed'" value="completed" disabled>已提交評分</option></select><small id="record-status-help">正常流程請用下方「儲存草稿」或「提交評分」；此處僅保留取消／未到場。</small></label>
                 <label>面試時長（分鐘）<input v-model.number="recordForm.duration_minutes" type="number" min="1" max="1440"></label>
               </div>
               </details>
 
               <section class="record-question-section">
-                <header><div><strong>快速問答紀錄</strong><span>目前 {{ recordAnsweredCount }}/{{ recordForm.questions.length }} 題已填寫；面試中只要先記回答。</span></div><button class="button secondary" type="button" @click="addBlankQuestion">＋ 自訂問題</button></header>
-                <article v-for="(question, index) in recordForm.questions" :key="index" class="record-question-card">
-                  <header><span>{{ index + 1 }}</span><label>問題<input v-model="question.question" maxlength="500" placeholder="輸入面試問題" required></label><button type="button" aria-label="移除這個問題" @click="removeRecordQuestion(index)">×</button></header>
+                <header><div><strong>逐題問答與評分</strong><span>回答可先記草稿；提交時每題都要選擇 1–5 分，或標記「未詢問」並說明原因。</span></div><button id="interview-record-add-question" class="button secondary" type="button" @click="addBlankQuestion">＋ 自訂問題</button></header>
+                <section v-if="editorEvaluationVisible" class="rating-scale-guide" aria-labelledby="interview-rating-scale-title">
+                  <header><div><strong id="interview-rating-scale-title">統一 1–5 分量表</strong><span>所有單題與整體評分使用相同判準</span></div><div class="rating-progress" aria-live="polite"><span><b>{{ recordRatedCount }}</b>已評</span><span><b>{{ recordSkippedCount }}</b>略過</span><span><b>{{ recordQuestionTotal }}</b>總題數</span><span><b>{{ recordAverageRating }}</b>題目平均<small>只供參考</small></span></div></header>
+                  <ol><li v-for="scale in ratingScale" :key="scale.value"><b>{{ scale.value }}</b><span>{{ scale.label }}</span></li></ol>
+                  <p>{{ recordEvaluatedCount }}/{{ recordQuestionTotal }} 題已完成評分或略過標記；平均只計入實際評分題目，不作自動錄用決策。</p>
+                </section>
+                <div v-if="recordHasExceptionalStatus" class="exceptional-status-note" role="note"><strong>{{ recordForm.status === 'cancelled' ? '本次面試已取消' : '候選人未到場' }}</strong><span>可直接儲存此狀態，不強制填寫逐題與整體評分。</span></div>
+                <article v-for="(question, index) in recordForm.questions" :key="index" class="record-question-card" :class="{ invalid: recordValidationErrors.questions[index] }" :data-question-index="index">
+                  <header><span>{{ index + 1 }}</span><label>問題<input :id="`${recordControlPrefix()}-question-${index}-text`" v-model="question.question" maxlength="500" placeholder="輸入面試問題" required @input="clearQuestionValidation(index)"></label><button type="button" aria-label="移除這個問題" @click="removeRecordQuestion(index)">×</button></header>
                   <p v-if="question.question.trim() && questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert">
                     <b>⚠ 疑似違法提問</b>
                     <span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span>
@@ -1534,27 +1797,40 @@ onMounted(load)
                   <div class="record-quick-answer">
                     <label>應徵者回答<textarea v-model="question.response" rows="3" maxlength="5000" placeholder="先記重點：情境、採取的行動、最後結果…"></textarea></label>
                   </div>
-                  <details v-if="editorEvaluationVisible" class="question-evaluation-details">
-                    <summary><span>評分與觀察（選填，可面試後補）</span><em>{{ question.rating ? `${question.rating} 分` : '尚未評分' }}</em></summary>
-                    <div class="record-answer-grid">
-                      <label>對應特質<input v-model="question.trait" maxlength="100" placeholder="例如：團隊合作"></label>
-                      <label>單題評分<select v-model="question.rating"><option :value="null">未評分</option><option v-for="rating in 5" :key="rating" :value="rating">{{ rating }} 分</option></select></label>
-                      <label class="wide">面試官觀察（評分區）<textarea v-model="question.notes" rows="2" maxlength="2000" placeholder="記錄非語言反應、待查證處或追問結果…"></textarea></label>
-                    </div>
-                  </details>
+                  <div v-if="editorEvaluationVisible" class="question-evaluation-direct">
+                    <fieldset class="rating-radio-group" :aria-describedby="recordValidationErrors.questions[index] ? `${questionRatingName(index)}-error` : undefined" :aria-invalid="Boolean(recordValidationErrors.questions[index])">
+                      <legend>第 {{ index + 1 }} 題評分</legend>
+                      <div class="rating-segments">
+                        <label v-for="scale in ratingScale" :key="scale.value" :class="{ selected: !questionIsSkipped(question) && question.rating === scale.value }">
+                          <input :id="questionRatingId(index, scale.value)" type="radio" :name="questionRatingName(index)" :value="scale.value" :checked="!questionIsSkipped(question) && question.rating === scale.value" :aria-label="`${scale.value} 分：${scale.label}`" @change="setQuestionRating(question, index, scale.value)">
+                          <b>{{ scale.value }}</b><span>{{ scale.label }}</span>
+                        </label>
+                        <label class="not-asked-option" :class="{ selected: questionIsSkipped(question) }">
+                          <input :id="questionRatingId(index, 'not-asked')" type="radio" :name="questionRatingName(index)" value="not-asked" :checked="questionIsSkipped(question)" aria-label="未詢問此題" @change="setQuestionNotAsked(question, index)">
+                          <b>—</b><span>未詢問</span>
+                        </label>
+                      </div>
+                    </fieldset>
+                    <label v-if="questionIsSkipped(question)" class="not-asked-reason">未詢問原因 *<input :id="questionNotAskedReasonId(index)" v-model="question.not_asked_reason" maxlength="1000" required :aria-invalid="Boolean(recordValidationErrors.questions[index])" :aria-describedby="recordValidationErrors.questions[index] ? `${questionRatingName(index)}-error` : undefined" placeholder="例如：時間不足、題目不適用或已由前題充分涵蓋" @input="clearQuestionValidation(index)"></label>
+                    <p v-if="recordValidationErrors.questions[index]" :id="`${questionRatingName(index)}-error`" class="field-error" role="alert">{{ recordValidationErrors.questions[index] }}</p>
+                    <details class="question-observation-details">
+                      <summary><span>對應特質與面試官觀察</span><em>{{ question.notes?.trim() ? '已有觀察' : '選填' }}</em></summary>
+                      <div class="record-answer-grid"><label>對應特質<input v-model="question.trait" maxlength="100" placeholder="例如：團隊合作"></label><label class="wide">面試官觀察（評分區）<textarea v-model="question.notes" rows="2" maxlength="2000" placeholder="記錄非語言反應、待查證處或追問結果…"></textarea></label></div>
+                    </details>
+                  </div>
                   <div v-else class="evaluation-lock-inline compact"><span>🔒</span><p><strong>評分與觀察尚未公開</strong><small>候選人回答仍可直接查看。</small></p></div>
                 </article>
                 <div v-if="!recordForm.questions.length" class="record-question-empty"><strong>還沒有問題</strong><p>從上方建議題庫加入，或按「自訂問題」開始紀錄。</p></div>
               </section>
 
-              <details v-if="editorEvaluationVisible" class="record-conclusion-details">
-                <summary><div><strong>面試後結論與建議</strong><span>評分、總結與錄用建議可在面試結束後補填</span></div><em>{{ recordForm.recommendation ? recommendationLabels[recordForm.recommendation] : '尚未填寫' }}</em></summary>
+              <section v-if="editorEvaluationVisible" class="record-conclusion-section" aria-labelledby="record-conclusion-title">
+                <header><div><strong id="record-conclusion-title">整體總評</strong><span>提交評分前，請完成整體 1–5 分、錄用建議與面試總評。</span></div><em>{{ recordForm.recommendation ? recommendationLabels[recordForm.recommendation] : '尚未填寫' }}</em></header>
                 <div class="record-conclusion">
-                  <label>整體評分<select v-model="recordForm.overall_rating"><option :value="null">尚未評分</option><option v-for="rating in 5" :key="rating" :value="rating">{{ rating }} 分</option></select></label>
-                  <label>錄用建議<select v-model="recordForm.recommendation"><option :value="null">尚未決定</option><option v-for="(label, value) in recommendationLabels" :key="value" :value="value">{{ label }}</option></select></label>
-                  <label class="wide">面試總結<textarea v-model="recordForm.summary" rows="4" maxlength="5000" placeholder="摘要主要優勢、風險、待確認事項與共識…"></textarea></label>
+                  <fieldset class="rating-radio-group overall-rating-group" :aria-invalid="Boolean(recordValidationErrors.overall)" :aria-describedby="recordValidationErrors.overall ? `${recordControlPrefix()}-overall-error` : undefined"><legend>整體評分 *</legend><div class="rating-segments"><label v-for="scale in ratingScale" :key="scale.value" :class="{ selected: recordForm.overall_rating === scale.value }"><input :id="overallRatingId(scale.value)" type="radio" :name="`${recordControlPrefix()}-overall-rating`" :value="scale.value" :checked="recordForm.overall_rating === scale.value" :aria-label="`整體 ${scale.value} 分：${scale.label}`" @change="recordForm.overall_rating = scale.value; recordValidationErrors.overall = ''"><b>{{ scale.value }}</b><span>{{ scale.label }}</span></label></div><p v-if="recordValidationErrors.overall" :id="`${recordControlPrefix()}-overall-error`" class="field-error" role="alert">{{ recordValidationErrors.overall }}</p></fieldset>
+                  <label>錄用建議 *<select :id="`${recordControlPrefix()}-recommendation`" v-model="recordForm.recommendation" :aria-invalid="Boolean(recordValidationErrors.recommendation)" :aria-describedby="recordValidationErrors.recommendation ? `${recordControlPrefix()}-recommendation-error` : undefined" @change="recordValidationErrors.recommendation = ''"><option :value="null">尚未決定</option><option v-for="(label, value) in recommendationLabels" :key="value" :value="value">{{ label }}</option></select><small v-if="recordValidationErrors.recommendation" :id="`${recordControlPrefix()}-recommendation-error`" class="field-error" role="alert">{{ recordValidationErrors.recommendation }}</small></label>
+                  <label class="wide">面試總評 *<textarea :id="`${recordControlPrefix()}-summary`" v-model="recordForm.summary" rows="4" maxlength="5000" :aria-invalid="Boolean(recordValidationErrors.summary)" :aria-describedby="recordValidationErrors.summary ? `${recordControlPrefix()}-summary-error` : undefined" placeholder="摘要主要優勢、風險、待確認事項與共識…" @input="recordValidationErrors.summary = ''"></textarea><small v-if="recordValidationErrors.summary" :id="`${recordControlPrefix()}-summary-error`" class="field-error" role="alert">{{ recordValidationErrors.summary }}</small></label>
                 </div>
-              </details>
+              </section>
               <div v-else class="record-conclusion-locked"><span>🔒</span><div><strong>面試總結與錄用建議尚未公開</strong><p>雙方完成各自評估前，不會互相影響判斷。</p></div></div>
 
               <details v-if="recordForm.stage === 'hr' && (canEditStage('hr') || editingRecord?.private_notes_visible)" class="hr-private-notes">
@@ -1562,7 +1838,12 @@ onMounted(load)
                 <label>私密備註<textarea v-model="recordForm.private_notes" rows="4" maxlength="10000" placeholder="例如：薪資個資、合理調整需求或其他僅限 HR 處理的敏感事項…"></textarea></label>
               </details>
             </fieldset>
-            <footer><span>{{ editingRecord ? `建立者：${editingRecord.interviewer_name} · 更新：${formatDate(editingRecord.updated_at)}` : '可先儲存目前回答，其他評估稍後再補。' }}</span><div><button class="button secondary" type="button" :disabled="recordSaving" @click="cancelRecordEdit">關閉</button><button v-if="canEditStage(recordForm.stage)" class="button primary" data-testid="interview-record-save" :disabled="recordSaving">{{ recordSaving ? '儲存中…' : '儲存目前進度' }}</button></div></footer>
+            <section v-if="reopenPromptOpen && canReopenRecord(editingRecord)" class="record-reopen-panel" aria-labelledby="record-reopen-title">
+              <div><strong id="record-reopen-title">重新開啟評分</strong><p>請留下原因供稽核；重新開啟後會回到草稿狀態，再次提交時才會遞增修訂編號。</p></div>
+              <label>重新開啟原因 *<input ref="reopenReasonInput" v-model="reopenReason" maxlength="1000" :disabled="recordReopening" placeholder="例如：補充面試證據後需要調整第 3 題評分" @keydown.enter.prevent="reopenRecord"></label>
+              <div><button class="button secondary" type="button" :disabled="recordReopening" @click="cancelReopenPrompt">取消</button><button class="button primary" type="button" :disabled="recordReopening || !reopenReason.trim()" @click="reopenRecord">{{ recordReopening ? '重新開啟中…' : '確認重新開啟' }}</button></div>
+            </section>
+            <footer><span><template v-if="editingRecord">建立者：{{ editingRecord.interviewer_name }} · 更新：{{ formatDate(editingRecord.updated_at) }}<template v-if="editingRecord.submitted_at"> · 提交：{{ editingRecord.submitted_by_name || '原面試官' }}／{{ formatDate(editingRecord.submitted_at) }}</template></template><template v-else>草稿可隨時補填；「提交評分」後即轉為唯讀。</template></span><div><button class="button secondary" type="button" :disabled="recordSaving || recordReopening" @click="cancelRecordEdit">關閉</button><button v-if="canReopenRecord(editingRecord) && !reopenPromptOpen" class="button secondary reopen-button" type="button" data-testid="interview-record-reopen" :disabled="recordReopening" @click="showReopenPrompt">重新開啟評分</button><template v-if="recordCanEdit"><button v-if="recordHasExceptionalStatus" class="button primary" type="button" data-testid="interview-record-save-status" :disabled="recordSaving || recordReopening" @click="saveRecord('draft')">{{ recordSaving && recordSaveIntent === 'draft' ? '儲存狀態中…' : '儲存狀態' }}</button><template v-else><button class="button secondary" type="button" data-testid="interview-record-save-draft" :disabled="recordSaving || recordReopening" @click="saveRecord('draft')">{{ recordSaving && recordSaveIntent === 'draft' ? '儲存草稿中…' : '儲存草稿' }}</button><button class="button primary" type="button" data-testid="interview-record-submit" :disabled="recordSaving || recordReopening" @click="saveRecord('submit')">{{ recordSaving && recordSaveIntent === 'submit' ? '提交評分中…' : '提交評分' }}</button></template></template></div></footer>
           </form>
           <section v-else class="record-editor-empty"><span>記</span><strong>選擇既有紀錄或建立新紀錄</strong><p>建立後會先帶入所屬階段的 5 題，再依面試進度逐題填答。</p><button v-if="canEditStage(defaultRecordStage())" class="button primary" type="button" @click="newRecord()">建立面試紀錄</button></section>
         </main>
@@ -1678,4 +1959,12 @@ onMounted(load)
 .question-compliance-inline{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:99px;font-size:9px;font-weight:700;vertical-align:middle}
 .question-compliance-inline.ok{background:#e3f4eb;color:#237052}
 .question-compliance-inline.warning{background:#fbe0de;color:#a2352e;cursor:help}
+
+/* 逐題 1–5 分與整體總評：radio 保留原生鍵盤語意，外層提供清楚的分段外觀。 */
+.record-audit-strip{display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px;border-bottom:1px solid #e4ebe9;background:#f8fbfa}.record-audit-strip span{display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:99px;background:#edf5f2;color:#4f6d66;font-size:10px}.record-audit-strip b{color:#286d62}.record-reopen-history{display:flex;align-items:flex-start;gap:10px;margin:11px 16px 0;padding:10px 12px;border:1px solid #e2d4a7;border-radius:8px;background:#fff9e9;color:#735b28}.record-reopen-history strong{flex:0 0 auto;font-size:10px}.record-reopen-history p{margin:0;font-size:10px;line-height:1.55}.record-meta-grid label>small{color:#778984;font-size:9px;line-height:1.45}
+.rating-scale-guide{overflow:hidden;margin:0 0 14px;border:1px solid #bcded4;border-radius:11px;background:#f7fcfa}.rating-scale-guide>header{display:flex;align-items:center;gap:16px;padding:12px 13px;border-bottom:1px solid #d8e8e3;background:#edf8f4}.rating-scale-guide>header>div:first-child{min-width:150px;flex:1}.rating-scale-guide>header strong,.rating-scale-guide>header span{display:block}.rating-scale-guide>header strong{color:#225f56;font-size:12px}.rating-scale-guide>header span{margin-top:2px;color:#6d807a;font-size:9px}.rating-progress{display:grid;grid-template-columns:repeat(4,minmax(54px,auto));gap:6px}.rating-progress span{min-width:56px;padding:5px 7px;border-radius:7px;background:#fff;text-align:center}.rating-progress b{display:block;color:#1f7165;font-size:15px}.rating-progress small{display:block;color:#8b6a2b;font-size:7px}.rating-scale-guide ol{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;margin:0;padding:10px 12px;list-style:none}.rating-scale-guide li{display:flex;align-items:center;gap:7px;padding:7px 8px;border:1px solid #dce9e5;border-radius:7px;background:#fff;color:#506c65;font-size:9px}.rating-scale-guide li b{width:23px;height:23px;display:grid;place-items:center;flex:0 0 auto;border-radius:50%;background:#dff1eb;color:#1e6b60;font-size:11px}.rating-scale-guide>p{margin:0;padding:0 12px 10px;color:#71837e;font-size:9px;line-height:1.5}.exceptional-status-note{display:flex;align-items:center;gap:9px;margin:0 0 12px;padding:10px 12px;border:1px solid #e6d2ad;border-radius:8px;background:#fff8e9;color:#755b2a}.exceptional-status-note strong{font-size:10px}.exceptional-status-note span{font-size:9px}
+.record-question-card.invalid{border-color:#d88982;box-shadow:0 0 0 2px rgba(190,74,65,.08)}.question-evaluation-direct{display:grid;gap:9px;margin:0 12px 12px;padding:11px;border:1px solid #cfe2dc;border-radius:9px;background:#fff}.rating-radio-group{min-width:0}.rating-radio-group>legend{margin-bottom:7px;color:#365f58;font-size:11px;font-weight:800}.rating-segments{display:grid;grid-template-columns:repeat(6,minmax(70px,1fr));gap:6px}.rating-segments label{position:relative;min-height:54px;display:grid;place-content:center;justify-items:center;gap:2px;padding:6px;border:1px solid #cfdfda;border-radius:8px;background:#fff;color:#5c716c;text-align:center;cursor:pointer;transition:border-color .15s ease,background .15s ease,box-shadow .15s ease}.rating-segments label:hover{border-color:#62a99b;background:#f2faf7}.rating-segments label.selected{border-color:#247f72;background:#e3f4ef;color:#175f55;box-shadow:0 0 0 2px rgba(36,127,114,.1)}.rating-segments label.not-asked-option.selected{border-color:#a9792d;background:#fff4dc;color:#79581e}.rating-segments input{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}.rating-segments label:focus-within{outline:3px solid rgba(25,111,99,.25);outline-offset:2px}.rating-segments b{font-size:16px}.rating-segments span{font-size:8px;line-height:1.25}.record-editor>fieldset:disabled .rating-segments label{cursor:default}.record-editor>fieldset:disabled .rating-segments label:hover{border-color:#cfdfda;background:#fff}.record-editor>fieldset:disabled .rating-segments label.selected{border-color:#247f72;background:#e3f4ef}.not-asked-reason{display:grid;gap:5px;color:#6e5727;font-size:10px;font-weight:700}.not-asked-reason input{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d9c28d;border-radius:7px;background:#fffdf7;color:#4b412d;font:inherit}.field-error{margin:0!important;color:#a23f37!important;font-size:10px!important;line-height:1.45!important}.question-observation-details{border-top:1px solid #e4ebe9}.question-observation-details>summary{display:flex;align-items:center;gap:8px;padding:8px 2px 0;list-style:none;cursor:pointer;color:#56716a;font-size:10px}.question-observation-details>summary::-webkit-details-marker{display:none}.question-observation-details>summary:before{content:'＋';color:#27766b;font-weight:800}.question-observation-details[open]>summary:before{content:'－'}.question-observation-details>summary span{flex:1}.question-observation-details>summary em{font-style:normal}.question-observation-details .record-answer-grid{padding:10px 0 0}
+.record-conclusion-section{margin:0 16px 14px;border:1px solid #bcded4;border-radius:10px;background:#f8fcfa}.record-conclusion-section>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid #d7e8e2}.record-conclusion-section>header strong,.record-conclusion-section>header span{display:block}.record-conclusion-section>header strong{color:#255f56;font-size:13px}.record-conclusion-section>header span{margin-top:3px;color:#6e817b;font-size:10px}.record-conclusion-section>header em{color:#2a756a;font-size:10px;font-style:normal;font-weight:700}.record-conclusion-section .record-conclusion{grid-template-columns:minmax(0,2fr) minmax(220px,1fr);padding:13px 14px 14px}.overall-rating-group{grid-column:1/-1}.overall-rating-group .rating-segments{grid-template-columns:repeat(5,minmax(80px,1fr))}.record-conclusion-section .wide{grid-column:1/-1}.record-conclusion-section textarea{width:100%;box-sizing:border-box}.record-conclusion-section [aria-invalid="true"]{border-color:#c8675f}.record-reopen-panel{display:grid;grid-template-columns:minmax(180px,1fr) minmax(280px,2fr) auto;align-items:end;gap:12px;padding:13px 16px;border-top:1px solid #e0cf9c;background:#fff9e8}.record-reopen-panel strong{color:#6e5525;font-size:11px}.record-reopen-panel p{margin:3px 0 0;color:#806b42;font-size:9px;line-height:1.5}.record-reopen-panel label{display:grid;gap:5px;color:#6e5727;font-size:10px}.record-reopen-panel input{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d5bd7f;border-radius:7px;background:#fff;color:#4e452f;font:inherit}.record-reopen-panel>div:last-child{display:flex;gap:7px}.reopen-button{border-color:#c99d47;color:#76551b}.record-editor :is(input,select,textarea,button):focus-visible{outline:3px solid rgba(35,128,114,.22);outline-offset:2px}.record-editor [aria-invalid="true"]{border-color:#c8675f}.record-editor>footer .button:disabled{cursor:not-allowed;opacity:.58}
+@media(max-width:980px){.rating-scale-guide>header{align-items:flex-start;flex-direction:column}.rating-progress{width:100%;grid-template-columns:repeat(4,1fr)}.rating-scale-guide ol{grid-template-columns:repeat(3,1fr)}.rating-segments{grid-template-columns:repeat(3,1fr)}.record-reopen-panel{grid-template-columns:1fr}.record-reopen-panel>div:last-child{justify-content:flex-end}}
+@media(max-width:680px){.record-audit-strip{display:grid}.rating-progress{grid-template-columns:repeat(2,1fr)}.rating-scale-guide ol{grid-template-columns:1fr}.rating-segments,.overall-rating-group .rating-segments{grid-template-columns:repeat(2,minmax(0,1fr))}.rating-segments label{min-height:50px}.record-conclusion-section{margin-inline:10px}.record-conclusion-section>header{align-items:flex-start;flex-direction:column}.record-conclusion-section .record-conclusion{grid-template-columns:1fr}.overall-rating-group,.record-conclusion-section .wide{grid-column:auto}.record-reopen-panel>div:last-child,.record-editor>footer>div{display:grid;grid-template-columns:1fr;width:100%}.record-reopen-panel .button,.record-editor>footer .button{width:100%}}
 </style>

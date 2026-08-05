@@ -132,6 +132,16 @@ _TABLE_REDACTED_COLUMNS: dict[str, frozenset[str]] = {
         }
     ),
     "retention_storage_deletions": frozenset({"locator", "last_error"}),
+    "interview_records": frozenset(
+        {
+            "questions",
+            "summary",
+            "recommendation",
+            "overall_rating",
+            "private_notes",
+            "last_reopen_reason",
+        }
+    ),
 }
 
 # Only these recruiting fields may be revealed by an explicitly authorized IT
@@ -187,6 +197,7 @@ _TABLE_PRESENTATION: dict[str, tuple[str, str]] = {
     ),
     "job_applications": ("職缺應徵紀錄", "人才、職缺與使用履歷的關聯"),
     "job_requisitions": ("職缺資料", "招募職缺、需求條件與媒合權重"),
+    "interview_records": ("結構化面試紀錄", "HR 與主管的版本化面試評分與提交紀錄"),
     "match_results": ("人才媒合結果", "人才與職缺的媒合分數及評分明細"),
     "refresh_tokens": ("登入更新權杖", "登入工作階段的安全更新權杖"),
     "retention_storage_deletions": (

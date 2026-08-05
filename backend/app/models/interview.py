@@ -37,6 +37,7 @@ class InterviewRecord(TimestampMixin, Base):
             "question_plan_version IS NULL OR question_plan_version >= 1",
             name="valid_question_plan_version",
         ),
+        CheckConstraint("revision_number >= 0", name="valid_revision_number"),
         Index(
             "ix_interview_records_application_interviewed_at",
             "application_id",
@@ -62,6 +63,18 @@ class InterviewRecord(TimestampMixin, Base):
     private_notes: Mapped[str | None] = mapped_column(Text)
     recommendation: Mapped[str | None] = mapped_column(String(20))
     overall_rating: Mapped[int | None] = mapped_column(Integer)
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    submitted_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    submitted_by_name: Mapped[str | None] = mapped_column(String(100))
+    revision_number: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    last_reopen_reason: Mapped[str | None] = mapped_column(Text)
 
     # Names are snapshots so the historical record stays attributable even if a
     # user account is renamed or later removed. IDs retain the live relationship.

@@ -206,6 +206,7 @@ export type InterviewRecordQuestion = {
   trait?: string | null
   response?: string | null
   rating?: number | null
+  not_asked_reason?: string | null
   notes?: string | null
   purpose?: string | null
   follow_up?: string | null
@@ -235,6 +236,11 @@ export type InterviewRecordDto = InterviewRecordWrite & {
   updated_by_name: string
   created_at: string
   updated_at: string
+  submitted_at: string | null
+  submitted_by_id: number | null
+  submitted_by_name: string | null
+  revision_number: number
+  last_reopen_reason: string | null
   evaluation_revealed: boolean
   private_notes_visible: boolean
 }
@@ -516,6 +522,10 @@ export const hrApi = {
   updateInterviewRecord: (applicationId: number, recordId: number, payload: Partial<Omit<InterviewRecordWrite, 'stage' | 'question_plan_id'>>) =>
     apiRequest<InterviewRecordDto>(`/applications/${applicationId}/interview-records/${recordId}`, {
       method: 'PATCH', body: JSON.stringify(payload),
+    }),
+  reopenInterviewRecord: (applicationId: number, recordId: number, reason: string) =>
+    apiRequest<InterviewRecordDto>(`/applications/${applicationId}/interview-records/${recordId}/reopen`, {
+      method: 'POST', body: JSON.stringify({ reason }),
     }),
 
   resumes: async (status?: string, includeConfirmed = false): Promise<ApiResult<ResumeDto[]>> => {

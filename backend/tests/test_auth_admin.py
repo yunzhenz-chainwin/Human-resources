@@ -622,6 +622,14 @@ def test_it_operations_issue_tracker_and_safe_database_overview(auth_client) -> 
             "analysis_payload",
             "validation_summary",
         },
+        "interview_records": {
+            "questions",
+            "summary",
+            "recommendation",
+            "overall_rating",
+            "private_notes",
+            "last_reopen_reason",
+        },
         "system_settings": {"value", "is_secret"},
     }.items():
         protected_preview = client.get(
