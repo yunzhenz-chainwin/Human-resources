@@ -955,6 +955,122 @@ def test_hr_reassigns_candidate_to_new_department_and_rejects_unavailable_job(
         ).status_code == 403
 
 
+def test_hr_marks_interview_ready_and_the_status_survives_stage_sync(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    application_id = ids["design_application"]
+    endpoint = f"/api/v1/applications/{application_id}/mark-interview-ready"
+    hr_headers = _headers(client, "hr")
+
+    assert client.post(endpoint).status_code == 401
+    assert client.post(endpoint, headers=_headers(client, "it")).status_code == 403
+    assert (
+        client.post(endpoint, headers=_headers(client, "design-manager")).status_code == 403
+    )
+    assert (
+        client.post(
+            "/api/v1/applications/999999/mark-interview-ready",
+            headers=hr_headers,
+        ).status_code
+        == 404
+    )
+
+    marked = client.post(endpoint, headers=hr_headers)
+    assert marked.status_code == 200, marked.text
+    body = marked.json()
+    assert set(body) == APPLICATION_KEYS
+    assert body["status"] == "interview_ready"
+    assert body["hr_interview"]["interview_at"] is None
+    assert body["manager_interview"]["interview_at"] is None
+
+    # Marking again is a no-op rather than an error.
+    assert client.post(endpoint, headers=hr_headers).json()["status"] == "interview_ready"
+
+    # _sync_application_status must not clobber the mark while no stage holds data.
+    cleared = client.patch(
+        f"/api/v1/applications/{application_id}/interviews/hr",
+        headers=hr_headers,
+        json={"interview_notes": None},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["status"] == "interview_ready"
+
+    with testing_session() as db:
+        application = db.get(JobApplication, application_id)
+        assert application is not None
+        assert application.status == "interview_ready"
+        audit = db.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.action == "application.mark_interview_ready",
+                AuditLog.resource_id == str(application_id),
+            )
+            .order_by(AuditLog.id.desc())
+        )
+        assert audit is not None
+        assert audit.department_id == ids["design"]
+        assert audit.details["status"] == {"from": "submitted", "to": "interview_ready"}
+
+
+def test_interview_ready_upgrades_to_interview_once_stage_data_exists(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    application_id = ids["design_application"]
+    endpoint = f"/api/v1/applications/{application_id}/mark-interview-ready"
+    hr_headers = _headers(client, "hr")
+
+    assert client.post(endpoint, headers=hr_headers).json()["status"] == "interview_ready"
+
+    scheduled = client.patch(
+        f"/api/v1/applications/{application_id}/interviews/hr",
+        headers=hr_headers,
+        json={
+            "interview_at": "2030-09-01T09:30:00+08:00",
+            "interview_result": "pending",
+        },
+    )
+    assert scheduled.status_code == 200, scheduled.text
+    assert scheduled.json()["status"] == "interview"
+
+    # Once real interview data exists the application can no longer be re-marked.
+    conflict = client.post(endpoint, headers=hr_headers)
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["detail"] == "Application already holds interview data"
+
+    with testing_session() as db:
+        application = db.get(JobApplication, application_id)
+        assert application is not None
+        assert application.status == "interview"
+
+
+def test_mark_interview_ready_rejects_applications_past_the_pre_interview_stage(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    application_id = ids["engineering_application"]
+    with testing_session() as db:
+        application = db.get(JobApplication, application_id)
+        assert application is not None
+        application.status = "hired"
+        db.commit()
+
+    conflict = client.post(
+        f"/api/v1/applications/{application_id}/mark-interview-ready",
+        headers=_headers(client, "hr"),
+    )
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["detail"] == (
+        "Only a pre-interview application can be marked ready to interview"
+    )
+
+    with testing_session() as db:
+        application = db.get(JobApplication, application_id)
+        assert application is not None
+        assert application.status == "hired"
+
+
 def test_department_manager_updates_interview_with_status_sync_and_audit(
     application_client,
 ) -> None:

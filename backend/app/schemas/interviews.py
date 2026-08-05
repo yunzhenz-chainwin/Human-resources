@@ -66,6 +66,7 @@ def validate_completed_evaluation(
     summary: str | None,
     recommendation: InterviewRecommendation | None,
     overall_rating: int | None,
+    overall_score: int | None = None,
 ) -> None:
     """Validate the complete evaluation contract for an official submission."""
 
@@ -80,8 +81,13 @@ def validate_completed_evaluation(
         raise ValueError(
             "each completed interview question requires rating or not_asked_reason"
         )
-    if overall_rating is None:
-        raise ValueError("completed interview records require overall_rating")
+    # Either total score works. Records submitted before overall_score existed only
+    # carry overall_rating, and requiring the new field would lock them out of
+    # resubmission after a reopen.
+    if overall_score is None and overall_rating is None:
+        raise ValueError(
+            "completed interview records require overall_score or overall_rating"
+        )
     if recommendation is None:
         raise ValueError("completed interview records require recommendation")
     if summary is None or not summary.strip():
@@ -102,6 +108,7 @@ class InterviewRecordCreate(BaseModel):
     private_notes: str | None = Field(default=None, max_length=10000)
     recommendation: InterviewRecommendation | None = None
     overall_rating: int | None = Field(default=None, ge=1, le=5)
+    overall_score: int | None = Field(default=None, ge=0, le=100)
 
     @field_validator("interviewed_at")
     @classmethod
@@ -125,6 +132,7 @@ class InterviewRecordCreate(BaseModel):
             summary=self.summary,
             recommendation=self.recommendation,
             overall_rating=self.overall_rating,
+            overall_score=self.overall_score,
         )
         return self
 
@@ -141,6 +149,7 @@ class InterviewRecordUpdate(BaseModel):
     private_notes: str | None = Field(default=None, max_length=10000)
     recommendation: InterviewRecommendation | None = None
     overall_rating: int | None = Field(default=None, ge=1, le=5)
+    overall_score: int | None = Field(default=None, ge=0, le=100)
 
     @field_validator("interviewed_at")
     @classmethod
@@ -189,6 +198,7 @@ class InterviewRecordRead(BaseModel):
     private_notes: str | None
     recommendation: InterviewRecommendation | None
     overall_rating: int | None
+    overall_score: int | None
     submitted_at: datetime | None
     submitted_by_id: int | None
     submitted_by_name: str | None

@@ -53,7 +53,13 @@ const requisitionId = ref<number | null>(null)
 const editingApplicationId = ref<number | null>(null)
 const editingStage = ref<InterviewStage | null>(null)
 const expandedApplicationId = ref<number | null>(null)
-const workspaceApplication = ref<ApplicationDto | null>(null)
+// One card = one candidate = one workspace. The expanded row *is* the scoring
+// surface, so the workspace target is derived instead of tracked separately.
+const workspaceApplication = computed(() => (
+  expandedApplicationId.value === null
+    ? null
+    : applications.value.find(application => application.id === expandedApplicationId.value) || null
+))
 const interviewRecords = ref<InterviewRecordDto[]>([])
 const recordsLoading = ref(false)
 const recordSaving = ref(false)
@@ -79,6 +85,15 @@ const cardDataLoading = ref<Record<number, boolean>>({})
 const inlineStageByApplication = reactive<Record<number, InterviewStage>>({})
 const selectedTraits = ref<string[]>([])
 const customTrait = ref('')
+const questionTextEditing = ref<Record<number, boolean>>({})
+// Pending destructive navigation inside an expanded card (collapse / stage switch)
+// while the scoring form still holds unsaved content.
+type PendingDiscard =
+  | { type: 'collapse' }
+  | { type: 'stage'; stage: InterviewStage }
+  | { type: 'open'; applicationId: number }
+const pendingDiscard = ref<PendingDiscard | null>(null)
+const recordFormBaseline = ref('')
 const recordForm = reactive<InterviewRecordWrite>({
   stage: 'hr',
   question_plan_id: null,
@@ -91,6 +106,7 @@ const recordForm = reactive<InterviewRecordWrite>({
   private_notes: '',
   recommendation: null,
   overall_rating: null,
+  overall_score: null,
 })
 const form = reactive({
   interview_at: '',
@@ -215,14 +231,24 @@ function stageData(application: ApplicationDto, stage: InterviewStage): Intervie
   return stage === 'hr' ? application.hr_interview : application.manager_interview
 }
 
+// The card shows one stage at a time; the other stage's shared schedule and
+// notes stay reachable as a collapsed reference (問答共享、評分分開).
+function peerStage(stage: InterviewStage) {
+  return stage === 'hr' ? interviewStages[1] : interviewStages[0]
+}
+
 async function toggleApplicationDetails(applicationId: number) {
   if (expandedApplicationId.value === applicationId) {
-    expandedApplicationId.value = null
+    requestCollapseApplicationCard()
     return
   }
-  expandedApplicationId.value = applicationId
+  if (recordSaving.value || recordReopening.value) return
+  if (expandedApplicationId.value !== null && recordFormIsDirty.value) {
+    pendingDiscard.value = { type: 'open', applicationId }
+    return
+  }
   const application = applications.value.find(item => item.id === applicationId)
-  if (application) await loadCardInterviewData([application])
+  if (application) await openApplicationCard(application)
 }
 
 function nearestInterviewAt(application: ApplicationDto) {
@@ -341,12 +367,16 @@ async function applyFocusContext() {
     const application = applications.value.find(item => item.id === props.focusApplicationId)
     if (!application) {
       expandedApplicationId.value = null
+      resetRecordEditor()
+      interviewRecords.value = []
       focusError.value = `找不到從人才評估帶入的應徵紀錄 #${props.focusApplicationId}。請返回人才評估，確認人才已加入目前職缺後再試一次。`
       return
     }
     departmentId.value = application.requisition.department_id
     requisitionId.value = application.requisition_id
-    expandedApplicationId.value = application.id
+    if (expandedApplicationId.value !== application.id || !recordEditorOpen.value) {
+      await openApplicationCard(application)
+    }
     await revealFocusedApplication(application.id)
     return
   }
@@ -381,9 +411,12 @@ async function load() {
     // preload. This prevents a late background refresh from collapsing a row that
     // the recruiter has already opened.
     await applyFocusContext()
-    const targetApplicationId = props.focusApplicationId ?? expandedApplicationId.value
-    const targetApplication = applications.value.find(application => application.id === targetApplicationId)
-    if (targetApplication) await loadCardInterviewData([targetApplication])
+    if (props.focusApplicationId === null && expandedApplicationId.value !== null) {
+      const expanded = applications.value.find(application => application.id === expandedApplicationId.value)
+      if (!expanded) expandedApplicationId.value = null
+      else if (recordFormIsDirty.value) await loadCardInterviewData([expanded])
+      else await openApplicationCard(expanded)
+    }
     if (departmentId.value !== null && !departments.value.some(department => department.id === departmentId.value)) {
       departmentId.value = null
     }
@@ -563,7 +596,7 @@ async function generateQuestionPlan(
   }
   questionPlanGenerating.value = { ...questionPlanGenerating.value, [key]: true }
   cardQuestionErrors.value = { ...cardQuestionErrors.value, [key]: '' }
-  if (workspaceApplication.value?.id === application.id && workspaceQuestionStage.value === stage) {
+  if (workspaceApplication.value?.id === application.id && inlineStage(application.id) === stage) {
     workspaceError.value = ''
   }
   try {
@@ -582,7 +615,7 @@ async function generateQuestionPlan(
       ...cardQuestionErrors.value,
       [key]: message,
     }
-    if (workspaceApplication.value?.id === application.id && workspaceQuestionStage.value === stage) {
+    if (workspaceApplication.value?.id === application.id && inlineStage(application.id) === stage) {
       workspaceError.value = message
     }
   } finally {
@@ -611,7 +644,7 @@ async function regenerateQuestionPlanItem(
   questionPlanGenerating.value = { ...questionPlanGenerating.value, [key]: true }
   questionRegenerating.value = { ...questionRegenerating.value, [itemKey]: true }
   cardQuestionErrors.value = { ...cardQuestionErrors.value, [key]: '' }
-  if (workspaceApplication.value?.id === application.id && workspaceQuestionStage.value === stage) {
+  if (workspaceApplication.value?.id === application.id && inlineStage(application.id) === stage) {
     workspaceError.value = ''
   }
   try {
@@ -668,7 +701,7 @@ async function regenerateQuestionPlanItem(
       ...cardQuestionErrors.value,
       [key]: message,
     }
-    if (workspaceApplication.value?.id === application.id && workspaceQuestionStage.value === stage) {
+    if (workspaceApplication.value?.id === application.id && inlineStage(application.id) === stage) {
       workspaceError.value = message
     }
   } finally {
@@ -712,65 +745,34 @@ function planQuestions(applicationId: number, stage: InterviewStage): InterviewR
   }))
 }
 
-const workspaceQuestionStage = computed<InterviewStage>(() => (
-  recordEditorOpen.value ? recordForm.stage : defaultRecordStage()
-))
-
-const workspaceQuestionPlan = computed(() => {
-  const application = workspaceApplication.value
-  return application
-    ? plansByApplicationStage.value[planKey(application.id, workspaceQuestionStage.value)] || null
-    : null
-})
-
-async function generateWorkspaceQuestionPlan() {
-  const application = workspaceApplication.value
-  if (!application) return
-  const stage = workspaceQuestionStage.value
-  const currentPlan = workspaceQuestionPlan.value
-  const originalPlanQuestions = currentPlan?.questions.map(question => question.question) || []
+async function generateCardQuestionPlan(application: ApplicationDto, stage: InterviewStage) {
+  const key = planKey(application.id, stage)
+  const currentPlan = plansByApplicationStage.value[key]
   await generateQuestionPlan(
     application,
     stage,
     Boolean(currentPlan?.questions.length && currentPlan.context_matches),
   )
-
-  const key = planKey(application.id, stage)
   if (cardQuestionErrors.value[key]) return
-
   const generatedPlan = plansByApplicationStage.value[key]
   if (!generatedPlan?.questions.length) return
 
-  const hasQuestionProgress = recordForm.questions.some(question => (
-    Boolean(question.response?.trim())
-    || Boolean(question.notes?.trim())
-    || (question.not_asked_reason !== null && question.not_asked_reason !== undefined)
-    || (question.rating !== null && question.rating !== undefined)
-  ))
-  const hasQuestionEdits = recordForm.questions.length !== originalPlanQuestions.length
-    || recordForm.questions.some((question, index) => question.question !== originalPlanQuestions[index])
-  const hasDraftProgress = hasQuestionProgress
-    || hasQuestionEdits
-    || Boolean(recordForm.summary?.trim())
-    || Boolean(recordForm.private_notes?.trim())
-    || Boolean(recordForm.recommendation)
-    || (recordForm.overall_rating !== null && recordForm.overall_rating !== undefined)
-  if (recordEditorOpen.value && recordForm.stage === stage && canEditStage(stage)) {
-    if (!editingRecord.value && !hasDraftProgress) {
-      recordForm.question_plan_id = generatedPlan.id ?? null
-      recordForm.questions = planQuestions(application.id, stage).slice(0, 5)
-    } else {
-      recordNotice.value = editingRecord.value
-        ? '新版題目已建立；這筆既有面試紀錄仍保留原題。新建紀錄時才會帶入新版。'
-        : '新版題目已建立；目前尚未儲存的內容已保留，未自動替換題目。'
-    }
+  await realignEditorWithPlan(application, stage)
+  if (!recordEditorOpen.value || recordForm.stage !== stage || !canEditStage(stage) || recordIsCompleted.value) return
+  if (!editingRecord.value && !recordFormIsDirty.value) {
+    recordForm.question_plan_id = generatedPlan.id ?? null
+    recordForm.questions = planQuestions(application.id, stage).slice(0, 5)
+    recordFormBaseline.value = recordFormSnapshot()
+    return
   }
+  recordNotice.value = editingRecord.value
+    ? '新版題目已建立；這筆既有面試紀錄仍保留原題。新建紀錄時才會帶入新版。'
+    : '新版題目已建立；目前尚未儲存的內容已保留，未自動替換題目。'
 }
 
-async function regenerateWorkspaceQuestion(questionIndex: number) {
-  const application = workspaceApplication.value
-  if (!application) return
-  await regenerateQuestionPlanItem(application, workspaceQuestionStage.value, questionIndex)
+async function regenerateCardQuestion(application: ApplicationDto, stage: InterviewStage, questionIndex: number) {
+  await regenerateQuestionPlanItem(application, stage, questionIndex)
+  await realignEditorWithPlan(application, stage)
 }
 
 function tokenSummary(plan: InterviewQuestionPlan | null | undefined) {
@@ -831,11 +833,12 @@ function stageSubmissionLabel(applicationId: number, stage: InterviewStage) {
 
 function structuredRecordSummary(record: InterviewRecordDto) {
   if (!record.evaluation_revealed) {
-    return '已建立結構化紀錄；評分、總結與錄用建議待雙方提交後顯示。'
+    return '已建立結構化紀錄；問答已共享，評分與錄用建議會在 HR 與主管都提交後自動公開。'
   }
   const details: string[] = []
   if (record.summary?.trim()) details.push(`總結：${record.summary.trim()}`)
-  if (validRating(record.overall_rating)) details.push(`整體評分：${record.overall_rating} / 5`)
+  if (validScore(record.overall_score)) details.push(`面試總分：${record.overall_score} / 100`)
+  else if (validRating(record.overall_rating)) details.push(`整體評分：${record.overall_rating} / 5`)
   if (record.recommendation) details.push(`建議：${recommendationLabels[record.recommendation]}`)
   return details.join('；') || '已建立紀錄，尚未填寫評估內容。'
 }
@@ -860,20 +863,60 @@ function peerEvaluationsReleased(applicationId: number) {
   return hrRecord?.status === 'completed' && managerRecord?.status === 'completed'
 }
 
+// A bare lock icon reads as "you are not allowed to see this". Say who has
+// submitted, who is still pending, and that release is automatic.
+function evaluationReleaseHint(applicationId: number) {
+  const hrDone = currentPlanRecord(applicationId, 'hr')?.status === 'completed'
+  const managerDone = currentPlanRecord(applicationId, 'manager')?.status === 'completed'
+  if (hrDone && managerDone) return '雙方已提交 · 評分已公開'
+  if (hrDone) return 'HR 已提交 · 待主管提交後自動公開'
+  if (managerDone) return '主管已提交 · 待 HR 提交後自動公開'
+  return '雙方提交後自動公開評分'
+}
+
+function evaluationWaitingFor(applicationId: number) {
+  const hrDone = currentPlanRecord(applicationId, 'hr')?.status === 'completed'
+  const managerDone = currentPlanRecord(applicationId, 'manager')?.status === 'completed'
+  if (hrDone && !managerDone) return '主管'
+  if (managerDone && !hrDone) return 'HR'
+  return ''
+}
+
 const editorEvaluationVisible = computed(() => (
   !editingRecord.value || editingRecord.value.evaluation_revealed
 ))
 const recordIsCompleted = computed(() => editingRecord.value?.status === 'completed')
 const recordCanEdit = computed(() => (
-  canEditStage(recordForm.stage) && !recordIsCompleted.value
-))
-const recordAnsweredCount = computed(() => (
-  recordForm.questions.filter(questionIsAnswered).length
+  recordEditorOpen.value && canEditStage(recordForm.stage) && !recordIsCompleted.value
 ))
 const recordQuestionTotal = computed(() => recordForm.questions.length)
 
+function recordFormSnapshot() {
+  return JSON.stringify([
+    recordForm.stage,
+    recordForm.questions.map(item => [item.question, item.trait ?? '', item.response ?? '', item.rating ?? null, item.not_asked_reason ?? null, item.notes ?? '']),
+    recordForm.summary ?? '', recordForm.private_notes ?? '', recordForm.recommendation ?? null,
+    recordForm.overall_rating ?? null, recordForm.overall_score ?? null,
+  ])
+}
+
+// Extracted from the former `hasDraftProgress` check so that stage switching,
+// filter changes and collapsing all share one definition of "unsaved work".
+const recordFormIsDirty = computed(() => (
+  recordEditorOpen.value
+  && recordCanEdit.value
+  && Boolean(recordFormBaseline.value)
+  && recordFormSnapshot() !== recordFormBaseline.value
+))
+
 function validRating(value: number | null | undefined) {
   return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 5
+}
+
+// The backend stores overall_score as an integer 0-100; a fractional value would
+// be rejected with 422 instead of being rounded silently.
+function validScore(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 100
 }
 
 function questionIsSkipped(question: InterviewRecordQuestion) {
@@ -916,8 +959,24 @@ function questionNotAskedReasonId(index: number) {
   return `${recordControlPrefix()}-question-${index}-not-asked-reason`
 }
 
-function overallRatingId(value: number) {
-  return `${recordControlPrefix()}-overall-rating-${value}`
+function overallScoreId() {
+  return `${recordControlPrefix()}-overall-score`
+}
+
+function questionTextId(index: number) {
+  return `${recordControlPrefix()}-question-${index}-text`
+}
+
+// The question itself is normally read-only text; typing over it stays possible
+// but is an explicit choice, so the five questions read as one list.
+function questionTextIsEditable(question: InterviewRecordQuestion, index: number) {
+  return Boolean(questionTextEditing.value[index]) || !question.question.trim()
+}
+
+async function editQuestionText(index: number) {
+  questionTextEditing.value = { ...questionTextEditing.value, [index]: true }
+  await nextTick()
+  document.getElementById(questionTextId(index))?.focus()
 }
 
 function clearRecordValidation() {
@@ -954,14 +1013,77 @@ function focusRecordControl(id: string) {
   void nextTick(() => document.getElementById(id)?.focus())
 }
 
-function inlineActionLabel(applicationId: number, stage: InterviewStage) {
-  const record = currentPlanRecord(applicationId, stage)
-  if (record) return canEditStage(stage) ? '繼續填答' : '查看完整紀錄'
-  if (hasOlderPlanRecord(applicationId, stage)) {
-    const version = plansByApplicationStage.value[planKey(applicationId, stage)]?.version
-    return canEditStage(stage) ? `使用 v${version} 建立新紀錄` : '查看舊版紀錄'
+function setOverallScore(raw: string) {
+  const value = raw.trim()
+  const parsed = Number(value)
+  recordForm.overall_score = value === '' || Number.isNaN(parsed) ? null : Math.round(parsed)
+  recordValidationErrors.overall = ''
+}
+
+function openHistoryRecord(application: ApplicationDto, record: InterviewRecordDto) {
+  if (recordSaving.value || recordReopening.value) return
+  if (recordFormIsDirty.value) {
+    workspaceError.value = '目前的評分內容尚未儲存；請先儲存草稿，或放棄後再切換其他紀錄。'
+    return
   }
-  return canEditStage(stage) ? '開始 5 題紀錄' : '尚未開始'
+  inlineStageByApplication[application.id] = record.stage
+  editRecord(record)
+}
+
+async function startNewRecord(application: ApplicationDto) {
+  if (recordSaving.value || recordReopening.value) return
+  if (recordFormIsDirty.value) {
+    workspaceError.value = '目前的評分內容尚未儲存；請先儲存草稿，或放棄後再建立新紀錄。'
+    return
+  }
+  await newRecord(inlineStage(application.id))
+}
+
+// The five questions render once per card. The editable list is the live form;
+// everyone else (no rights for the stage, or a submitted record) reads the same
+// five through the stored record + plan merge.
+function cardQuestionsAreEditable(applicationId: number, stage: InterviewStage) {
+  return workspaceApplication.value?.id === applicationId
+    && recordEditorOpen.value
+    && recordForm.stage === stage
+    && recordCanEdit.value
+}
+
+function cardQuestions(applicationId: number, stage: InterviewStage): InterviewRecordQuestion[] {
+  return cardQuestionsAreEditable(applicationId, stage)
+    ? recordForm.questions
+    : fiveQuestionSet(applicationId, stage)
+}
+
+// Only one card is expanded and only one stage selected at a time, so the
+// question section can read these directly instead of threading ids around.
+const cardStage = computed<InterviewStage>(() => (
+  workspaceApplication.value ? inlineStage(workspaceApplication.value.id) : defaultRecordStage()
+))
+const cardStageKey = computed(() => (
+  workspaceApplication.value ? planKey(workspaceApplication.value.id, cardStage.value) : ''
+))
+const cardStagePlan = computed(() => plansByApplicationStage.value[cardStageKey.value] || null)
+const cardStageGenerating = computed(() => Boolean(questionPlanGenerating.value[cardStageKey.value]))
+const cardStageQuestionError = computed(() => cardQuestionErrors.value[cardStageKey.value] || '')
+const cardStageEditable = computed(() => (
+  workspaceApplication.value ? cardQuestionsAreEditable(workspaceApplication.value.id, cardStage.value) : false
+))
+const cardStageQuestions = computed<InterviewRecordQuestion[]>(() => (
+  workspaceApplication.value ? cardQuestions(workspaceApplication.value.id, cardStage.value) : []
+))
+
+function readOnlyEvaluationVisible(applicationId: number, stage: InterviewStage) {
+  const record = currentPlanRecord(applicationId, stage) || latestStageRecord(applicationId, stage)
+  return !record || record.evaluation_revealed
+}
+
+function readOnlyStageReason(stage: InterviewStage) {
+  if (recordIsCompleted.value && recordForm.stage === stage) {
+    return '這一關的評分已提交，目前為唯讀；需要修改請按「重新開啟評分」並填寫原因。'
+  }
+  const owner = stage === 'hr' ? 'HR' : '部門主管'
+  return `這一關由${owner}維護，你只能查看；評分與觀察依盲評規則於雙方提交後才會顯示。`
 }
 
 function canEditRecord(record: InterviewRecordDto) {
@@ -994,28 +1116,131 @@ async function loadInterviewRecords(applicationId: number) {
   }
 }
 
-async function openRecordWorkspace(application: ApplicationDto) {
-  workspaceApplication.value = application
+function resetRecordEditor() {
   editingRecord.value = null
   recordEditorOpen.value = false
   questionSuggestions.value = null
   selectedTraits.value = []
   customTrait.value = ''
-  recordNotice.value = ''
-  await loadInterviewRecords(application.id)
-}
-
-function closeRecordWorkspace() {
-  if (recordSaving.value || recordReopening.value) return
-  workspaceApplication.value = null
-  editingRecord.value = null
-  recordEditorOpen.value = false
-  interviewRecords.value = []
-  questionSuggestions.value = null
-  workspaceError.value = ''
+  questionTextEditing.value = {}
   reopenPromptOpen.value = false
   reopenReason.value = ''
+  workspaceError.value = ''
+  recordNotice.value = ''
+  recordFormBaseline.value = ''
   clearRecordValidation()
+}
+
+// Expanding a card is itself the "start scoring" action: the editor is prepared
+// locally and nothing is written until 儲存草稿 / 提交評分 is pressed.
+async function openApplicationCard(application: ApplicationDto) {
+  pendingDiscard.value = null
+  expandedApplicationId.value = application.id
+  resetRecordEditor()
+  interviewRecords.value = []
+  await loadCardInterviewData([application])
+  await loadInterviewRecords(application.id)
+  await bindStageEditor(application, inlineStage(application.id))
+}
+
+function collapseApplicationCard() {
+  if (recordSaving.value || recordReopening.value) return
+  const applicationId = expandedApplicationId.value
+  pendingDiscard.value = null
+  expandedApplicationId.value = null
+  resetRecordEditor()
+  interviewRecords.value = []
+  if (applicationId !== null) {
+    void nextTick(() => document.querySelector<HTMLButtonElement>(
+      `[data-testid="interview-row-toggle-${applicationId}"]`,
+    )?.focus({ preventScroll: true }))
+  }
+}
+
+function requestCollapseApplicationCard() {
+  if (recordSaving.value || recordReopening.value) return
+  if (recordFormIsDirty.value) {
+    pendingDiscard.value = { type: 'collapse' }
+    return
+  }
+  collapseApplicationCard()
+}
+
+async function bindStageEditor(application: ApplicationDto, stage: InterviewStage) {
+  inlineStageByApplication[application.id] = stage
+  questionTextEditing.value = {}
+  pendingDiscard.value = null
+  const record = currentPlanRecord(application.id, stage)
+  if (record) {
+    editRecord(record)
+    if (canEditStage(stage) && record.status !== 'completed' && recordForm.questions.length < 5) {
+      try {
+        await ensureQuestionPlan(application, stage)
+        recordForm.questions = mergeQuestionsToFive(recordForm.questions, planQuestions(application.id, stage))
+        recordFormBaseline.value = recordFormSnapshot()
+        recordNotice.value = '已補上系統建議題；儲存後才會寫入這筆紀錄'
+      } catch (cause) {
+        workspaceError.value = cause instanceof Error ? cause.message : '無法載入系統面試題'
+      }
+    }
+    return
+  }
+  if (canEditStage(stage)) {
+    await newRecord(stage)
+    return
+  }
+  // Read-only stage with no record yet: keep the form aligned with the tab so
+  // labels and permission checks describe the stage the user is looking at.
+  editingRecord.value = null
+  recordEditorOpen.value = false
+  recordForm.stage = stage
+  recordFormBaseline.value = ''
+}
+
+async function switchCardStage(application: ApplicationDto, stage: InterviewStage) {
+  if (recordSaving.value || recordReopening.value) return
+  if (inlineStage(application.id) === stage) return
+  if (recordFormIsDirty.value) {
+    pendingDiscard.value = { type: 'stage', stage }
+    return
+  }
+  await bindStageEditor(application, stage)
+}
+
+async function confirmPendingDiscard() {
+  const pending = pendingDiscard.value
+  const application = workspaceApplication.value
+  pendingDiscard.value = null
+  if (!pending) return
+  if (pending.type === 'collapse') {
+    collapseApplicationCard()
+    return
+  }
+  if (pending.type === 'open') {
+    const target = applications.value.find(item => item.id === pending.applicationId)
+    if (target) await openApplicationCard(target)
+    return
+  }
+  if (application) await bindStageEditor(application, pending.stage)
+}
+
+function cancelPendingDiscard() {
+  pendingDiscard.value = null
+}
+
+// Realign the editor after the plan changed: a record that belongs to an older
+// plan version stays in the history, the card moves on to the new five.
+async function realignEditorWithPlan(application: ApplicationDto, stage: InterviewStage) {
+  if (recordFormIsDirty.value || inlineStage(application.id) !== stage) return
+  const record = currentPlanRecord(application.id, stage)
+  if ((record?.id ?? null) === (editingRecord.value?.id ?? null)) return
+  if (record) {
+    editRecord(record)
+    return
+  }
+  if (!canEditStage(stage)) return
+  await newRecord(stage)
+  recordNotice.value = '已切換到最新版題目；先前的紀錄仍保留在下方「面試紀錄歷程」。'
 }
 
 async function newRecord(stage: InterviewStage = defaultRecordStage()) {
@@ -1038,40 +1263,20 @@ async function newRecord(stage: InterviewStage = defaultRecordStage()) {
     private_notes: '',
     recommendation: null,
     overall_rating: null,
+    overall_score: null,
   })
   recordNotice.value = ''
   workspaceError.value = ''
+  recordFormBaseline.value = recordFormSnapshot()
   try {
     const plan = await ensureQuestionPlan(workspaceApplication.value, stage)
     if (!editingRecord.value && recordForm.stage === stage) {
       recordForm.question_plan_id = plan.id ?? null
       recordForm.questions = planQuestions(workspaceApplication.value.id, stage)
+      recordFormBaseline.value = recordFormSnapshot()
     }
   } catch (cause) {
     workspaceError.value = cause instanceof Error ? cause.message : '無法載入系統面試題'
-  }
-}
-
-async function openInlineRecord(application: ApplicationDto) {
-  const stage = inlineStage(application.id)
-  await openRecordWorkspace(application)
-  const record = currentPlanRecord(application.id, stage)
-  if (record) {
-    editRecord(record)
-    if (canEditStage(stage) && recordForm.questions.length < 5) {
-      try {
-        await ensureQuestionPlan(application, stage)
-        recordForm.questions = mergeQuestionsToFive(
-          recordForm.questions,
-          planQuestions(application.id, stage),
-        )
-        recordNotice.value = '已補上系統建議題；儲存後才會寫入這筆紀錄'
-      } catch (cause) {
-        workspaceError.value = cause instanceof Error ? cause.message : '無法載入系統面試題'
-      }
-    }
-  } else if (canEditStage(stage)) {
-    await newRecord(stage)
   }
 }
 
@@ -1080,6 +1285,7 @@ function editRecord(record: InterviewRecordDto) {
   recordEditorOpen.value = true
   reopenPromptOpen.value = false
   reopenReason.value = ''
+  questionTextEditing.value = {}
   clearRecordValidation()
   Object.assign(recordForm, {
     stage: record.stage,
@@ -1093,19 +1299,11 @@ function editRecord(record: InterviewRecordDto) {
     private_notes: record.private_notes || '',
     recommendation: record.recommendation || null,
     overall_rating: record.overall_rating ?? null,
+    overall_score: record.overall_score ?? null,
   })
   recordNotice.value = ''
   workspaceError.value = ''
-}
-
-function cancelRecordEdit() {
-  if (recordSaving.value || recordReopening.value) return
-  editingRecord.value = null
-  recordEditorOpen.value = false
-  recordForm.questions = []
-  reopenPromptOpen.value = false
-  reopenReason.value = ''
-  clearRecordValidation()
+  recordFormBaseline.value = recordFormSnapshot()
 }
 
 function addBlankQuestion() {
@@ -1128,7 +1326,9 @@ async function addSuggestedQuestion(question: InterviewQuestion, trait: string) 
       : '目前帳號不能修改這筆面試紀錄'
     return
   }
-  if (!recordEditorOpen.value || !canEditStage(recordForm.stage)) await newRecord()
+  if (!recordEditorOpen.value || !canEditStage(recordForm.stage)) {
+    await newRecord(inlineStage(workspaceApplication.value.id))
+  }
   if (recordForm.questions.some(item => item.question === question.question)) return
   workspaceError.value = ''
   recordForm.questions.push({
@@ -1197,7 +1397,7 @@ function validateRecordForSubmission() {
   recordForm.questions.forEach((question, index) => {
     if (!question.question.trim()) {
       questionErrors[index] = '請先填寫問題內容'
-      firstInvalidId ||= `${recordControlPrefix()}-question-${index}-text`
+      firstInvalidId ||= questionTextId(index)
       return
     }
     if (questionIsSkipped(question)) {
@@ -1213,9 +1413,9 @@ function validateRecordForSubmission() {
     }
   })
   recordValidationErrors.questions = questionErrors
-  if (!validRating(recordForm.overall_rating)) {
-    recordValidationErrors.overall = '請選擇整體 1–5 分'
-    firstInvalidId ||= overallRatingId(1)
+  if (!validScore(recordForm.overall_score)) {
+    recordValidationErrors.overall = '請填寫 0–100 的面試總分'
+    firstInvalidId ||= overallScoreId()
   }
   if (!recordForm.recommendation) {
     recordValidationErrors.recommendation = '請選擇錄用建議'
@@ -1248,6 +1448,12 @@ async function saveRecord(intent: 'draft' | 'submit') {
   if (recordForm.duration_minutes !== null && recordForm.duration_minutes !== undefined
       && (recordForm.duration_minutes < 1 || recordForm.duration_minutes > 1440)) {
     workspaceError.value = '面試時長必須介於 1 到 1440 分鐘'
+    return
+  }
+  if (recordForm.overall_score !== null && recordForm.overall_score !== undefined
+      && !validScore(recordForm.overall_score)) {
+    workspaceError.value = '面試總分必須介於 0 到 100 分'
+    focusRecordControl(overallScoreId())
     return
   }
   if (intent === 'submit' && !recordHasExceptionalStatus.value && !validateRecordForSubmission()) {
@@ -1289,6 +1495,7 @@ async function saveRecord(intent: 'draft' | 'submit') {
       private_notes: recordForm.stage === 'hr' ? optionalText(recordForm.private_notes) : undefined,
       recommendation: recordForm.recommendation || null,
       overall_rating: recordForm.overall_rating ? Number(recordForm.overall_rating) : null,
+      overall_score: validScore(recordForm.overall_score) ? Number(recordForm.overall_score) : null,
     }
     const saved = editingRecord.value
       ? (await hrApi.updateInterviewRecord(application.id, editingRecord.value.id, {
@@ -1301,6 +1508,7 @@ async function saveRecord(intent: 'draft' | 'submit') {
           ...(payload.stage === 'hr' ? { private_notes: payload.private_notes } : {}),
           recommendation: payload.recommendation,
           overall_rating: payload.overall_rating,
+          overall_score: payload.overall_score,
         })).data
       : (await hrApi.createInterviewRecord(application.id, payload)).data
     const successMessage = targetStatus === 'completed'
@@ -1372,8 +1580,18 @@ function formatDate(value: string | null) {
   return formatApiDateTime(value)
 }
 
-function onRequisitionFilterChange() {
+function collapseForFilterChange() {
+  if (expandedApplicationId.value === null) return
+  const wasDirty = recordFormIsDirty.value
+  pendingDiscard.value = null
   expandedApplicationId.value = null
+  resetRecordEditor()
+  interviewRecords.value = []
+  if (wasDirty) notice.value = '已切換篩選條件並收合評分表；尚未儲存的評分內容未保留。'
+}
+
+function onRequisitionFilterChange() {
+  collapseForFilterChange()
   focusError.value = ''
   emit('requisition-selected', requisitionId.value)
 }
@@ -1382,7 +1600,7 @@ function onDepartmentFilterChange() {
   if (requisitionId.value !== null && !requisitions.value.some(requisition => requisition.id === requisitionId.value)) {
     requisitionId.value = null
   }
-  expandedApplicationId.value = null
+  collapseForFilterChange()
   focusError.value = ''
   emit('requisition-selected', requisitionId.value)
 }
@@ -1441,11 +1659,20 @@ onMounted(load)
     </div>
 
     <div class="interview-filters">
-      <div><strong>篩選面試名單</strong><span>可依部門與職缺縮小範圍；點整列或右側「＋」展開詳情</span></div>
+      <div><strong>篩選面試名單</strong><span>可依部門與職缺縮小範圍；點整列即可展開該人的面試與評分</span></div>
       <label>部門<select v-model="departmentId" data-testid="interview-department-filter" @change="onDepartmentFilterChange"><option :value="null">全部部門</option><option v-for="department in departments" :key="department.id" :value="department.id">{{ department.name }}</option></select></label>
       <label>職缺<select v-model="requisitionId" data-testid="interview-job-filter" @change="onRequisitionFilterChange"><option :value="null">全部職缺</option><option v-for="requisition in requisitions" :key="requisition.id" :value="requisition.id">{{ requisition.req_no }} · {{ requisition.title }}</option></select></label>
       <em>{{ filteredApplications.length }} 筆</em>
     </div>
+
+    <details class="interview-sharing-policy" data-testid="interview-sharing-policy">
+      <summary><strong>問答共享、評分分開</strong><span>查看資料規則</span></summary>
+      <div class="sharing-policy-details">
+        <p><b>問答</b><span>HR 與主管都能查看問題、回答與目前進度。</span></p>
+        <p><b>評分</b><span>雙方都提交後，才互相公開評分、觀察與錄用建議。</span></p>
+        <p v-if="authSession.state.user?.role === 'hr'"><b>HR 備註</b><span>敏感資訊只提供 HR 查看。</span></p>
+      </div>
+    </details>
 
     <div v-if="loading && !applications.length" class="interview-empty panel"><span class="spinner"></span><strong>正在載入應徵與面試資料…</strong></div>
     <div v-else-if="filteredApplications.length" class="interview-list">
@@ -1463,508 +1690,505 @@ onMounted(load)
             <div class="interview-row-progress">
               <span class="application-status" :data-status="application.status">{{ applicationStatusLabels[application.status] || application.status }}</span>
               <strong>HR：{{ resultLabels[application.hr_interview.interview_result || 'pending'] }} · 主管：{{ resultLabels[application.manager_interview.interview_result || 'pending'] }}</strong>
-              <small>最近面試：{{ formatDate(nearestInterviewAt(application)) }}</small>
+              <small>最近面試：{{ formatDate(nearestInterviewAt(application)) }} · {{ inlineStage(application.id) === 'hr' ? 'HR' : '主管' }}題目 {{ stageAnsweredCount(application.id, inlineStage(application.id)) }}/5</small>
             </div>
             <span class="row-chevron" aria-hidden="true">{{ expandedApplicationId === application.id ? '−' : '＋' }}</span>
           </button>
         </header>
 
-        <div v-if="expandedApplicationId === application.id" :id="`interview-detail-${application.id}`" class="interview-card-detail">
+        <div v-if="expandedApplicationId === application.id" :id="`interview-detail-${application.id}`" class="interview-card-detail" @keydown.esc="requestCollapseApplicationCard">
+          <div class="application-job"><small>{{ application.requisition.department_name || `部門 #${application.requisition.department_id || '—'}` }}</small><strong>{{ application.requisition.req_no }} · {{ application.requisition.title }}</strong><span>{{ application.requisition.work_city }} · 應徵於 {{ formatDate(application.applied_at) }}</span></div>
+          <div class="application-details">
+            <div><small>Email</small><strong>{{ application.candidate.email || '未提供' }}</strong></div>
+            <div><small>電話</small><strong>{{ application.candidate.phone || '未提供' }}</strong></div>
+            <div><small>應徵來源</small><strong>{{ application.source || '未提供' }}</strong></div>
+          </div>
 
-        <div class="application-job"><small>{{ application.requisition.department_name || `部門 #${application.requisition.department_id || '—'}` }}</small><strong>{{ application.requisition.req_no }} · {{ application.requisition.title }}</strong><span>{{ application.requisition.work_city }} · 應徵於 {{ formatDate(application.applied_at) }}</span></div>
+          <div v-if="cardInterviewErrors[application.id]" class="workspace-message error" role="alert"><strong>!</strong><span>{{ cardInterviewErrors[application.id] }}</span></div>
+          <div v-if="workspaceError" class="workspace-message error" role="alert"><strong>!</strong><span>{{ workspaceError }}</span><button type="button" aria-label="關閉錯誤訊息" @click="workspaceError = ''">×</button></div>
+          <div v-if="recordNotice" class="workspace-message success" role="status"><strong>✓</strong><span>{{ recordNotice }}</span><button type="button" aria-label="關閉成功訊息" @click="recordNotice = ''">×</button></div>
 
-        <div class="application-details">
-          <div><small>Email</small><strong>{{ application.candidate.email || '未提供' }}</strong></div>
-          <div><small>電話</small><strong>{{ application.candidate.phone || '未提供' }}</strong></div>
-          <div><small>應徵來源</small><strong>{{ application.source || '未提供' }}</strong></div>
-          <div><small>兩關進度</small><strong>HR：{{ resultLabels[application.hr_interview.interview_result || 'pending'] }}／主管：{{ resultLabels[application.manager_interview.interview_result || 'pending'] }}</strong></div>
-        </div>
-
-        <div class="stage-grid">
-          <section v-for="stage in interviewStages" :key="stage.key" class="interview-stage" :class="{ unscheduled: !stageData(application, stage.key).interview_at }" :data-testid="`interview-stage-${application.id}-${stage.key}`">
-            <header><div><small>{{ stage.owner }} OWNED</small><h3>{{ stage.title }}</h3></div><span>{{ resultLabels[stageData(application, stage.key).interview_result || 'pending'] }}</span></header>
-            <div class="stage-content">
-              <small>面試日期與時間</small>
-              <strong>{{ formatDate(stageData(application, stage.key).interview_at) }}</strong>
-              <small>{{ stage.notesLabel }}</small>
-              <p>{{ stageData(application, stage.key).interview_notes || '尚未填寫共享備註。' }}</p>
-              <template v-if="latestStageRecord(application.id, stage.key)">
-                <small>結構化面試紀錄 · {{ structuredRecordStatus(application.id, stage.key) }}</small>
-                <p :class="{ 'structured-record-locked': structuredRecordLocked(application.id, stage.key) }">{{ structuredRecordSummaryForStage(application.id, stage.key) }}</p>
-              </template>
-              <small v-if="stageData(application, stage.key).updated_at">最後更新：{{ formatDate(stageData(application, stage.key).updated_at) }}</small>
-            </div>
-            <footer>
-              <span v-if="!canEditStage(stage.key)">僅供檢視，由{{ stage.owner }}維護</span>
-              <button v-else class="button secondary" type="button" :data-testid="`interview-edit-${application.id}-${stage.key}`" @click="openEditor(application, stage.key)">{{ stageData(application, stage.key).interview_at ? '編輯紀錄' : '安排並註記' }}</button>
-            </footer>
-
-            <form v-if="editingApplicationId === application.id && editingStage === stage.key" class="interview-editor" :data-testid="`interview-form-${application.id}-${stage.key}`" @submit.prevent="saveInterview(application)">
-              <header><div><small>INTERVIEW DETAILS</small><h3>{{ application.candidate.name }}｜{{ stage.title }}</h3></div><button type="button" :disabled="saving" aria-label="關閉面試編輯" @click="closeEditor">×</button></header>
-              <div class="editor-grid">
-                <label>面試日期與時間 *<input v-model="form.interview_at" data-testid="interview-at-input" type="datetime-local" required></label>
-                <label>面試結果<select v-model="form.interview_result" data-testid="interview-result-select"><option v-for="(label, value) in resultLabels" :key="value" :value="value">{{ label }}</option></select></label>
-                <label class="wide">{{ stage.notesLabel }}<textarea v-model="form.interview_notes" data-testid="interview-notes" rows="6" maxlength="3000" :placeholder="stage.placeholder"></textarea></label>
-              </div>
-              <footer><span>這一關的意見會獨立保存，不會覆蓋另一關紀錄。</span><div><button class="button secondary" type="button" :disabled="saving" @click="closeEditor">取消</button><button class="button primary" data-testid="interview-save" type="submit" :disabled="saving">{{ saving ? '儲存中…' : '儲存這一關紀錄' }}</button></div></footer>
-            </form>
-          </section>
-        </div>
-        <section class="question-progress" :data-testid="`interview-question-progress-${application.id}`">
-          <header>
-            <div class="question-progress-title"><small>INTERVIEW QUESTIONS</small><strong>面試問題</strong><span>切換 HR 或主管，即可查看目前五題、回答與完成進度。</span></div>
-            <div class="question-stage-tabs" role="tablist" aria-label="切換 HR 或主管題目">
-              <button
-                v-for="stage in interviewStages"
-                :key="stage.key"
-                type="button"
-                role="tab"
-                :class="{ active: inlineStage(application.id) === stage.key }"
-                :aria-selected="inlineStage(application.id) === stage.key"
-                :data-testid="`question-stage-${application.id}-${stage.key}`"
-                @click="inlineStageByApplication[application.id] = stage.key"
-              >
-                <small>{{ stage.owner }}</small><strong>{{ stageAnsweredCount(application.id, stage.key) }}/5</strong><span>{{ stageSubmissionLabel(application.id, stage.key) }}</span>
-              </button>
-            </div>
-          </header>
-
-          <div v-if="cardDataLoading[application.id] && !fiveQuestionSet(application.id, inlineStage(application.id)).length" class="question-progress-loading"><span class="spinner"></span>正在準備 5 題…</div>
-          <template v-else>
-            <div class="question-plan-meta">
-              <span :data-stage="inlineStage(application.id)">{{ inlineStage(application.id) === 'hr' ? 'HR 五題' : '主管五題' }}</span>
-              <button
-                v-if="canGenerateQuestionStage(inlineStage(application.id)) && !plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions.length"
-                type="button"
-                class="button generation-button"
-                :disabled="questionPlanGenerating[planKey(application.id, inlineStage(application.id))]"
-                :data-testid="`question-plan-generate-${application.id}-${inlineStage(application.id)}`"
-                @click="generateQuestionPlan(application, inlineStage(application.id))"
-              >{{ questionPlanGenerating[planKey(application.id, inlineStage(application.id))] ? '產生中…' : '使用 Gemini 產生 5 題' }}</button>
-              <b class="evaluation-release-chip" :class="{ unlocked: peerEvaluationsReleased(application.id) }">{{ peerEvaluationsReleased(application.id) ? '雙方已提交 · 評分已公開' : '評分鎖定至雙方提交' }}</b>
-              <small v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.version">題目版本 v{{ plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.version }} · {{ formatDate(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.generated_at || null) }}</small>
-              <small v-else-if="currentPlanRecord(application.id, inlineStage(application.id))">紀錄更新：{{ formatDate(currentPlanRecord(application.id, inlineStage(application.id))?.updated_at || null) }}</small>
-              <small v-else>尚未開始填答</small>
-            </div>
-            <details v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]" class="question-plan-details">
-              <summary>查看產生資訊</summary>
-              <span>
-                {{ generationModeLabel(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]) }}<template v-if="tokenSummary(plansByApplicationStage[planKey(application.id, inlineStage(application.id))])"> · {{ tokenSummary(plansByApplicationStage[planKey(application.id, inlineStage(application.id))]) }}</template>
-              </span>
-            </details>
-            <div
-              v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.generation_warning"
-              class="question-generation-warning"
-              role="alert"
+          <div class="question-stage-tabs" role="tablist" aria-label="切換 HR 初談或主管複試">
+            <button
+              v-for="stage in interviewStages"
+              :key="stage.key"
+              type="button"
+              role="tab"
+              :class="{ active: inlineStage(application.id) === stage.key }"
+              :aria-selected="inlineStage(application.id) === stage.key"
+              :data-testid="`question-stage-${application.id}-${stage.key}`"
+              @click="switchCardStage(application, stage.key)"
             >
-              <strong>⚠ Gemini 生成提醒</strong>
-              <span>{{ plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.generation_warning }}</span>
-            </div>
-            <div
-              v-if="cardQuestionErrors[planKey(application.id, inlineStage(application.id))]"
-              class="question-generation-error"
-              role="alert"
-            >
-              <strong>無法更新題目</strong>
-              <span>{{ cardQuestionErrors[planKey(application.id, inlineStage(application.id))] }}；目前題目仍保留。</span>
-            </div>
-            <div
-              v-if="plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions.length && plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.context_matches === false"
-              class="question-context-warning"
-              role="status"
-            >履歷或職缺內容已更新，現有題目仍可查看；請針對需要更新的題目逐題重新產生。</div>
-            <div
-              v-if="hasOlderPlanRecord(application.id, inlineStage(application.id))"
-              class="question-context-warning"
-              role="status"
-            >目前顯示新版題目，尚未建立填答紀錄；舊版問答仍保留在面試紀錄歷程中。</div>
+              <small>{{ stage.owner }}</small><strong>{{ stageAnsweredCount(application.id, stage.key) }}/5</strong><span>{{ stageSubmissionLabel(application.id, stage.key) }}</span>
+            </button>
+          </div>
 
-            <ol v-if="fiveQuestionSet(application.id, inlineStage(application.id)).length" class="question-preview-list">
-              <li
-                v-for="(question, index) in fiveQuestionSet(application.id, inlineStage(application.id))"
-                :key="`${index}-${question.question}`"
-                :class="{ answered: questionIsAnswered(question) }"
-              >
-                <span>{{ questionIsAnswered(question) ? '✓' : index + 1 }}</span>
-                <div>
-                  <div class="question-preview-heading">
-                    <strong>{{ question.question }}</strong>
-                    <button
-                      v-if="canGenerateQuestionStage(inlineStage(application.id)) && plansByApplicationStage[planKey(application.id, inlineStage(application.id))]?.questions[index]"
-                      type="button"
-                      class="question-regenerate-button"
-                      :disabled="questionPlanGenerating[planKey(application.id, inlineStage(application.id))]"
-                      :aria-label="`重新產生第 ${index + 1} 題`"
-                      :data-testid="`question-regenerate-${application.id}-${inlineStage(application.id)}-${index}`"
-                      @click="regenerateQuestionPlanItem(application, inlineStage(application.id), index)"
-                    >{{ questionRegenerating[questionRegenerationKey(application.id, inlineStage(application.id), index)] ? '重新產生中…' : '重新產生此題' }}</button>
-                  </div>
-                  <p v-if="questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert">
-                    <b>⚠ 疑似違法提問</b>
-                    <span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span>
-                    <em>{{ questionCompliance(question).suggestion }}</em>
-                  </p>
-                  <p v-else class="question-compliance ok"><b>✓ 合法</b><span>未偵測到違法／歧視性內容</span></p>
-                  <details v-if="question.purpose || question.follow_up || question.source" class="question-prompt-details">
-                    <summary>需要時查看面試提示</summary>
-                    <div>
-                      <p v-if="question.purpose"><b>評估重點</b><span>{{ question.purpose }}</span></p>
-                      <p v-if="question.follow_up"><b>建議追問</b><span>{{ question.follow_up }}</span></p>
-                      <p v-if="question.source"><b>題目依據</b><span>{{ question.source }}</span></p>
-                    </div>
-                  </details>
-                  <p :class="{ empty: !questionIsAnswered(question) }">{{ questionAnswer(question) }}</p>
-                  <em v-if="question.rating">{{ question.rating }} / 5 分</em>
-                  <em v-else-if="question.not_asked_reason">未詢問：{{ question.not_asked_reason }}</em>
-                  <em v-else-if="currentPlanRecord(application.id, inlineStage(application.id)) && !currentPlanRecord(application.id, inlineStage(application.id))?.evaluation_revealed" class="evaluation-locked">🔒 評分與觀察於雙方提交後顯示</em>
+          <div v-if="pendingDiscard" class="record-discard-confirm" role="alert">
+            <div><strong>這一關的評分內容尚未儲存</strong><span>{{ pendingDiscard.type === 'stage' ? '切換到另一關' : '離開這張卡片' }}會放棄目前填寫的內容。</span></div>
+            <div><button class="button secondary" type="button" @click="cancelPendingDiscard">留在這裡</button><button class="button primary" type="button" @click="confirmPendingDiscard">放棄並繼續</button></div>
+          </div>
+
+          <template v-for="stage in interviewStages" :key="stage.key">
+          <div v-if="inlineStage(application.id) === stage.key" class="card-stage-body">
+            <div class="stage-grid">
+              <section class="interview-stage" :class="{ unscheduled: !stageData(application, stage.key).interview_at }" :data-testid="`interview-stage-${application.id}-${stage.key}`">
+                <header><div><small>{{ stage.owner }} OWNED</small><h3>{{ stage.title }}</h3></div><span>{{ resultLabels[stageData(application, stage.key).interview_result || 'pending'] }}</span></header>
+                <div class="stage-content">
+                  <small>面試日期與時間</small>
+                  <strong>{{ formatDate(stageData(application, stage.key).interview_at) }}</strong>
+                  <small>{{ stage.notesLabel }}</small>
+                  <p>{{ stageData(application, stage.key).interview_notes || '尚未填寫共享備註。' }}</p>
+                  <template v-if="latestStageRecord(application.id, stage.key)">
+                    <small>結構化面試紀錄 · {{ structuredRecordStatus(application.id, stage.key) }}</small>
+                    <p :class="{ 'structured-record-locked': structuredRecordLocked(application.id, stage.key) }">{{ structuredRecordSummaryForStage(application.id, stage.key) }}</p>
+                  </template>
+                  <small v-if="stageData(application, stage.key).updated_at">最後更新：{{ formatDate(stageData(application, stage.key).updated_at) }}</small>
                 </div>
-              </li>
-            </ol>
-            <div v-else class="question-preview-error">{{ cardQuestionErrors[planKey(application.id, inlineStage(application.id))] || cardInterviewErrors[application.id] || '尚未產生五題，請由這一階段的面試官按上方按鈕。' }}</div>
+                <footer>
+                  <span v-if="!canEditStage(stage.key)">僅供檢視，由{{ stage.owner }}維護</span>
+                  <button v-else class="button secondary" type="button" :data-testid="`interview-edit-${application.id}-${stage.key}`" @click="openEditor(application, stage.key)">{{ stageData(application, stage.key).interview_at ? '編輯排程' : '安排並註記' }}</button>
+                </footer>
 
-            <footer>
-              <span v-if="currentPlanRecord(application.id, inlineStage(application.id))">
-                {{ inlineStage(application.id) === 'hr' ? 'HR' : '主管' }} 紀錄者：{{ currentPlanRecord(application.id, inlineStage(application.id))?.interviewer_name }}。雙方可查看問答，由同階段授權人員維護。
-              </span>
-              <span v-else>{{ inlineStage(application.id) === 'hr' ? '由 HR 維護五題與答案' : '由部門主管維護五題與答案' }}</span>
-              <button
-                class="button primary"
-                type="button"
-                :disabled="!fiveQuestionSet(application.id, inlineStage(application.id)).length || (!canEditStage(inlineStage(application.id)) && !currentPlanRecord(application.id, inlineStage(application.id)) && !latestStageRecord(application.id, inlineStage(application.id)))"
-                :data-testid="`interview-workspace-${application.id}`"
-                @click="openInlineRecord(application)"
-              >{{ inlineActionLabel(application.id, inlineStage(application.id)) }}</button>
-            </footer>
+                <form v-if="editingApplicationId === application.id && editingStage === stage.key" class="interview-editor" :data-testid="`interview-form-${application.id}-${stage.key}`" @submit.prevent="saveInterview(application)">
+                  <header><div><small>INTERVIEW DETAILS</small><h3>{{ application.candidate.name }}｜{{ stage.title }}</h3></div><button type="button" :disabled="saving" aria-label="關閉面試編輯" @click="closeEditor">×</button></header>
+                  <div class="editor-grid">
+                    <label>面試日期與時間 *<input v-model="form.interview_at" data-testid="interview-at-input" type="datetime-local" required></label>
+                    <label>面試結果<select v-model="form.interview_result" data-testid="interview-result-select"><option v-for="(label, value) in resultLabels" :key="value" :value="value">{{ label }}</option></select></label>
+                    <label class="wide">{{ stage.notesLabel }}<textarea v-model="form.interview_notes" data-testid="interview-notes" rows="6" maxlength="3000" :placeholder="stage.placeholder"></textarea></label>
+                  </div>
+                  <footer><span>這一關的意見會獨立保存，不會覆蓋另一關紀錄。</span><div><button class="button secondary" type="button" :disabled="saving" @click="closeEditor">取消</button><button class="button primary" data-testid="interview-save" type="submit" :disabled="saving">{{ saving ? '儲存中…' : '儲存這一關紀錄' }}</button></div></footer>
+                </form>
+              </section>
+              <details class="peer-stage-note">
+                <summary>另一關（{{ peerStage(stage.key).owner }}）：{{ resultLabels[stageData(application, peerStage(stage.key).key).interview_result || 'pending'] }} · {{ formatDate(stageData(application, peerStage(stage.key).key).interview_at) }}</summary>
+                <div><small>{{ peerStage(stage.key).notesLabel }}</small><p>{{ stageData(application, peerStage(stage.key).key).interview_notes || '尚未填寫共享備註。' }}</p></div>
+              </details>
+            </div>
+
+            <form class="record-editor" data-testid="interview-record-form" @submit.prevent>
+              <header>
+                <div><small>{{ editingRecord ? `RECORD #${editingRecord.id}${editingRecord.revision_number > 0 ? ` · REVISION #${editingRecord.revision_number}` : ' · 尚未正式提交'}` : 'NEW INTERVIEW RECORD' }}</small><h3>面試題目與評分</h3><p>{{ recordCanEdit ? '題目、回答與 1–5 分評分都在這一頁完成；按下「儲存草稿」或「提交評分」才會寫入資料庫。' : '這一關目前為唯讀，仍可查看題目與已共享的內容。' }}</p></div>
+                <div class="record-answer-progress"><strong>{{ recordEvaluatedCount }}/{{ recordQuestionTotal }}</strong><span>已評分</span></div>
+              </header>
+
+              <div v-if="recordEditorOpen && !recordCanEdit" class="record-readonly-notice" role="note">
+                <span aria-hidden="true">🔒</span>
+                <div><strong>{{ recordIsCompleted ? '這筆評分已提交，內容為唯讀' : `這一關由${stage.owner}維護，你目前為唯讀` }}</strong><p>{{ readOnlyStageReason(stage.key) }}</p></div>
+                <button v-if="canReopenRecord(editingRecord) && !reopenPromptOpen" class="button primary" type="button" data-testid="interview-record-reopen-top" :disabled="recordReopening" @click="showReopenPrompt">重新開啟評分</button>
+              </div>
+              <div v-else-if="!recordEditorOpen" class="record-readonly-notice" role="note">
+                <span aria-hidden="true">🔒</span>
+                <div><strong>這一關由{{ stage.owner }}維護，你目前為唯讀</strong><p>{{ readOnlyStageReason(stage.key) }}</p></div>
+              </div>
+              <section v-if="reopenPromptOpen && canReopenRecord(editingRecord)" class="record-reopen-panel" aria-labelledby="record-reopen-title">
+                <div><strong id="record-reopen-title">重新開啟評分</strong><p>請留下原因供稽核；重新開啟後會回到草稿狀態，再次提交時才會遞增修訂編號。</p></div>
+                <label>重新開啟原因 *<input ref="reopenReasonInput" v-model="reopenReason" maxlength="1000" :disabled="recordReopening" placeholder="例如：補充面試證據後需要調整第 3 題評分" @keydown.enter.prevent="reopenRecord"></label>
+                <div><button class="button secondary" type="button" :disabled="recordReopening" @click="cancelReopenPrompt">取消</button><button class="button primary" type="button" :disabled="recordReopening || !reopenReason.trim()" @click="reopenRecord">{{ recordReopening ? '重新開啟中…' : '確認重新開啟' }}</button></div>
+              </section>
+
+              <div v-if="editingRecord" class="record-audit-strip">
+                <span><b>題目版本</b>{{ editingRecord.question_plan_version ? `v${editingRecord.question_plan_version}` : '自訂題目' }}</span>
+                <span><b>紀錄修訂</b>{{ editingRecord.revision_number > 0 ? `#${editingRecord.revision_number}` : '尚未提交（#0）' }}</span>
+                <span v-if="editingRecord.submitted_at"><b>最近提交</b>{{ editingRecord.submitted_by_name || '原面試官' }} · {{ formatDate(editingRecord.submitted_at) }}</span>
+                <span v-else><b>最近提交</b>尚未提交</span>
+              </div>
+              <div v-if="editingRecord?.last_reopen_reason" class="record-reopen-history"><strong>最近重新開啟原因</strong><p>{{ editingRecord.last_reopen_reason }}</p></div>
+              <div v-if="editingRecord && !editorEvaluationVisible" class="evaluation-lock-notice"><span>🔒</span><div><strong>{{ evaluationWaitingFor(application.id) ? `目前等待${evaluationWaitingFor(application.id)}提交，之後評分會自動互相公開` : '雙方各自評分中，提交後會自動互相公開' }}</strong><p>問答內容現在就已共享；單題評分、面試官觀察、總結與錄用建議會在 HR 與主管都按下「提交評分」後自動顯示，不需要任何人核准。先各自評分再一起討論，是為了避免先看到對方分數造成判斷偏移。</p></div></div>
+
+              <fieldset :disabled="recordSaving || recordReopening">
+                <details v-if="recordEditorOpen" class="record-basic-details">
+                  <summary><div><strong>面試基本資料</strong><span>{{ stage.title }} · {{ recordModeLabels[recordForm.mode] }} · {{ recordStatusLabels[recordForm.status] }}</span></div><em>查看／修改</em></summary>
+                  <div class="record-meta-grid">
+                    <label>面試階段<select v-model="recordForm.stage" disabled><option value="hr">HR 初談</option><option value="manager">主管複試</option></select></label>
+                    <label>面試日期與時間 *<input v-model="recordForm.interviewed_at" type="datetime-local" :disabled="!recordCanEdit" required></label>
+                    <label>面試方式<select v-model="recordForm.mode" :disabled="!recordCanEdit"><option v-for="(label, value) in recordModeLabels" :key="value" :value="value">{{ label }}</option></select></label>
+                    <label>紀錄狀態<select v-model="recordForm.status" :disabled="!recordCanEdit" aria-describedby="record-status-help"><option value="in_progress">填寫中</option><option value="cancelled">已取消</option><option value="no_show">未到場</option><option v-if="recordForm.status === 'planned'" value="planned" disabled>已規劃</option><option v-if="recordForm.status === 'completed'" value="completed" disabled>已提交評分</option></select><small id="record-status-help">正常流程請用下方「儲存草稿」或「提交評分」；此處僅保留取消／未到場。</small></label>
+                    <label>面試時長（分鐘）<input v-model.number="recordForm.duration_minutes" type="number" min="1" max="1440" :disabled="!recordCanEdit"></label>
+                  </div>
+                </details>
+
+                <section class="question-progress" :data-testid="`interview-question-progress-${application.id}`">
+                  <div class="question-plan-meta">
+                    <span :data-stage="stage.key">{{ stage.key === 'hr' ? 'HR 五題' : '主管五題' }}</span>
+                    <button v-if="canGenerateQuestionStage(stage.key) && !cardStagePlan?.questions.length" type="button" class="button generation-button" :disabled="cardStageGenerating" :data-testid="`question-plan-generate-${application.id}-${stage.key}`" @click="generateCardQuestionPlan(application, stage.key)">{{ cardStageGenerating ? '產生中…' : '使用 Gemini 產生 5 題' }}</button>
+                    <b class="evaluation-release-chip" :class="{ unlocked: peerEvaluationsReleased(application.id) }">{{ evaluationReleaseHint(application.id) }}</b>
+                    <small v-if="cardStagePlan?.version">題目版本 v{{ cardStagePlan.version }} · {{ formatDate(cardStagePlan.generated_at || null) }}</small>
+                    <small v-else-if="currentPlanRecord(application.id, stage.key)">紀錄更新：{{ formatDate(currentPlanRecord(application.id, stage.key)?.updated_at || null) }}</small>
+                    <small v-else>尚未開始填答</small>
+                  </div>
+                  <details v-if="cardStagePlan" class="question-plan-details">
+                    <summary>查看產生資訊</summary>
+                    <span>{{ generationModeLabel(cardStagePlan) }}<template v-if="tokenSummary(cardStagePlan)"> · {{ tokenSummary(cardStagePlan) }}</template></span>
+                  </details>
+                  <div v-if="cardStagePlan?.generation_warning" class="question-generation-warning" role="alert"><strong>⚠ Gemini 生成提醒</strong><span>{{ cardStagePlan.generation_warning }}</span></div>
+                  <div v-if="cardStageQuestionError" class="question-generation-error" role="alert"><strong>無法更新題目</strong><span>{{ cardStageQuestionError }}；目前題目仍保留。</span></div>
+                  <div v-if="cardStagePlan?.questions.length && cardStagePlan.context_matches === false" class="question-context-warning" role="status">履歷或職缺內容已更新，現有題目仍可查看；請針對需要更新的題目逐題重新產生。</div>
+                  <div v-if="hasOlderPlanRecord(application.id, stage.key)" class="question-context-warning" role="status">目前顯示新版題目，尚未建立填答紀錄；舊版問答仍保留在下方「面試紀錄歷程」中。</div>
+
+                  <div v-if="cardDataLoading[application.id] && !cardStageQuestions.length" class="question-progress-loading"><span class="spinner"></span>正在準備 5 題…</div>
+                  <template v-else>
+                    <div v-if="cardStageEditable && editorEvaluationVisible" class="rating-progress-bar" aria-live="polite">
+                      <span><b>{{ recordRatedCount }}</b>已評</span><span><b>{{ recordSkippedCount }}</b>略過</span><span><b>{{ recordQuestionTotal }}</b>總題數</span>
+                      <details class="rating-scale-guide"><summary>1–5 分量表說明</summary><ol><li v-for="scale in ratingScale" :key="scale.value"><b>{{ scale.value }}</b><span>{{ scale.label }}</span></li></ol></details>
+                    </div>
+                    <div v-if="recordHasExceptionalStatus && recordCanEdit" class="exceptional-status-note" role="note"><strong>{{ recordForm.status === 'cancelled' ? '本次面試已取消' : '候選人未到場' }}</strong><span>可直接儲存此狀態，不強制填寫逐題與整體評分。</span></div>
+
+                    <ol v-if="cardStageQuestions.length" class="record-question-list question-preview-list">
+                      <li v-for="(question, index) in cardStageQuestions" :key="index" class="record-question-card" :class="{ invalid: cardStageEditable && recordValidationErrors.questions[index], readonly: !cardStageEditable, answered: questionIsAnswered(question) }" :data-question-index="index">
+                        <header>
+                          <span>{{ questionIsAnswered(question) ? '✓' : index + 1 }}</span>
+                          <div class="record-question-heading">
+                            <label v-if="cardStageEditable && questionTextIsEditable(question, index)" class="record-question-text-label">問題內容<textarea :id="questionTextId(index)" v-model="question.question" class="record-question-text-input" rows="2" maxlength="500" placeholder="輸入面試問題" required @input="clearQuestionValidation(index)"></textarea></label>
+                            <strong v-else>{{ question.question }}</strong>
+                            <div class="record-question-tools">
+                              <b v-if="question.question.trim() && questionCompliance(question).status === 'ok'" class="compliance-chip" title="未偵測到違法／歧視性內容（就服法§5 / 性平法§7·§11）">合法</b>
+                              <button v-if="cardStageEditable && !questionTextIsEditable(question, index)" type="button" class="question-inline-button" :aria-label="`修改第 ${index + 1} 題文字`" @click="editQuestionText(index)">✎ 修改文字</button>
+                              <button v-if="canGenerateQuestionStage(stage.key) && cardStagePlan?.questions[index]" type="button" class="question-regenerate-button" :disabled="cardStageGenerating" :aria-label="`重新產生第 ${index + 1} 題`" :data-testid="`question-regenerate-${application.id}-${stage.key}-${index}`" @click="regenerateCardQuestion(application, stage.key, index)">{{ questionRegenerating[questionRegenerationKey(application.id, stage.key, index)] ? '重新產生中…' : '重新產生此題' }}</button>
+                              <button v-if="cardStageEditable" type="button" class="question-remove-button" :aria-label="`移除第 ${index + 1} 題`" @click="removeRecordQuestion(index)">×</button>
+                            </div>
+                          </div>
+                        </header>
+                        <p v-if="question.question.trim() && questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert"><b>⚠ 疑似違法提問</b><span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span><em>{{ questionCompliance(question).suggestion }}</em></p>
+                        <details v-if="question.source || question.purpose || question.follow_up" class="record-question-context">
+                          <summary>需要時查看面試提示</summary>
+                          <div><small v-if="question.purpose"><b>評估重點</b>{{ question.purpose }}</small><small v-if="question.follow_up"><b>建議追問</b>{{ question.follow_up }}</small><small v-if="question.source"><b>題目依據</b>{{ question.source }}</small></div>
+                        </details>
+                        <div v-if="cardStageEditable" class="record-quick-answer"><label><span class="answer-label">面試過程回答紀錄</span><textarea :id="`${recordControlPrefix()}-question-${index}-response`" v-model="question.response" rows="4" maxlength="5000" placeholder="記錄候選人實際說了什麼：情境、採取的行動與結果。只寫候選人陳述與客觀證據，結論請留到下方評分欄。"></textarea></label></div>
+                        <div v-else class="record-quick-answer readonly"><span class="answer-label">面試過程回答紀錄</span><p :class="{ empty: !questionIsAnswered(question) }">{{ questionAnswer(question) }}</p></div>
+
+                        <template v-if="cardStageEditable">
+                          <div v-if="editorEvaluationVisible" class="question-evaluation-direct">
+                            <fieldset class="rating-radio-group" :aria-describedby="recordValidationErrors.questions[index] ? `${questionRatingName(index)}-error` : undefined" :aria-invalid="Boolean(recordValidationErrors.questions[index])">
+                              <legend>第 {{ index + 1 }} 題評分</legend>
+                              <div class="rating-segments">
+                                <label v-for="scale in ratingScale" :key="scale.value" :class="{ selected: !questionIsSkipped(question) && question.rating === scale.value }"><input :id="questionRatingId(index, scale.value)" type="radio" :name="questionRatingName(index)" :value="scale.value" :checked="!questionIsSkipped(question) && question.rating === scale.value" :aria-label="`${scale.value} 分：${scale.label}`" @change="setQuestionRating(question, index, scale.value)"><b>{{ scale.value }}</b><span>{{ scale.label }}</span></label>
+                                <label class="not-asked-option" :class="{ selected: questionIsSkipped(question) }"><input :id="questionRatingId(index, 'not-asked')" type="radio" :name="questionRatingName(index)" value="not-asked" :checked="questionIsSkipped(question)" aria-label="未詢問此題" @change="setQuestionNotAsked(question, index)"><b>—</b><span>未詢問</span></label>
+                              </div>
+                            </fieldset>
+                            <label v-if="questionIsSkipped(question)" class="not-asked-reason">未詢問原因 *<input :id="questionNotAskedReasonId(index)" v-model="question.not_asked_reason" maxlength="1000" required :aria-invalid="Boolean(recordValidationErrors.questions[index])" :aria-describedby="recordValidationErrors.questions[index] ? `${questionRatingName(index)}-error` : undefined" placeholder="例如：時間不足、題目不適用或已由前題充分涵蓋" @input="clearQuestionValidation(index)"></label>
+                            <p v-if="recordValidationErrors.questions[index]" :id="`${questionRatingName(index)}-error`" class="field-error" role="alert">{{ recordValidationErrors.questions[index] }}</p>
+                            <details class="question-observation-details">
+                              <summary><span>對應特質與面試官觀察</span><em>{{ question.notes?.trim() ? '已有觀察' : '選填' }}</em></summary>
+                              <div class="record-answer-grid"><label>對應特質<input v-model="question.trait" maxlength="100" placeholder="例如：團隊合作"></label><label class="wide">面試官觀察（評分區）<textarea v-model="question.notes" rows="2" maxlength="2000" placeholder="記錄非語言反應、待查證處或追問結果…"></textarea></label></div>
+                            </details>
+                          </div>
+                          <div v-else class="evaluation-lock-inline"><span>🔒</span><p><b>{{ evaluationWaitingFor(application.id) ? `待${evaluationWaitingFor(application.id)}提交後自動公開評分` : '待雙方提交後自動公開評分' }}</b><small>候選人回答仍可直接查看，不需另外申請。</small></p></div>
+                        </template>
+                        <div v-else class="question-evaluation-readonly">
+                          <template v-if="readOnlyEvaluationVisible(application.id, stage.key)"><b v-if="question.rating" class="rating-chip">{{ question.rating }} / 5 分</b><b v-else-if="question.not_asked_reason" class="rating-chip skipped">未詢問：{{ question.not_asked_reason }}</b><b v-else class="rating-chip empty">尚未評分</b><span v-if="question.notes?.trim()">面試官觀察：{{ question.notes }}</span></template>
+                          <em v-else class="evaluation-locked">評分與觀察{{ evaluationWaitingFor(application.id) ? `待${evaluationWaitingFor(application.id)}提交後自動顯示` : '待雙方提交後自動顯示' }}</em>
+                        </div>
+                      </li>
+                    </ol>
+                    <div v-else class="question-preview-error">{{ cardStageQuestionError || cardInterviewErrors[application.id] || '尚未產生五題，請由這一階段的面試官按上方按鈕。' }}</div>
+
+                    <div v-if="cardStageEditable" class="question-list-actions">
+                      <span>需要加問時可自訂題目；系統題目請用「重新產生此題」更新。</span>
+                      <button id="interview-record-add-question" class="button secondary" type="button" @click="addBlankQuestion">＋ 自訂問題</button>
+                    </div>
+
+                    <details v-if="cardStageEditable" class="question-builder">
+                      <summary><div><small>OPTIONAL QUESTION TOOL</small><h3>需要加問時的特質出題工具</h3><p>五題已依所屬階段帶入；只有需要額外的人格特質或履歷追問時才使用這裡。</p></div><span>展開工具 · 已選 {{ selectedTraits.length }}/10</span></summary>
+                      <div class="question-builder-body">
+                        <div class="trait-picker">
+                          <button v-for="trait in commonTraits" :key="trait" type="button" :class="{ selected: selectedTraits.includes(trait) }" :aria-pressed="selectedTraits.includes(trait)" @click="toggleTrait(trait)">{{ trait }}</button>
+                        </div>
+                        <div class="custom-trait"><input v-model="customTrait" maxlength="30" placeholder="輸入其他人格特質" @keydown.enter.prevent="addCustomTrait"><button class="button secondary" type="button" :disabled="!customTrait.trim() || selectedTraits.length >= 10" @click="addCustomTrait">加入</button></div>
+                        <div v-if="selectedTraits.some(trait => !commonTraits.includes(trait))" class="selected-custom-traits"><button v-for="trait in selectedTraits.filter(trait => !commonTraits.includes(trait))" :key="trait" type="button" @click="toggleTrait(trait)">{{ trait }} ×</button></div>
+                        <button class="button primary generate-questions" data-testid="interview-question-generate" type="button" :disabled="questionLoading || !selectedTraits.length" @click="generateQuestions">{{ questionLoading ? '正在產生建議…' : `產生 ${application.requisition.title} 面試題` }}</button>
+
+                        <template v-if="questionSuggestions">
+                          <p class="question-guidance">{{ questionSuggestions.guidance }}</p>
+                          <div v-if="questionSuggestions.personalization_basis.length" class="question-personalization-basis">
+                            <strong>本次出題依據</strong><span v-for="item in questionSuggestions.personalization_basis" :key="item">{{ item }}</span>
+                          </div>
+                          <div class="suggestion-groups">
+                            <article v-for="suggestion in questionSuggestions.suggestions" :key="suggestion.trait">
+                              <header><strong>{{ suggestion.trait }}</strong><span>{{ questionSuggestions.job_title }}</span></header>
+                              <div v-for="suggested in suggestion.questions" :key="suggested.question" class="suggested-question">
+                                <div><small v-if="suggested.source" class="question-source">履歷依據｜{{ suggested.source }}</small><strong>{{ suggested.question }}</strong><p v-if="questionCompliance(suggested).status === 'warning'" class="question-compliance warning" role="alert"><b>⚠ 疑似違法提問</b><span>涉及：{{ complianceCategoryText(questionCompliance(suggested)) }}</span><em>{{ questionCompliance(suggested).suggestion }}</em></p><p v-else class="question-compliance ok"><b>✓ 合法</b></p><p><b>提問目的</b>{{ suggested.purpose }}</p><p><b>追問方向</b>{{ suggested.follow_up }}</p></div>
+                                <button class="button secondary" type="button" :disabled="recordForm.questions.some(item => item.question === suggested.question) || !recordCanEdit" @click="addSuggestedQuestion(suggested, suggestion.trait)">{{ recordForm.questions.some(item => item.question === suggested.question) ? '已加入' : '加入紀錄' }}</button>
+                              </div>
+                            </article>
+                          </div>
+                        </template>
+                      </div>
+                    </details>
+                  </template>
+                </section>
+              </fieldset>
+
+              <fieldset :disabled="recordSaving || recordReopening || !recordCanEdit">
+                <section v-if="editorEvaluationVisible && recordEditorOpen" class="record-conclusion-section" aria-labelledby="record-conclusion-title">
+                  <header><div><strong id="record-conclusion-title">整體總評</strong><span>提交評分前，請完成面試總分、錄用建議與面試總評。</span></div><em>{{ recordForm.recommendation ? recommendationLabels[recordForm.recommendation] : '尚未填寫' }}</em></header>
+                  <div class="record-conclusion">
+                    <label class="overall-score-field">面試總分（0–100）*
+                      <span class="overall-score-input"><input :id="overallScoreId()" :value="recordForm.overall_score ?? ''" type="number" min="0" max="100" step="1" inputmode="numeric" placeholder="例如 82" :aria-invalid="Boolean(recordValidationErrors.overall)" :aria-describedby="`${recordControlPrefix()}-overall-help`" @input="setOverallScore(($event.target as HTMLInputElement).value)"><b>／ 100</b></span>
+                      <small :id="`${recordControlPrefix()}-overall-help`">由面試官依整體表現填寫，系統不會自動換算。</small>
+                      <small v-if="recordValidationErrors.overall" :id="`${recordControlPrefix()}-overall-error`" class="field-error" role="alert">{{ recordValidationErrors.overall }}</small>
+                      <small class="score-reference">題目平均 {{ recordAverageRating }} / 5（{{ recordEvaluatedCount }}/{{ recordQuestionTotal }} 題已評分或略過）· 僅供參考，不計入面試總分</small>
+                    </label>
+                    <label>錄用建議 *<select :id="`${recordControlPrefix()}-recommendation`" v-model="recordForm.recommendation" :aria-invalid="Boolean(recordValidationErrors.recommendation)" :aria-describedby="recordValidationErrors.recommendation ? `${recordControlPrefix()}-recommendation-error` : undefined" @change="recordValidationErrors.recommendation = ''"><option :value="null">尚未決定</option><option v-for="(label, value) in recommendationLabels" :key="value" :value="value">{{ label }}</option></select><small v-if="recordValidationErrors.recommendation" :id="`${recordControlPrefix()}-recommendation-error`" class="field-error" role="alert">{{ recordValidationErrors.recommendation }}</small></label>
+                    <label class="wide">面試總評 *<textarea :id="`${recordControlPrefix()}-summary`" v-model="recordForm.summary" rows="4" maxlength="5000" :aria-invalid="Boolean(recordValidationErrors.summary)" :aria-describedby="recordValidationErrors.summary ? `${recordControlPrefix()}-summary-error` : undefined" placeholder="摘要主要優勢、風險、待確認事項與共識…" @input="recordValidationErrors.summary = ''"></textarea><small v-if="recordValidationErrors.summary" :id="`${recordControlPrefix()}-summary-error`" class="field-error" role="alert">{{ recordValidationErrors.summary }}</small></label>
+                  </div>
+                </section>
+                <div v-else-if="recordEditorOpen" class="record-conclusion-locked"><span>🔒</span><div><strong>{{ evaluationWaitingFor(application.id) ? `面試總分與錄用建議待${evaluationWaitingFor(application.id)}提交後自動公開` : '面試總分與錄用建議待雙方提交後自動公開' }}</strong><p>你自己填寫的內容不受影響，隨時可以查看與修改；這裡隱藏的是對方的評估結果。</p></div></div>
+
+                <details v-if="recordEditorOpen && recordForm.stage === 'hr' && (canEditStage('hr') || editingRecord?.private_notes_visible)" class="hr-private-notes">
+                  <summary><span>HR ONLY</span><div><strong>HR 限定敏感備註（選填）</strong><small>此區內容不會出現在主管的畫面或 API 回應中。</small></div><em>{{ recordForm.private_notes?.trim() ? '已有內容' : '尚未填寫' }}</em></summary>
+                  <label>私密備註<textarea v-model="recordForm.private_notes" rows="4" maxlength="10000" placeholder="例如：薪資個資、合理調整需求或其他僅限 HR 處理的敏感事項…"></textarea></label>
+                </details>
+              </fieldset>
+
+              <footer>
+                <span><template v-if="editingRecord">建立者：{{ editingRecord.interviewer_name }} · 更新：{{ formatDate(editingRecord.updated_at) }}<template v-if="editingRecord.submitted_at"> · 提交：{{ editingRecord.submitted_by_name || '原面試官' }}／{{ formatDate(editingRecord.submitted_at) }}</template></template><template v-else-if="recordCanEdit">草稿可隨時補填；「提交評分」後即轉為唯讀。</template><template v-else>這一關尚未建立結構化紀錄。</template></span>
+                <div>
+                  <button class="button secondary" type="button" :disabled="recordSaving || recordReopening" @click="requestCollapseApplicationCard">收合</button>
+                  <button v-if="canReopenRecord(editingRecord) && !reopenPromptOpen" class="button secondary reopen-button" type="button" data-testid="interview-record-reopen" :disabled="recordReopening" @click="showReopenPrompt">重新開啟評分</button>
+                  <template v-if="recordCanEdit">
+                    <button v-if="recordHasExceptionalStatus" class="button primary" type="button" data-testid="interview-record-save-status" :disabled="recordSaving || recordReopening" @click="saveRecord('draft')">{{ recordSaving && recordSaveIntent === 'draft' ? '儲存狀態中…' : '儲存狀態' }}</button>
+                    <template v-else>
+                      <button class="button secondary" type="button" data-testid="interview-record-save-draft" :disabled="recordSaving || recordReopening" @click="saveRecord('draft')">{{ recordSaving && recordSaveIntent === 'draft' ? '儲存草稿中…' : '儲存草稿' }}</button>
+                      <button class="button primary" type="button" data-testid="interview-record-submit" :disabled="recordSaving || recordReopening" @click="saveRecord('submit')">{{ recordSaving && recordSaveIntent === 'submit' ? '提交評分中…' : '提交評分' }}</button>
+                    </template>
+                  </template>
+                </div>
+              </footer>
+            </form>
+          </div>
           </template>
-        </section>
+
+          <details class="record-history">
+            <summary><div><strong>面試紀錄歷程</strong><span>{{ interviewRecords.length }} 筆</span></div><em>展開查看舊版問答與提交紀錄</em></summary>
+            <div class="record-history-body">
+              <div class="record-history-actions">
+                <span>每次提交或重新開啟都會保留一筆；舊版題目的問答也在這裡。</span>
+                <button v-if="canEditStage(inlineStage(application.id))" class="button secondary" type="button" data-testid="interview-record-new" :disabled="recordSaving || recordReopening" @click="startNewRecord(application)">＋ 建立新紀錄</button>
+              </div>
+              <div v-if="recordsLoading" class="workspace-loading"><span class="spinner"></span>載入紀錄中…</div>
+              <button v-for="record in interviewRecords" v-else :key="record.id" class="record-history-item" :class="{ active: editingRecord?.id === record.id }" type="button" @click="openHistoryRecord(application, record)">
+                <span class="record-status" :data-status="record.status">{{ recordStatusLabels[record.status] }}</span>
+                <strong>{{ record.stage === 'hr' ? 'HR 初談' : '主管複試' }} · {{ formatDate(record.interviewed_at) }}</strong>
+                <small>{{ recordModeLabels[record.mode] }}<template v-if="record.duration_minutes"> · {{ record.duration_minutes }} 分鐘</template></small>
+                <small>{{ record.interviewer_name }} · 已記錄 {{ answeredQuestionCount(record) }}/{{ record.questions.length }} 題<template v-if="record.question_plan_version"> · 題目 v{{ record.question_plan_version }}</template></small>
+                <small><template v-if="record.revision_number > 0">紀錄修訂 #{{ record.revision_number }}</template><template v-else>尚未正式提交</template><template v-if="record.submitted_at"> · {{ record.submitted_by_name || '原面試官' }} 於 {{ formatDate(record.submitted_at) }} 提交</template></small>
+                <small class="history-visibility" :class="{ unlocked: record.evaluation_revealed }">{{ record.evaluation_revealed ? '評分可見' : '僅共享問答 · 評分保護中' }}</small>
+                <em>{{ recordHistoryActionLabel(record) }} →</em>
+              </button>
+              <div v-if="!recordsLoading && !interviewRecords.length" class="record-history-empty"><strong>尚無過程紀錄</strong><p>目前的填寫內容按下「儲存草稿」後就會成為第一筆紀錄。</p></div>
+            </div>
+          </details>
         </div>
       </article>
     </div>
     <div v-else class="interview-empty panel"><strong>目前沒有符合條件的應徵者</strong><p>請調整部門／職缺篩選；HR 建立人才與應徵關聯後，也會顯示在這裡。</p></div>
   </section>
-
-  <div v-if="workspaceApplication" class="record-workspace-overlay" data-testid="interview-record-workspace" @keydown.esc="closeRecordWorkspace">
-    <section class="record-workspace" role="dialog" aria-modal="true" aria-labelledby="record-workspace-title">
-      <header class="record-workspace-header">
-        <div class="workspace-person"><span>{{ workspaceApplication.candidate.name.slice(0, 1) }}</span><div><small>INTERVIEW WORKSPACE</small><h2 id="record-workspace-title">{{ workspaceApplication.candidate.name }}｜面試過程紀錄</h2><p>{{ workspaceApplication.requisition.req_no }} · {{ workspaceApplication.requisition.title }} · {{ workspaceApplication.requisition.department_name || '未標示部門' }}</p></div></div>
-        <button type="button" :disabled="recordSaving" aria-label="關閉面試過程工作區" @click="closeRecordWorkspace">×</button>
-      </header>
-
-      <div v-if="workspaceError" class="workspace-message error" role="alert"><strong>!</strong><span>{{ workspaceError }}</span><button aria-label="關閉錯誤訊息" @click="workspaceError = ''">×</button></div>
-      <div v-if="recordNotice" class="workspace-message success" role="status"><strong>✓</strong><span>{{ recordNotice }}</span><button aria-label="關閉成功訊息" @click="recordNotice = ''">×</button></div>
-
-      <details class="interview-sharing-policy">
-        <summary><strong>問答共享、評分分開</strong><span>查看資料規則</span></summary>
-        <div class="sharing-policy-details">
-          <p><b>問答</b><span>HR 與主管都能查看問題、回答與目前進度。</span></p>
-          <p><b>評分</b><span>雙方都提交後，才互相公開評分、觀察與錄用建議。</span></p>
-          <p v-if="authSession.state.user?.role === 'hr'"><b>HR 備註</b><span>敏感資訊只提供 HR 查看。</span></p>
-        </div>
-      </details>
-
-      <div class="record-workspace-body">
-        <aside class="record-history">
-          <header><div><strong>面試紀錄</strong><span>{{ interviewRecords.length }} 筆歷程</span></div><button v-if="canEditStage(defaultRecordStage())" class="button primary" type="button" data-testid="interview-record-new" @click="newRecord()">＋ 新增</button></header>
-          <div v-if="recordsLoading" class="workspace-loading"><span class="spinner"></span>載入紀錄中…</div>
-          <button v-for="record in interviewRecords" v-else :key="record.id" class="record-history-item" :class="{ active: editingRecord?.id === record.id }" type="button" @click="editRecord(record)">
-            <span class="record-status" :data-status="record.status">{{ recordStatusLabels[record.status] }}</span>
-            <strong>{{ record.stage === 'hr' ? 'HR 初談' : '主管複試' }} · {{ formatDate(record.interviewed_at) }}</strong>
-            <small>{{ recordModeLabels[record.mode] }}<template v-if="record.duration_minutes"> · {{ record.duration_minutes }} 分鐘</template></small>
-            <small>{{ record.interviewer_name }} · 已記錄 {{ answeredQuestionCount(record) }}/{{ record.questions.length }} 題<template v-if="record.question_plan_version"> · 題目 v{{ record.question_plan_version }}</template></small>
-            <small><template v-if="record.revision_number > 0">紀錄修訂 #{{ record.revision_number }}</template><template v-else>尚未正式提交</template><template v-if="record.submitted_at"> · {{ record.submitted_by_name || '原面試官' }} 於 {{ formatDate(record.submitted_at) }} 提交</template></small>
-            <small class="history-visibility" :class="{ unlocked: record.evaluation_revealed }">{{ record.evaluation_revealed ? '評分可見' : '僅共享問答 · 評分保護中' }}</small>
-            <em>{{ recordHistoryActionLabel(record) }} →</em>
-          </button>
-          <div v-if="!recordsLoading && !interviewRecords.length" class="record-history-empty"><strong>尚無過程紀錄</strong><p>建立第一筆紀錄，面試中即可逐題輸入回答與評分。</p></div>
-        </aside>
-
-        <main class="record-workspace-main">
-          <section class="workspace-gemini-panel" data-testid="workspace-gemini-generator">
-            <div class="workspace-gemini-copy">
-              <small>{{ workspaceQuestionStage === 'hr' ? 'HR 五題' : '主管五題' }}</small>
-              <strong>目前面試題目</strong>
-              <span>初次建立會產生五題；之後請在需要調整的題目旁按「重新產生此題」，其餘四題與既有紀錄都會保留。</span>
-            </div>
-            <div class="workspace-gemini-actions">
-              <button
-                v-if="canGenerateQuestionStage(workspaceQuestionStage) && !workspaceQuestionPlan?.questions.length"
-                class="button primary"
-                type="button"
-                :disabled="questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)]"
-                :data-testid="`workspace-question-plan-generate-${workspaceQuestionStage}`"
-                @click="generateWorkspaceQuestionPlan"
-              >{{ questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)] ? 'Gemini 產生中…' : '使用 Gemini 產生 5 題' }}</button>
-            </div>
-            <p v-if="workspaceQuestionPlan?.generation_warning" class="workspace-gemini-warning">⚠ {{ workspaceQuestionPlan.generation_warning }}</p>
-            <details v-if="workspaceQuestionPlan" class="workspace-generation-details">
-              <summary>查看產生資訊</summary>
-              <p>{{ generationModeLabel(workspaceQuestionPlan) }}<template v-if="tokenSummary(workspaceQuestionPlan)"> · {{ tokenSummary(workspaceQuestionPlan) }}</template></p>
-            </details>
-            <details v-if="workspaceQuestionPlan?.questions.length" class="workspace-gemini-preview" open>
-              <summary>目前 {{ workspaceQuestionPlan.questions.length }} 題，可逐題選擇重新產生</summary>
-              <ol>
-                <li v-for="(question, index) in workspaceQuestionPlan.questions" :key="question.question">
-                  <div>
-                    <strong>{{ question.question }}</strong>
-                    <span v-if="questionCompliance(question).status === 'warning'" class="question-compliance-inline warning" role="alert" :title="questionCompliance(question).suggestion">⚠ 疑似違法（{{ complianceCategoryText(questionCompliance(question)) }}）</span>
-                    <span v-else class="question-compliance-inline ok">✓ 合法</span>
-                  </div>
-                  <button
-                    v-if="canGenerateQuestionStage(workspaceQuestionStage)"
-                    type="button"
-                    class="question-regenerate-button"
-                    :disabled="questionPlanGenerating[planKey(workspaceApplication.id, workspaceQuestionStage)]"
-                    :data-testid="`workspace-question-regenerate-${workspaceQuestionStage}-${index}`"
-                    @click="regenerateWorkspaceQuestion(index)"
-                  >{{ questionRegenerating[questionRegenerationKey(workspaceApplication.id, workspaceQuestionStage, index)] ? '重新產生中…' : '重新產生此題' }}</button>
-                </li>
-              </ol>
-            </details>
-          </section>
-
-          <details class="question-builder">
-            <summary><div><small>OPTIONAL QUESTION TOOL</small><h3>需要加問時，再展開題目工具</h3><p>面試紀錄已帶入所屬階段題目；只有需要額外的人格特質或履歷追問時才使用這裡。</p></div><span>展開工具 · 已選 {{ selectedTraits.length }}/10</span></summary>
-            <div class="question-builder-body">
-            <div class="trait-picker">
-              <button v-for="trait in commonTraits" :key="trait" type="button" :class="{ selected: selectedTraits.includes(trait) }" :aria-pressed="selectedTraits.includes(trait)" @click="toggleTrait(trait)">{{ trait }}</button>
-            </div>
-            <form class="custom-trait" @submit.prevent="addCustomTrait"><input v-model="customTrait" maxlength="30" placeholder="輸入其他人格特質"><button class="button secondary" :disabled="!customTrait.trim() || selectedTraits.length >= 10">加入</button></form>
-            <div v-if="selectedTraits.some(trait => !commonTraits.includes(trait))" class="selected-custom-traits"><button v-for="trait in selectedTraits.filter(trait => !commonTraits.includes(trait))" :key="trait" type="button" @click="toggleTrait(trait)">{{ trait }} ×</button></div>
-            <button class="button primary generate-questions" data-testid="interview-question-generate" type="button" :disabled="questionLoading || !selectedTraits.length" @click="generateQuestions">{{ questionLoading ? '正在產生建議…' : `產生 ${workspaceApplication.requisition.title} 面試題` }}</button>
-
-            <template v-if="questionSuggestions">
-              <p class="question-guidance">{{ questionSuggestions.guidance }}</p>
-              <div v-if="questionSuggestions.personalization_basis.length" class="question-personalization-basis">
-                <strong>本次出題依據</strong><span v-for="item in questionSuggestions.personalization_basis" :key="item">{{ item }}</span>
-              </div>
-              <div class="suggestion-groups">
-                <article v-for="suggestion in questionSuggestions.suggestions" :key="suggestion.trait">
-                  <header><strong>{{ suggestion.trait }}</strong><span>{{ questionSuggestions.job_title }}</span></header>
-                  <div v-for="question in suggestion.questions" :key="question.question" class="suggested-question">
-                    <div><small v-if="question.source" class="question-source">履歷依據｜{{ question.source }}</small><strong>{{ question.question }}</strong><p v-if="questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert"><b>⚠ 疑似違法提問</b><span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span><em>{{ questionCompliance(question).suggestion }}</em></p><p v-else class="question-compliance ok"><b>✓ 合法</b></p><p><b>提問目的</b>{{ question.purpose }}</p><p><b>追問方向</b>{{ question.follow_up }}</p></div>
-                    <button class="button secondary" type="button" :disabled="recordForm.questions.some(item => item.question === question.question) || (recordEditorOpen && !recordCanEdit)" @click="addSuggestedQuestion(question, suggestion.trait)">{{ recordForm.questions.some(item => item.question === question.question) ? '已加入' : '加入紀錄' }}</button>
-                  </div>
-                </article>
-              </div>
-            </template>
-            </div>
-          </details>
-
-          <form v-if="recordEditorOpen" class="record-editor" data-testid="interview-record-form" @submit.prevent>
-            <header><div><small>{{ editingRecord ? `RECORD #${editingRecord.id}${editingRecord.revision_number > 0 ? ` · REVISION #${editingRecord.revision_number}` : ' · 尚未正式提交'}` : 'NEW INTERVIEW RECORD' }}</small><h3>{{ recordIsCompleted ? '已提交的面試評分' : editingRecord ? '更新面試紀錄' : '開始面試紀錄' }}</h3><p>{{ recordIsCompleted ? '已提交內容為唯讀；合法階段的面試官可填寫原因後重新開啟。' : '可先儲存草稿；提交前須完成逐題評分與整體總評。' }}</p></div><div class="record-answer-progress"><strong>{{ recordAnsweredCount }}/{{ recordForm.questions.length }}</strong><span>已回答</span></div><span v-if="!recordCanEdit" class="read-only-badge">{{ recordIsCompleted ? '已提交 · 唯讀' : '唯讀' }}</span></header>
-            <div v-if="editingRecord" class="record-audit-strip">
-              <span><b>題目版本</b>{{ editingRecord.question_plan_version ? `v${editingRecord.question_plan_version}` : '自訂題目' }}</span>
-              <span><b>紀錄修訂</b>{{ editingRecord.revision_number > 0 ? `#${editingRecord.revision_number}` : '尚未提交（#0）' }}</span>
-              <span v-if="editingRecord.submitted_at"><b>最近提交</b>{{ editingRecord.submitted_by_name || '原面試官' }} · {{ formatDate(editingRecord.submitted_at) }}</span>
-              <span v-else><b>最近提交</b>尚未提交</span>
-            </div>
-            <div v-if="editingRecord?.last_reopen_reason" class="record-reopen-history"><strong>最近重新開啟原因</strong><p>{{ editingRecord.last_reopen_reason }}</p></div>
-            <div v-if="editingRecord && !editorEvaluationVisible" class="evaluation-lock-notice"><span>🔒</span><div><strong>對方的問答已與你共享，評分仍保持獨立</strong><p>待 HR 與主管都將最新紀錄標記為「已提交評分」，系統才會顯示單題評分、面試官觀察、總結與錄用建議。</p></div></div>
-            <fieldset :disabled="recordSaving || recordReopening || !recordCanEdit">
-              <details class="record-basic-details">
-                <summary><div><strong>面試基本資料</strong><span>{{ recordForm.stage === 'hr' ? 'HR 初談' : '主管複試' }} · {{ recordModeLabels[recordForm.mode] }} · {{ recordStatusLabels[recordForm.status] }}</span></div><em>查看／修改</em></summary>
-              <div class="record-meta-grid">
-                <label>面試階段<select v-model="recordForm.stage" disabled><option value="hr">HR 初談</option><option value="manager">主管複試</option></select></label>
-                <label>面試日期與時間 *<input v-model="recordForm.interviewed_at" type="datetime-local" required></label>
-                <label>面試方式<select v-model="recordForm.mode"><option v-for="(label, value) in recordModeLabels" :key="value" :value="value">{{ label }}</option></select></label>
-                <label>紀錄狀態<select v-model="recordForm.status" aria-describedby="record-status-help"><option value="in_progress">填寫中</option><option value="cancelled">已取消</option><option value="no_show">未到場</option><option v-if="recordForm.status === 'planned'" value="planned" disabled>已規劃</option><option v-if="recordForm.status === 'completed'" value="completed" disabled>已提交評分</option></select><small id="record-status-help">正常流程請用下方「儲存草稿」或「提交評分」；此處僅保留取消／未到場。</small></label>
-                <label>面試時長（分鐘）<input v-model.number="recordForm.duration_minutes" type="number" min="1" max="1440"></label>
-              </div>
-              </details>
-
-              <section class="record-question-section">
-                <header><div><strong>逐題問答與評分</strong><span>回答可先記草稿；提交時每題都要選擇 1–5 分，或標記「未詢問」並說明原因。</span></div><button id="interview-record-add-question" class="button secondary" type="button" @click="addBlankQuestion">＋ 自訂問題</button></header>
-                <section v-if="editorEvaluationVisible" class="rating-scale-guide" aria-labelledby="interview-rating-scale-title">
-                  <header><div><strong id="interview-rating-scale-title">統一 1–5 分量表</strong><span>所有單題與整體評分使用相同判準</span></div><div class="rating-progress" aria-live="polite"><span><b>{{ recordRatedCount }}</b>已評</span><span><b>{{ recordSkippedCount }}</b>略過</span><span><b>{{ recordQuestionTotal }}</b>總題數</span><span><b>{{ recordAverageRating }}</b>題目平均<small>只供參考</small></span></div></header>
-                  <ol><li v-for="scale in ratingScale" :key="scale.value"><b>{{ scale.value }}</b><span>{{ scale.label }}</span></li></ol>
-                  <p>{{ recordEvaluatedCount }}/{{ recordQuestionTotal }} 題已完成評分或略過標記；平均只計入實際評分題目，不作自動錄用決策。</p>
-                </section>
-                <div v-if="recordHasExceptionalStatus" class="exceptional-status-note" role="note"><strong>{{ recordForm.status === 'cancelled' ? '本次面試已取消' : '候選人未到場' }}</strong><span>可直接儲存此狀態，不強制填寫逐題與整體評分。</span></div>
-                <article v-for="(question, index) in recordForm.questions" :key="index" class="record-question-card" :class="{ invalid: recordValidationErrors.questions[index] }" :data-question-index="index">
-                  <header><span>{{ index + 1 }}</span><label>問題<input :id="`${recordControlPrefix()}-question-${index}-text`" v-model="question.question" maxlength="500" placeholder="輸入面試問題" required @input="clearQuestionValidation(index)"></label><button type="button" aria-label="移除這個問題" @click="removeRecordQuestion(index)">×</button></header>
-                  <p v-if="question.question.trim() && questionCompliance(question).status === 'warning'" class="question-compliance warning" role="alert">
-                    <b>⚠ 疑似違法提問</b>
-                    <span>涉及：{{ complianceCategoryText(questionCompliance(question)) }}</span>
-                    <em>{{ questionCompliance(question).suggestion }}</em>
-                  </p>
-                  <p v-else-if="question.question.trim()" class="question-compliance ok"><b>✓ 合法</b><span>未偵測到違法／歧視性內容</span></p>
-                  <details v-if="question.source || question.purpose || question.follow_up" class="record-question-context">
-                    <summary>查看這題的設計依據與追問提示</summary>
-                    <div><small v-if="question.source"><b>設計依據</b>{{ question.source }}</small>
-                    <small v-if="question.purpose"><b>提問目的</b>{{ question.purpose }}</small>
-                    <small v-if="question.follow_up"><b>追問方向</b>{{ question.follow_up }}</small></div>
-                  </details>
-                  <div class="record-quick-answer">
-                    <label>應徵者回答<textarea v-model="question.response" rows="3" maxlength="5000" placeholder="先記重點：情境、採取的行動、最後結果…"></textarea></label>
-                  </div>
-                  <div v-if="editorEvaluationVisible" class="question-evaluation-direct">
-                    <fieldset class="rating-radio-group" :aria-describedby="recordValidationErrors.questions[index] ? `${questionRatingName(index)}-error` : undefined" :aria-invalid="Boolean(recordValidationErrors.questions[index])">
-                      <legend>第 {{ index + 1 }} 題評分</legend>
-                      <div class="rating-segments">
-                        <label v-for="scale in ratingScale" :key="scale.value" :class="{ selected: !questionIsSkipped(question) && question.rating === scale.value }">
-                          <input :id="questionRatingId(index, scale.value)" type="radio" :name="questionRatingName(index)" :value="scale.value" :checked="!questionIsSkipped(question) && question.rating === scale.value" :aria-label="`${scale.value} 分：${scale.label}`" @change="setQuestionRating(question, index, scale.value)">
-                          <b>{{ scale.value }}</b><span>{{ scale.label }}</span>
-                        </label>
-                        <label class="not-asked-option" :class="{ selected: questionIsSkipped(question) }">
-                          <input :id="questionRatingId(index, 'not-asked')" type="radio" :name="questionRatingName(index)" value="not-asked" :checked="questionIsSkipped(question)" aria-label="未詢問此題" @change="setQuestionNotAsked(question, index)">
-                          <b>—</b><span>未詢問</span>
-                        </label>
-                      </div>
-                    </fieldset>
-                    <label v-if="questionIsSkipped(question)" class="not-asked-reason">未詢問原因 *<input :id="questionNotAskedReasonId(index)" v-model="question.not_asked_reason" maxlength="1000" required :aria-invalid="Boolean(recordValidationErrors.questions[index])" :aria-describedby="recordValidationErrors.questions[index] ? `${questionRatingName(index)}-error` : undefined" placeholder="例如：時間不足、題目不適用或已由前題充分涵蓋" @input="clearQuestionValidation(index)"></label>
-                    <p v-if="recordValidationErrors.questions[index]" :id="`${questionRatingName(index)}-error`" class="field-error" role="alert">{{ recordValidationErrors.questions[index] }}</p>
-                    <details class="question-observation-details">
-                      <summary><span>對應特質與面試官觀察</span><em>{{ question.notes?.trim() ? '已有觀察' : '選填' }}</em></summary>
-                      <div class="record-answer-grid"><label>對應特質<input v-model="question.trait" maxlength="100" placeholder="例如：團隊合作"></label><label class="wide">面試官觀察（評分區）<textarea v-model="question.notes" rows="2" maxlength="2000" placeholder="記錄非語言反應、待查證處或追問結果…"></textarea></label></div>
-                    </details>
-                  </div>
-                  <div v-else class="evaluation-lock-inline compact"><span>🔒</span><p><strong>評分與觀察尚未公開</strong><small>候選人回答仍可直接查看。</small></p></div>
-                </article>
-                <div v-if="!recordForm.questions.length" class="record-question-empty"><strong>還沒有問題</strong><p>從上方建議題庫加入，或按「自訂問題」開始紀錄。</p></div>
-              </section>
-
-              <section v-if="editorEvaluationVisible" class="record-conclusion-section" aria-labelledby="record-conclusion-title">
-                <header><div><strong id="record-conclusion-title">整體總評</strong><span>提交評分前，請完成整體 1–5 分、錄用建議與面試總評。</span></div><em>{{ recordForm.recommendation ? recommendationLabels[recordForm.recommendation] : '尚未填寫' }}</em></header>
-                <div class="record-conclusion">
-                  <fieldset class="rating-radio-group overall-rating-group" :aria-invalid="Boolean(recordValidationErrors.overall)" :aria-describedby="recordValidationErrors.overall ? `${recordControlPrefix()}-overall-error` : undefined"><legend>整體評分 *</legend><div class="rating-segments"><label v-for="scale in ratingScale" :key="scale.value" :class="{ selected: recordForm.overall_rating === scale.value }"><input :id="overallRatingId(scale.value)" type="radio" :name="`${recordControlPrefix()}-overall-rating`" :value="scale.value" :checked="recordForm.overall_rating === scale.value" :aria-label="`整體 ${scale.value} 分：${scale.label}`" @change="recordForm.overall_rating = scale.value; recordValidationErrors.overall = ''"><b>{{ scale.value }}</b><span>{{ scale.label }}</span></label></div><p v-if="recordValidationErrors.overall" :id="`${recordControlPrefix()}-overall-error`" class="field-error" role="alert">{{ recordValidationErrors.overall }}</p></fieldset>
-                  <label>錄用建議 *<select :id="`${recordControlPrefix()}-recommendation`" v-model="recordForm.recommendation" :aria-invalid="Boolean(recordValidationErrors.recommendation)" :aria-describedby="recordValidationErrors.recommendation ? `${recordControlPrefix()}-recommendation-error` : undefined" @change="recordValidationErrors.recommendation = ''"><option :value="null">尚未決定</option><option v-for="(label, value) in recommendationLabels" :key="value" :value="value">{{ label }}</option></select><small v-if="recordValidationErrors.recommendation" :id="`${recordControlPrefix()}-recommendation-error`" class="field-error" role="alert">{{ recordValidationErrors.recommendation }}</small></label>
-                  <label class="wide">面試總評 *<textarea :id="`${recordControlPrefix()}-summary`" v-model="recordForm.summary" rows="4" maxlength="5000" :aria-invalid="Boolean(recordValidationErrors.summary)" :aria-describedby="recordValidationErrors.summary ? `${recordControlPrefix()}-summary-error` : undefined" placeholder="摘要主要優勢、風險、待確認事項與共識…" @input="recordValidationErrors.summary = ''"></textarea><small v-if="recordValidationErrors.summary" :id="`${recordControlPrefix()}-summary-error`" class="field-error" role="alert">{{ recordValidationErrors.summary }}</small></label>
-                </div>
-              </section>
-              <div v-else class="record-conclusion-locked"><span>🔒</span><div><strong>面試總結與錄用建議尚未公開</strong><p>雙方完成各自評估前，不會互相影響判斷。</p></div></div>
-
-              <details v-if="recordForm.stage === 'hr' && (canEditStage('hr') || editingRecord?.private_notes_visible)" class="hr-private-notes">
-                <summary><span>HR ONLY</span><div><strong>HR 限定敏感備註（選填）</strong><small>此區內容不會出現在主管的畫面或 API 回應中。</small></div><em>{{ recordForm.private_notes?.trim() ? '已有內容' : '尚未填寫' }}</em></summary>
-                <label>私密備註<textarea v-model="recordForm.private_notes" rows="4" maxlength="10000" placeholder="例如：薪資個資、合理調整需求或其他僅限 HR 處理的敏感事項…"></textarea></label>
-              </details>
-            </fieldset>
-            <section v-if="reopenPromptOpen && canReopenRecord(editingRecord)" class="record-reopen-panel" aria-labelledby="record-reopen-title">
-              <div><strong id="record-reopen-title">重新開啟評分</strong><p>請留下原因供稽核；重新開啟後會回到草稿狀態，再次提交時才會遞增修訂編號。</p></div>
-              <label>重新開啟原因 *<input ref="reopenReasonInput" v-model="reopenReason" maxlength="1000" :disabled="recordReopening" placeholder="例如：補充面試證據後需要調整第 3 題評分" @keydown.enter.prevent="reopenRecord"></label>
-              <div><button class="button secondary" type="button" :disabled="recordReopening" @click="cancelReopenPrompt">取消</button><button class="button primary" type="button" :disabled="recordReopening || !reopenReason.trim()" @click="reopenRecord">{{ recordReopening ? '重新開啟中…' : '確認重新開啟' }}</button></div>
-            </section>
-            <footer><span><template v-if="editingRecord">建立者：{{ editingRecord.interviewer_name }} · 更新：{{ formatDate(editingRecord.updated_at) }}<template v-if="editingRecord.submitted_at"> · 提交：{{ editingRecord.submitted_by_name || '原面試官' }}／{{ formatDate(editingRecord.submitted_at) }}</template></template><template v-else>草稿可隨時補填；「提交評分」後即轉為唯讀。</template></span><div><button class="button secondary" type="button" :disabled="recordSaving || recordReopening" @click="cancelRecordEdit">關閉</button><button v-if="canReopenRecord(editingRecord) && !reopenPromptOpen" class="button secondary reopen-button" type="button" data-testid="interview-record-reopen" :disabled="recordReopening" @click="showReopenPrompt">重新開啟評分</button><template v-if="recordCanEdit"><button v-if="recordHasExceptionalStatus" class="button primary" type="button" data-testid="interview-record-save-status" :disabled="recordSaving || recordReopening" @click="saveRecord('draft')">{{ recordSaving && recordSaveIntent === 'draft' ? '儲存狀態中…' : '儲存狀態' }}</button><template v-else><button class="button secondary" type="button" data-testid="interview-record-save-draft" :disabled="recordSaving || recordReopening" @click="saveRecord('draft')">{{ recordSaving && recordSaveIntent === 'draft' ? '儲存草稿中…' : '儲存草稿' }}</button><button class="button primary" type="button" data-testid="interview-record-submit" :disabled="recordSaving || recordReopening" @click="saveRecord('submit')">{{ recordSaving && recordSaveIntent === 'submit' ? '提交評分中…' : '提交評分' }}</button></template></template></div></footer>
-          </form>
-          <section v-else class="record-editor-empty"><span>記</span><strong>選擇既有紀錄或建立新紀錄</strong><p>建立後會先帶入所屬階段的 5 題，再依面試進度逐題填答。</p><button v-if="canEditStage(defaultRecordStage())" class="button primary" type="button" @click="newRecord()">建立面試紀錄</button></section>
-        </main>
-      </div>
-    </section>
-  </div>
 </template>
 
 <style scoped>
-.interview-embedded-heading{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 17px;border-color:#b9dbd2;background:linear-gradient(110deg,#eef8f5,#fff)}
-.interview-embedded-heading>div:first-child{min-width:0}.interview-embedded-heading small,.interview-embedded-heading h2,.interview-embedded-heading p{display:block}.interview-embedded-heading small{color:#a56d17;font-size:10px;font-weight:900;letter-spacing:1px}.interview-embedded-heading h2{margin:3px 0;color:#194f48;font-size:18px}.interview-embedded-heading p{margin:0;color:#677d77;font-size:12px;line-height:1.55}.interview-embedded-actions{display:flex;flex:0 0 auto;align-items:center;gap:8px}
-.interview-page{display:grid;gap:14px}.interview-hero{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:25px 28px;border-radius:18px;background:linear-gradient(120deg,#153f3b,#17695f 62%,#74ad91);color:#fff;box-shadow:0 16px 38px rgba(20,74,68,.14)}.interview-hero p{margin:0;color:#f2c96d;font-size:8px;font-weight:800;letter-spacing:1.3px}.interview-hero h1{margin:6px 0;font-size:25px}.interview-hero span{font-size:10px;color:rgba(255,255,255,.76)}.interview-hero .button{background:rgba(255,255,255,.95)}.interview-alert{display:flex;align-items:center;gap:10px;padding:11px 14px;border:1px solid;border-radius:10px;font-size:9px}.interview-alert>strong{width:22px;height:22px;border-radius:50%;display:grid;place-items:center}.interview-alert>span{flex:1}.interview-alert>button{border:0;background:transparent;color:inherit;font-size:18px}.interview-alert.error{border-color:#efd0cd;background:#fff0ef;color:#893d39}.interview-alert.error>strong{background:#e5b0ac}.interview-alert.success{border-color:#baddc3;background:#ecf8ef;color:#286547}.interview-alert.success>strong{background:#cbe8d2}.interview-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.interview-metrics article{padding:16px;border:1px solid var(--line);border-radius:12px;background:#fff}.interview-metrics small,.interview-metrics span{display:block;color:var(--muted);font-size:8px}.interview-metrics strong{display:block;margin:4px 0;color:#185e56;font-size:23px}.interview-filters{display:flex;align-items:end;gap:12px;padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:#fff}.interview-filters>div{margin-right:auto}.interview-filters>div strong,.interview-filters>div span{display:block}.interview-filters>div strong{font-size:11px}.interview-filters>div span{margin-top:3px;color:var(--muted);font-size:8px}.interview-filters label{display:grid;gap:5px;color:#61756f;font-size:8px}.interview-filters select{width:210px;height:37px;padding:0 10px;border:1px solid #d8e3df;border-radius:8px;background:#fff;color:#31534d;font-size:9px}.interview-filters em{padding-bottom:10px;color:var(--muted);font-size:8px;font-style:normal}.interview-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.interview-card{min-width:0;padding:16px}.interview-card>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.candidate-identity{display:flex;align-items:center;gap:10px;min-width:0}.candidate-identity>span{width:40px;height:40px;flex:0 0 auto;border-radius:50%;display:grid;place-items:center;background:#dceee8;color:#1f6b61;font-weight:800}.candidate-identity h2{margin:0;font-size:13px}.candidate-identity p{margin:3px 0 0;color:var(--muted);font-size:8px}.application-status{padding:4px 8px;border-radius:99px;background:#edf2f0;color:#60736e;font-size:8px;white-space:nowrap}.application-status[data-status="interview"],.application-status[data-status="interviewing"]{background:#e3eff9;color:#326f9d}.application-status[data-status="offered"],.application-status[data-status="hired"]{background:#e1f2e9;color:#27725b}.application-status[data-status="rejected"],.application-status[data-status="withdrawn"]{background:#f8e7e5;color:#a64b46}.application-job{display:grid;gap:3px;margin:14px 0;padding:11px;border-radius:9px;background:#f3f8f6}.application-job small{color:#2c786c;font-size:8px;font-weight:700}.application-job strong{font-size:10px}.application-job span{color:var(--muted);font-size:8px}.application-details{display:grid;grid-template-columns:1fr 1fr;gap:7px}.application-details>div{min-width:0;padding:8px;border:1px solid #e8eeec;border-radius:7px}.application-details small,.application-details strong{display:block;font-size:7px}.application-details small{color:var(--muted)}.application-details strong{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:8px}.schedule-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px;padding:11px 12px;border:1px solid #cde5dc;border-radius:9px;background:#f0f9f5}.schedule-summary.unscheduled{border-style:dashed;background:#fafcfb}.schedule-summary>div{min-width:0}.schedule-summary small,.schedule-summary strong{display:block}.schedule-summary small{color:var(--muted);font-size:7px}.schedule-summary strong{margin-top:3px;color:#245f56;font-size:10px}.schedule-summary p{margin:4px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#71847f;font-size:8px}.schedule-summary .button{flex:0 0 auto}.interview-editor{margin-top:12px;border:1px solid #bcdcd2;border-radius:11px;background:#fbfdfc;overflow:hidden}.interview-editor>header{display:flex;align-items:flex-start;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #dce9e5}.interview-editor>header small{color:#b37c20;font-size:7px;font-weight:800;letter-spacing:1px}.interview-editor>header h3{margin:3px 0 0;font-size:11px}.interview-editor>header button{border:0;background:transparent;color:#61736f;font-size:19px}.editor-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px}.editor-grid label{display:grid;gap:5px;color:#536e68;font-size:8px}.editor-grid .wide{grid-column:1/-1}.editor-grid input,.editor-grid select,.editor-grid textarea{width:100%;padding:9px 10px;border:1px solid #d5e2de;border-radius:7px;background:#fff;color:#284a44;font:inherit}.editor-grid textarea{resize:vertical;line-height:1.6}.interview-editor>footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 14px;border-top:1px solid #dce9e5;background:#f5f9f7}.interview-editor>footer>span{color:var(--muted);font-size:7px}.interview-editor>footer>div{display:flex;gap:7px}.interview-empty{text-align:center;padding:60px 20px;color:var(--muted)}.interview-empty strong,.interview-empty p{display:block}.interview-empty strong{font-size:11px}.interview-empty p{font-size:8px}.interview-empty .spinner{margin-bottom:12px}
-.stage-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:11px}.interview-stage{min-width:0;border:1px solid #cde5dc;border-radius:10px;background:#f0f9f5;overflow:hidden}.interview-stage.unscheduled{border-style:dashed;background:#fafcfb}.interview-stage>header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:10px 11px;border-bottom:1px solid #dce9e5}.interview-stage>header small{display:block;color:#b37c20;font-size:6px;font-weight:800;letter-spacing:.8px}.interview-stage>header h3{margin:3px 0 0;font-size:9px}.interview-stage>header>span{padding:3px 6px;border-radius:99px;background:#fff;color:#28675d;font-size:7px;white-space:nowrap}.stage-content{display:grid;gap:3px;padding:10px 11px}.stage-content small{margin-top:4px;color:var(--muted);font-size:7px}.stage-content strong{color:#245f56;font-size:9px}.stage-content p{min-height:32px;margin:1px 0 0;color:#5f746f;font-size:8px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}.stage-content p.structured-record-locked{padding:7px 8px;border:1px dashed #dfc994;border-radius:6px;background:#fffaf0;color:#876323}.interview-stage>footer{display:flex;align-items:center;justify-content:flex-end;min-height:43px;padding:8px 10px;border-top:1px solid #dce9e5;background:rgba(255,255,255,.5)}.interview-stage>footer>span{margin-right:auto;color:var(--muted);font-size:7px}.interview-stage .interview-editor{margin:0;border-width:1px 0 0;border-radius:0}.interview-stage .interview-editor>footer{min-height:0;background:#f5f9f7}
-.record-workspace-entry{display:flex;align-items:center;gap:13px;margin-top:11px;padding:11px 12px;border:1px solid #d7e4e0;border-radius:9px;background:linear-gradient(110deg,#f5faf8,#fffaf1)}.record-workspace-entry>div{flex:1}.record-workspace-entry strong,.record-workspace-entry span{display:block}.record-workspace-entry strong{font-size:10px;color:#315f57}.record-workspace-entry span{margin-top:3px;color:#6a7d78;font-size:8px;line-height:1.5}.record-workspace-overlay{position:fixed;z-index:180;inset:0;display:grid;place-items:center;padding:18px;background:rgba(12,35,32,.58);backdrop-filter:blur(5px)}.record-workspace{width:min(1480px,100%);height:calc(100dvh - 36px);display:flex;flex-direction:column;overflow:hidden;border:1px solid rgba(255,255,255,.45);border-radius:18px;background:#f3f7f5;box-shadow:0 28px 80px rgba(5,31,27,.3)}.record-workspace-header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:17px 21px;background:linear-gradient(110deg,#133f3a,#176f64);color:#fff}.workspace-person{display:flex;align-items:center;gap:12px}.workspace-person>span{width:43px;height:43px;display:grid;place-items:center;border-radius:50%;background:rgba(255,255,255,.16);font-size:17px;font-weight:800}.workspace-person small{color:#f1cb75;font-size:9px;font-weight:800;letter-spacing:1px}.workspace-person h2{margin:3px 0;font-size:18px}.workspace-person p{margin:0;color:rgba(255,255,255,.75);font-size:11px}.record-workspace-header>button{width:38px;height:38px;border:1px solid rgba(255,255,255,.22);border-radius:50%;background:rgba(255,255,255,.08);color:#fff;font-size:24px}.workspace-message{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid;font-size:11px}.workspace-message>span{flex:1}.workspace-message>button{border:0;background:transparent;color:inherit;font-size:18px}.workspace-message.error{border-color:#eac6c2;background:#fff0ef;color:#8e403b}.workspace-message.success{border-color:#c7dfcf;background:#edf8f1;color:#2d674a}.record-workspace-body{min-height:0;flex:1;display:grid;grid-template-columns:280px minmax(0,1fr)}.record-history{min-height:0;overflow:auto;border-right:1px solid #dbe6e2;background:#fff}.record-history>header{position:sticky;z-index:1;top:0;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:13px;border-bottom:1px solid #e0e9e6;background:rgba(255,255,255,.96)}.record-history>header strong,.record-history>header span{display:block}.record-history>header strong{font-size:12px}.record-history>header span{margin-top:2px;color:#748580;font-size:9px}.workspace-loading{display:flex;align-items:center;gap:8px;padding:24px 14px;color:#6d807a;font-size:10px}.record-history-item{position:relative;width:100%;display:grid;gap:4px;padding:13px 14px;border:0;border-bottom:1px solid #e9efed;background:#fff;color:#34554f;text-align:left}.record-history-item:hover,.record-history-item.active{background:#eef8f5}.record-history-item.active:before{content:"";position:absolute;inset:8px auto 8px 0;width:4px;border-radius:0 4px 4px 0;background:#218174}.record-history-item strong{font-size:10px}.record-history-item small{color:#71827d;font-size:8px}.record-history-item em{justify-self:end;color:#31786d;font-size:8px;font-style:normal}.record-status{justify-self:start;padding:3px 6px;border-radius:99px;background:#e8f3ef;color:#2b7365;font-size:8px}.record-status[data-status="planned"]{background:#e8f0f8;color:#326c99}.record-status[data-status="cancelled"],.record-status[data-status="no_show"]{background:#f7e9e7;color:#a04f49}.record-history-empty{padding:35px 20px;text-align:center;color:#758681}.record-history-empty strong{font-size:11px}.record-history-empty p{font-size:9px;line-height:1.6}.record-workspace-main{min-height:0;overflow:auto;padding:15px}.question-builder,.record-editor,.record-editor-empty{border:1px solid #d8e5e1;border-radius:12px;background:#fff;box-shadow:0 5px 18px rgba(24,74,65,.05)}.question-builder{padding:16px;margin-bottom:14px}.question-builder>header{display:flex;align-items:flex-start;justify-content:space-between;gap:15px}.question-builder>header small{color:#ae761d;font-size:8px;font-weight:800;letter-spacing:1px}.question-builder>header h3{margin:3px 0;font-size:13px}.question-builder>header p{margin:0;color:#6b7e79;font-size:9px;line-height:1.55}.question-builder>header>span{padding:5px 8px;border-radius:99px;background:#eef5f3;color:#50716a;font-size:9px;white-space:nowrap}.trait-picker,.selected-custom-traits{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}.trait-picker button,.selected-custom-traits button{padding:6px 9px;border:1px solid #d6e3df;border-radius:99px;background:#fff;color:#516d67;font-size:9px}.trait-picker button.selected{border-color:#2c897b;background:#e4f4ef;color:#1d6e62;font-weight:700}.selected-custom-traits button{border-color:#d6c590;background:#fff9e9;color:#79602b}.custom-trait{display:flex;gap:7px;margin-top:10px}.custom-trait input{min-width:0;flex:1;height:36px;padding:0 10px;border:1px solid #d5e2de;border-radius:8px}.generate-questions{margin-top:11px}.question-guidance{margin:13px 0 0;padding:10px 12px;border-left:3px solid #d5a74c;border-radius:7px;background:#fff9eb;color:#735c33;font-size:9px;line-height:1.6}.suggestion-groups{display:grid;gap:9px;margin-top:11px}.suggestion-groups>article{overflow:hidden;border:1px solid #dce7e3;border-radius:9px}.suggestion-groups>article>header{display:flex;justify-content:space-between;gap:10px;padding:8px 11px;background:#f2f7f5}.suggestion-groups>article>header strong{font-size:10px;color:#2d6d62}.suggestion-groups>article>header span{color:#758681;font-size:8px}.suggested-question{display:flex;align-items:flex-start;gap:12px;padding:11px;border-top:1px solid #e5ece9}.suggested-question:first-of-type{border-top:0}.suggested-question>div{min-width:0;flex:1}.suggested-question>div>strong{display:block;font-size:10px;line-height:1.5}.suggested-question p{margin:5px 0 0;color:#667b75;font-size:8px;line-height:1.55}.suggested-question p b{margin-right:5px;color:#397268}.suggested-question>.button{flex:0 0 auto}.record-editor>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid #e0e9e6}.record-editor>header small{color:#ad761f;font-size:8px;font-weight:800;letter-spacing:1px}.record-editor>header h3{margin:3px 0;font-size:13px}.record-editor>header p{margin:0;color:#70817d;font-size:9px}.read-only-badge{padding:5px 8px;border-radius:99px;background:#eef2f1;color:#667873;font-size:9px}.record-editor fieldset{margin:0;padding:0;border:0}.record-meta-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:15px 16px}.record-meta-grid label,.record-conclusion label,.record-answer-grid label,.record-question-card>header label{display:grid;gap:5px;color:#536e68;font-size:9px}.record-meta-grid input,.record-meta-grid select,.record-conclusion select,.record-conclusion textarea,.record-answer-grid input,.record-answer-grid select,.record-answer-grid textarea,.record-question-card>header input{width:100%;padding:9px 10px;border:1px solid #d5e2de;border-radius:7px;background:#fff;color:#284a44;font:inherit}.record-question-section{padding:0 16px 15px}.record-question-section>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid #e1e9e6}.record-question-section>header strong,.record-question-section>header span{display:block}.record-question-section>header strong{font-size:11px}.record-question-section>header span{margin-top:3px;color:#748580;font-size:8px}.record-question-card{overflow:hidden;margin-bottom:9px;border:1px solid #dbe6e2;border-radius:9px;background:#fbfdfc}.record-question-card>header{display:grid;grid-template-columns:29px minmax(0,1fr) 28px;align-items:end;gap:8px;padding:10px;border-bottom:1px solid #e2ebe8}.record-question-card>header>span{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#dff0eb;color:#226e63;font-size:10px;font-weight:800}.record-question-card>header>button{height:29px;border:0;background:transparent;color:#a05b54;font-size:18px}.record-answer-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;padding:10px}.record-answer-grid .wide{grid-column:1/-1}.record-answer-grid textarea,.record-conclusion textarea{resize:vertical;line-height:1.55}.record-question-empty{padding:28px;border:1px dashed #cfded9;border-radius:9px;text-align:center;color:#768782}.record-question-empty strong{font-size:10px}.record-question-empty p{margin:4px 0 0;font-size:8px}.record-conclusion{display:grid;grid-template-columns:minmax(0,2fr) minmax(180px,1fr);align-items:start;gap:10px;padding:0 16px 16px}.record-editor>footer{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-top:1px solid #dde7e3;background:#f5f9f7}.record-editor>footer>span{color:#71837e;font-size:8px}.record-editor>footer>div{display:flex;gap:7px}.record-editor-empty{min-height:280px;display:grid;place-content:center;justify-items:center;padding:35px;text-align:center;color:#748681}.record-editor-empty>span{width:47px;height:47px;display:grid;place-items:center;border-radius:50%;background:#e3f1ed;color:#267267;font-size:16px;font-weight:800}.record-editor-empty strong{margin-top:12px;color:#395d56;font-size:12px}.record-editor-empty p{margin:5px 0 13px;font-size:9px}
-.question-progress{overflow:hidden;margin-top:12px;border:1px solid #cfdfda;border-radius:12px;background:#fff}.question-progress>header{display:flex;align-items:center;gap:14px;padding:13px 14px;border-bottom:1px solid #dce8e4;background:linear-gradient(110deg,#eef8f5,#fffaf0)}.question-progress>header>div:first-child{min-width:0;flex:1}.question-progress>header small,.question-progress>header strong,.question-progress>header span{display:block}.question-progress>header>div:first-child>small{color:#ad761f;font-size:7px;font-weight:800;letter-spacing:1px}.question-progress>header>div:first-child>strong{margin-top:3px;color:#244f48;font-size:12px}.question-progress>header>div:first-child>span{margin-top:4px;color:#667a75;font-size:8px;line-height:1.5}.question-stage-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px;flex:0 0 190px}.question-stage-tabs button{display:grid;grid-template-columns:1fr auto;align-items:center;gap:1px 6px;padding:7px 9px;border:1px solid #d4e2de;border-radius:8px;background:#fff;color:#5b706b;text-align:left}.question-stage-tabs button small{grid-row:1;color:inherit;font-size:7px;font-weight:700}.question-stage-tabs button strong{grid-area:1/2/3/3;color:#1e665b;font-size:13px}.question-stage-tabs button span{grid-row:2;color:#82918d;font-size:6px}.question-stage-tabs button.active{border-color:#278477;background:#e7f5f1;color:#1e665b;box-shadow:0 0 0 2px rgba(39,132,119,.08)}.question-plan-meta{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #e6eeeb}.question-plan-meta>span{padding:4px 7px;border-radius:99px;background:#e7f3ef;color:#216d61;font-size:7px;font-weight:700}.question-plan-meta>span[data-stage="manager"]{background:#fff3d8;color:#8a621a}.question-plan-meta>small{margin-left:auto;color:#798984;font-size:7px}.question-preview-list{display:grid;gap:0;margin:0;padding:0;list-style:none}.question-preview-list li{display:grid;grid-template-columns:25px minmax(0,1fr);gap:9px;padding:10px 12px;border-bottom:1px solid #edf1f0}.question-preview-list li>span{width:23px;height:23px;display:grid;place-items:center;border-radius:50%;background:#edf2f0;color:#6d7d79;font-size:8px;font-weight:800}.question-preview-list li.answered>span{background:#2a8879;color:#fff}.question-preview-list li>div{min-width:0}.question-preview-list li small{color:#987022;font-size:6px}.question-preview-list li strong{display:block;margin-top:2px;color:#2b4f49;font-size:9px;line-height:1.5}.question-preview-list li p{margin:5px 0 0;padding:6px 8px;border-left:2px solid #72ad9f;border-radius:0 5px 5px 0;background:#f3f9f7;color:#42645e;font-size:8px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}.question-preview-list li p.empty{border-left-color:#d7dfdd;background:#f8faf9;color:#8a9693;font-style:italic}.question-preview-list li em{display:inline-block;margin-top:4px;color:#267367;font-size:7px;font-style:normal;font-weight:700}.question-progress>footer{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#f8faf9}.question-progress>footer>span{min-width:0;flex:1;color:#6f817c;font-size:7px;line-height:1.45}.question-progress-loading,.question-preview-error{display:flex;align-items:center;justify-content:center;gap:8px;min-height:90px;padding:20px;color:#748681;font-size:9px}.question-preview-error{color:#96524c}.record-question-context{display:grid;gap:4px;padding:9px 11px;border-bottom:1px solid #e2ebe8;background:#f5f9f7}.record-question-context small{color:#617771;font-size:8px;line-height:1.5}.record-question-context b{margin-right:7px;color:#2f7065}
-.question-personalization-basis{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:10px;padding:9px 10px;border:1px solid #d7e7e2;border-radius:8px;background:#f3f9f7}.question-personalization-basis strong{margin-right:3px;color:#315f57;font-size:8px}.question-personalization-basis span{padding:4px 7px;border-radius:99px;background:#fff;color:#527069;font-size:7px}.suggested-question .question-source{display:block;margin-bottom:5px;color:#a16e18;font-size:7px;font-weight:700}
-.interview-sharing-policy{flex:0 0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;padding:10px 14px;border-bottom:1px solid #d8e5e1;background:#f8fbfa}.interview-sharing-policy>div{display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid #dbe7e3;border-radius:9px;background:#fff}.interview-sharing-policy>div>span{width:30px;height:30px;flex:0 0 auto;display:grid;place-items:center;border-radius:50%;background:#e2f2ed;color:#216f63;font-size:9px;font-weight:800}.interview-sharing-policy p,.evaluation-lock-notice p,.evaluation-lock-inline p,.record-conclusion-locked p{margin:0}.interview-sharing-policy strong,.interview-sharing-policy small{display:block}.interview-sharing-policy strong{color:#315a53;font-size:9px}.interview-sharing-policy small{margin-top:2px;color:#71817d;font-size:7px;line-height:1.45}.evaluation-release-chip{padding:4px 7px;border-radius:99px;background:#fff0df;color:#93601c;font-size:7px;font-weight:700}.evaluation-release-chip.unlocked{background:#e1f3e9;color:#257052}.question-preview-list li em.evaluation-locked{color:#8a641f;font-weight:600}.history-visibility{justify-self:start;padding:3px 6px;border-radius:99px;background:#fff1dc!important;color:#8a601b!important}.history-visibility.unlocked{background:#e3f3ea!important;color:#267052!important}.evaluation-lock-notice{display:flex;align-items:flex-start;gap:10px;margin:13px 16px 0;padding:11px 12px;border:1px solid #ead7ad;border-radius:9px;background:#fff9eb;color:#765722}.evaluation-lock-notice>span{font-size:14px}.evaluation-lock-notice strong{display:block;font-size:10px}.evaluation-lock-notice p{margin-top:4px;font-size:8px;line-height:1.55}.locked-field{display:grid;gap:5px;color:#536e68;font-size:9px}.locked-field strong{min-height:36px;display:flex;align-items:center;padding:9px 10px;border:1px solid #e5d8ba;border-radius:7px;background:#fff9ec;color:#876323;font-size:8px}.evaluation-lock-inline{grid-column:1/-1;display:flex;align-items:center;gap:9px;padding:10px;border:1px dashed #dfc994;border-radius:8px;background:#fffaf0;color:#785b22}.evaluation-lock-inline strong,.evaluation-lock-inline small{display:block}.evaluation-lock-inline strong{font-size:9px}.evaluation-lock-inline small{margin-top:2px;font-size:7px}.record-conclusion-locked{display:flex;align-items:center;gap:10px;margin:0 16px 16px;padding:13px;border:1px dashed #dfc994;border-radius:9px;background:#fffaf0;color:#795c25}.record-conclusion-locked strong{display:block;font-size:10px}.record-conclusion-locked p{margin-top:3px;font-size:8px}.hr-private-notes{margin:0 16px 16px;padding:13px;border:1px solid #d3c6eb;border-radius:10px;background:#faf7ff}.hr-private-notes>header{display:flex;align-items:center;gap:10px;margin-bottom:10px}.hr-private-notes>header>span{padding:5px 7px;border-radius:6px;background:#6f5799;color:#fff;font-size:7px;font-weight:800;letter-spacing:.7px}.hr-private-notes>header strong,.hr-private-notes>header small{display:block}.hr-private-notes>header strong{color:#54416f;font-size:10px}.hr-private-notes>header small{margin-top:2px;color:#81728f;font-size:7px}.hr-private-notes label{display:grid;gap:5px;color:#665577;font-size:9px}.hr-private-notes textarea{width:100%;padding:10px;border:1px solid #d8cee7;border-radius:8px;background:#fff;color:#453952;font:inherit;line-height:1.55;resize:vertical}
-@media(max-width:1120px){.interview-list{grid-template-columns:1fr}.interview-filters{align-items:stretch;flex-wrap:wrap}.interview-filters>div{flex-basis:100%}.interview-filters label{flex:1}.interview-filters select{width:100%}}
-@media(max-width:900px){.interview-sharing-policy{grid-template-columns:1fr}.record-workspace-body{grid-template-columns:1fr}.record-history{max-height:210px;border-right:0;border-bottom:1px solid #dbe6e2}.record-history>header{position:static}.record-meta-grid{grid-template-columns:1fr 1fr}}
-@media(max-width:680px){.interview-hero{align-items:flex-start;flex-direction:column}.interview-metrics,.stage-grid{grid-template-columns:1fr}.interview-filters label{flex-basis:100%}.application-details,.editor-grid{grid-template-columns:1fr}.editor-grid .wide{grid-column:auto}.schedule-summary,.interview-editor>footer,.record-workspace-entry,.record-editor>footer,.question-progress>header,.question-progress>footer{align-items:flex-start;flex-direction:column}.interview-editor>footer>div,.record-workspace-entry .button,.record-editor>footer>div,.question-stage-tabs,.question-progress>footer .button{width:100%}.question-stage-tabs{flex-basis:auto}.interview-editor>footer .button,.record-editor>footer .button{flex:1}.record-workspace-overlay{padding:0}.record-workspace{height:100dvh;border-radius:0}.record-workspace-header{padding:13px}.workspace-person>span{display:none}.workspace-person h2{font-size:15px}.record-workspace-main{padding:10px}.record-meta-grid,.record-answer-grid,.record-conclusion{grid-template-columns:1fr}.record-answer-grid .wide{grid-column:auto}.suggested-question{flex-direction:column}.suggested-question>.button{width:100%}.record-conclusion{padding-top:0}}
-/* 面試問答資訊層次：固定題、客製題與評估脈絡 */
-.question-progress-title{padding-right:8px}
-.question-stage-tabs{flex-basis:210px}
-.question-stage-tabs button span{font-size:7px;line-height:1.3}
-.question-stage-tabs button em{grid-column:1/-1;color:#71827d;font-size:6px;font-style:normal}
-.question-plan-meta>small.question-plan-note{margin-left:0;flex:1;line-height:1.4}
-.question-generation-warning{display:flex;align-items:flex-start;gap:8px;margin:0 12px 10px;padding:9px 10px;border:1px solid #e7c98c;border-radius:8px;background:#fff8e8;color:#785a20;font-size:8px;line-height:1.5}.question-generation-warning strong{white-space:nowrap}.question-generation-warning span{color:#866b38}
-.question-progress>header>div:first-child>small{font-size:10px}.question-progress>header>div:first-child>strong{font-size:16px}.question-progress>header>div:first-child>span{font-size:10px}.question-plan-meta>span{font-size:9px}.question-plan-meta>small{font-size:9px}.question-preview-list li{grid-template-columns:32px minmax(0,1fr);gap:11px;padding:14px 15px}.question-preview-list li>span{width:29px;height:29px;font-size:10px}.question-preview-list li small{font-size:9px}.question-preview-list li strong{font-size:12px;line-height:1.65}.question-preview-list li p{margin-top:7px;padding:8px 10px;font-size:10px;line-height:1.65}.question-preview-list li em{font-size:9px}.question-generation-warning{font-size:10px}
-.question-insights{display:grid;gap:4px;margin-top:6px;padding:6px 8px;border:1px solid #e2ebe7;border-radius:6px;background:#fbfdfc}
-.question-insights p{display:grid;grid-template-columns:52px minmax(0,1fr);gap:5px;margin:0;color:#617772;font-size:7px;line-height:1.45}
-.question-insights b{color:#397268;font-size:7px}
-.question-insights span{min-width:0}
-.generation-mode-badge{padding:4px 7px;border-radius:99px;background:#eef1f0;color:#667873;font-size:9px;white-space:nowrap}.generation-mode-badge[data-mode="gemini"]{background:#e3f4eb;color:#237052}.generation-mode-badge[data-mode="rules"]{background:#fff1d9;color:#89631d}
-.generation-button{min-height:30px;padding:5px 9px;font-size:9px;white-space:nowrap}.question-context-warning{margin:0 12px 10px;padding:9px 10px;border:1px solid #d8c28d;border-radius:8px;background:#fffaf0;color:#765b25;font-size:9px;line-height:1.5}
-/* 雙方面試問答是主管與 HR 的主要工作區，採一般桌機不需縮放即可閱讀的尺寸。 */
-.question-progress>header{padding:18px 20px;gap:20px}.question-progress-title{padding-right:12px}.question-progress>header>div:first-child>small{font-size:12px;letter-spacing:1.2px}.question-progress>header>div:first-child>strong{margin-top:5px;font-size:21px}.question-progress>header>div:first-child>span{margin-top:6px;font-size:13px;line-height:1.65}
-.question-stage-tabs{flex-basis:270px;gap:9px}.question-stage-tabs button{gap:3px 8px;padding:11px 13px}.question-stage-tabs button small{font-size:13px}.question-stage-tabs button strong{font-size:19px}.question-stage-tabs button span{font-size:11px}.question-stage-tabs button em{font-size:10px;line-height:1.45}
-.question-plan-meta{gap:10px;padding:12px 16px}.question-plan-meta>span,.generation-mode-badge{font-size:12px}.question-plan-meta>small,.question-plan-meta>small.question-plan-note{font-size:12px;line-height:1.55}.generation-button{min-height:38px;padding:8px 13px;font-size:12px}.evaluation-release-chip{font-size:11px}
-.question-preview-list li{grid-template-columns:38px minmax(0,1fr);gap:14px;padding:17px 18px}.question-preview-list li>span{width:34px;height:34px;font-size:13px}.question-preview-list li small{font-size:12px}.question-preview-list li strong{margin-top:4px;font-size:15px;line-height:1.7}.question-preview-list li p{margin-top:9px;padding:10px 12px;font-size:13px;line-height:1.7}.question-preview-list li em{font-size:11px}
-.question-insights{gap:7px;margin-top:9px;padding:9px 11px}.question-preview-list .question-insights p{grid-template-columns:72px minmax(0,1fr);gap:8px;margin:0;padding:0;border:0;background:transparent;font-size:12px;line-height:1.6}.question-preview-list .question-insights b{font-size:12px}.question-progress>footer{padding:13px 16px}.question-progress>footer>span{font-size:11px;line-height:1.6}.question-progress>footer .button{min-height:40px;padding:9px 15px;font-size:13px}.question-progress-loading,.question-preview-error{font-size:13px}.question-generation-warning,.question-context-warning{font-size:12px;line-height:1.6}
-/* 面試工作區採漸進式揭露：面試中先記回答，其餘欄位需要時才展開。 */
-.question-builder{padding:0}.question-builder>summary,.record-basic-details>summary,.question-evaluation-details>summary,.record-conclusion-details>summary,.hr-private-notes>summary{list-style:none;cursor:pointer}.question-builder>summary::-webkit-details-marker,.record-basic-details>summary::-webkit-details-marker,.question-evaluation-details>summary::-webkit-details-marker,.record-conclusion-details>summary::-webkit-details-marker,.hr-private-notes>summary::-webkit-details-marker{display:none}
-.question-builder>summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 17px}.question-builder>summary>div{min-width:0}.question-builder>summary small{color:#ae761d;font-size:10px;font-weight:800;letter-spacing:1px}.question-builder>summary h3{margin:4px 0;font-size:15px}.question-builder>summary p{margin:0;color:#6b7e79;font-size:11px;line-height:1.55}.question-builder>summary>span{flex:0 0 auto;padding:7px 10px;border-radius:99px;background:#eef5f3;color:#386b63;font-size:11px;font-weight:700}.question-builder[open]>summary{border-bottom:1px solid #e1ebe7}.question-builder-body{padding:0 16px 16px}
-.workspace-gemini-panel{position:sticky;z-index:4;top:0;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;margin-bottom:14px;padding:14px 16px;border:2px solid #2a8b7d;border-radius:12px;background:#fff;box-shadow:0 8px 22px rgba(24,91,80,.13)}.workspace-gemini-copy small,.workspace-gemini-copy strong,.workspace-gemini-copy span{display:block}.workspace-gemini-copy small{color:#a76f16;font-size:10px;font-weight:800;letter-spacing:1px}.workspace-gemini-copy strong{margin-top:3px;color:#244f48;font-size:15px}.workspace-gemini-copy span{margin-top:4px;color:#657a74;font-size:11px;line-height:1.55}.workspace-gemini-actions{display:flex;align-items:center;gap:9px}.workspace-gemini-actions .button{min-height:42px;padding:9px 14px;font-size:13px;white-space:nowrap}.workspace-gemini-panel>.workspace-gemini-warning,.workspace-gemini-panel>.workspace-token-usage,.workspace-gemini-preview{grid-column:1/-1}.workspace-token-usage{margin:0;padding:7px 10px;border-radius:7px;background:#eef7f4;color:#326d63;font-size:11px;line-height:1.5}.workspace-gemini-warning{margin:0;padding:8px 10px;border-radius:7px;background:#fff5df;color:#805b19;font-size:11px;line-height:1.5}.workspace-gemini-preview{border-top:1px solid #e0e9e6;padding-top:9px}.workspace-gemini-preview>summary{cursor:pointer;color:#2f7166;font-size:11px;font-weight:700}.workspace-gemini-preview ol{display:grid;gap:6px;margin:9px 0 0;padding-left:22px}.workspace-gemini-preview li{color:#496860;font-size:11px;line-height:1.55}.generation-mode-badge[data-mode="none"]{background:#eef2f1;color:#657873}.question-token-usage{color:#2f766a!important;font-weight:700}
-.record-editor>header{align-items:center;padding:16px 18px}.record-editor>header>div:first-child{min-width:0;flex:1}.record-editor>header h3{font-size:16px}.record-editor>header p{font-size:11px;line-height:1.55}.record-answer-progress{flex:0 0 auto;display:grid;justify-items:center;min-width:70px;padding:8px 12px;border-radius:9px;background:#eaf6f2;color:#236b60}.record-answer-progress strong{font-size:18px}.record-answer-progress span{font-size:10px}
-.record-basic-details{margin:13px 16px 4px;border:1px solid #dce7e3;border-radius:9px;background:#fbfdfc}.record-basic-details>summary,.record-conclusion-details>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px}.record-basic-details>summary strong,.record-basic-details>summary span,.record-conclusion-details>summary strong,.record-conclusion-details>summary span{display:block}.record-basic-details>summary strong,.record-conclusion-details>summary strong{color:#315d55;font-size:12px}.record-basic-details>summary span,.record-conclusion-details>summary span{margin-top:3px;color:#748681;font-size:10px}.record-basic-details>summary em,.record-conclusion-details>summary em{color:#287469;font-size:10px;font-style:normal;font-weight:700}.record-basic-details[open]>summary,.record-conclusion-details[open]>summary{border-bottom:1px solid #e1e9e6}.record-basic-details .record-meta-grid{padding:13px 14px}.record-meta-grid label,.record-conclusion label,.record-answer-grid label,.record-question-card>header label,.record-quick-answer label{font-size:11px}.record-meta-grid input,.record-meta-grid select,.record-conclusion select,.record-conclusion textarea,.record-answer-grid input,.record-answer-grid select,.record-answer-grid textarea,.record-question-card>header input,.record-quick-answer textarea{font-size:13px}
-.record-question-section{padding-top:5px}.record-question-section>header strong{font-size:14px}.record-question-section>header span{font-size:10px}.record-question-card{margin-bottom:12px}.record-question-card>header{align-items:center;padding:12px}.record-question-card>header>span{width:32px;height:32px;font-size:12px}.record-question-card>header input{font-weight:650}.record-question-context{display:block;padding:0;background:#f5f9f7}.record-question-context>summary{padding:8px 12px;color:#3b7168;font-size:10px;font-weight:700}.record-question-context>summary:before,.question-evaluation-details>summary:before,.record-basic-details>summary:before,.record-conclusion-details>summary:before,.question-builder>summary:before{content:'＋';margin-right:7px}.record-question-context[open]>summary:before,.question-evaluation-details[open]>summary:before,.record-basic-details[open]>summary:before,.record-conclusion-details[open]>summary:before,.question-builder[open]>summary:before{content:'－'}.record-question-context>div{display:grid;gap:5px;padding:0 12px 10px}.record-question-context small{font-size:10px}
-.record-quick-answer{padding:12px}.record-quick-answer label{display:grid;gap:6px;color:#365f58;font-weight:700}.record-quick-answer textarea{width:100%;min-height:92px;padding:11px 12px;border:1px solid #bfd9d1;border-radius:8px;background:#fff;color:#284a44;line-height:1.65;resize:vertical}.record-quick-answer textarea:focus{border-color:#258174;outline:3px solid rgba(37,129,116,.1)}
-.question-evaluation-details{margin:0 12px 12px;border:1px solid #e1e9e6;border-radius:8px;background:#fff}.question-evaluation-details>summary{display:flex;align-items:center;padding:9px 11px;color:#60756f;font-size:10px}.question-evaluation-details>summary span{flex:1}.question-evaluation-details>summary em{color:#2e756a;font-size:10px;font-style:normal}.question-evaluation-details[open]>summary{border-bottom:1px solid #e4ebe9}.evaluation-lock-inline.compact{margin:0 12px 12px;padding:8px 10px}.evaluation-lock-inline.compact strong{font-size:10px}.evaluation-lock-inline.compact small{font-size:9px}
-.record-conclusion-details{margin:0 16px 14px;border:1px solid #d8e5e1;border-radius:9px;background:#fbfdfc}.record-conclusion-details .record-conclusion{grid-template-columns:1fr 1fr;padding:13px 14px}.record-conclusion .wide{grid-column:1/-1}.record-conclusion-details textarea{width:100%}.record-conclusion-locked{margin-top:10px}
-.hr-private-notes{padding:0}.hr-private-notes>summary{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;padding:12px 13px}.hr-private-notes>summary>span{padding:5px 7px;border-radius:6px;background:#6f5799;color:#fff;font-size:8px;font-weight:800;letter-spacing:.7px}.hr-private-notes>summary strong,.hr-private-notes>summary small{display:block}.hr-private-notes>summary strong{color:#54416f;font-size:11px}.hr-private-notes>summary small{margin-top:2px;color:#81728f;font-size:9px}.hr-private-notes>summary em{color:#705c86;font-size:9px;font-style:normal}.hr-private-notes>label{margin:0 13px 13px}.record-editor>footer{position:sticky;z-index:2;bottom:0;padding:13px 16px;box-shadow:0 -5px 14px rgba(26,71,63,.06)}.record-editor>footer>span{font-size:10px}.record-editor>footer .button{min-height:39px;font-size:12px}
-@media(max-width:680px){.workspace-gemini-panel{position:static;grid-template-columns:1fr}.workspace-gemini-actions{align-items:stretch;flex-direction:column}.workspace-gemini-actions .button{width:100%}.question-builder>summary,.record-editor>header{align-items:flex-start;flex-direction:column}.record-answer-progress{justify-items:start}.record-basic-details{margin-inline:10px}.record-conclusion-details,.hr-private-notes{margin-inline:10px}.record-conclusion-details .record-conclusion{grid-template-columns:1fr}.record-conclusion .wide{grid-column:auto}.record-editor>footer{position:static}}
+/* 一張卡片＝一位應徵者＝一條由上而下的流程：職缺資訊 → 關卡 → 排程 → 題目與評分 → 總評 → 動作。 */
+/* 字級只有四階：--fs-xs 輔助說明、--fs-sm 內文、--fs-md 重點、--fs-lg 區塊標題。 */
+.interview-page{--fs-xs:11px;--fs-sm:13px;--fs-md:15px;--fs-lg:18px;display:grid;gap:14px}
 
-/* 面試題主畫面只保留題目與回答；產生資訊和面試提示按需展開。 */
-.question-plan-meta{flex-wrap:wrap}
-.question-plan-meta>small{margin-left:auto}
-.question-plan-details{margin:0 16px 10px;border:1px solid #e0e9e6;border-radius:8px;background:#fafcfb}
-.question-plan-details>summary{cursor:pointer;padding:8px 10px;color:#3a7067;font-size:11px;font-weight:700}
-.question-plan-details>span{display:block;padding:0 10px 9px;color:#647b75;font-size:11px;line-height:1.55}
-.question-generation-error{display:flex;align-items:flex-start;gap:8px;margin:0 12px 10px;padding:9px 10px;border:1px solid #e5b9b5;border-radius:8px;background:#fff1f0;color:#8c403b;font-size:12px;line-height:1.55}
-.question-generation-error strong{white-space:nowrap}
-.question-prompt-details{margin-top:9px;border:1px solid #e0e9e6;border-radius:7px;background:#fafcfb}
-.question-prompt-details>summary{cursor:pointer;padding:8px 10px;color:#3a7067;font-size:11px;font-weight:700}
-.question-prompt-details>div{display:grid;gap:7px;padding:0 10px 10px}
-.question-preview-list .question-prompt-details p{display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;margin:0;padding:0;border:0;background:transparent;color:#627873;font-size:11px;line-height:1.55}
-.question-prompt-details b{color:#397268}
-.question-preview-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
-.question-preview-heading>strong{min-width:0;flex:1}
-.question-regenerate-button{flex:0 0 auto;min-height:34px;padding:6px 10px;border:1px solid #78b8aa;border-radius:8px;background:#f2faf7;color:#1f7165;font-size:11px;font-weight:800;white-space:nowrap;cursor:pointer}
-.question-regenerate-button:hover:not(:disabled){border-color:#287f72;background:#e5f5f0}
-.question-regenerate-button:disabled{cursor:not-allowed;opacity:.55}
-.workspace-gemini-panel{position:static;border:1px solid #cfe0db;box-shadow:none}
-.workspace-gemini-panel>.workspace-gemini-warning,.workspace-generation-details,.workspace-gemini-preview{grid-column:1/-1}
-.workspace-generation-details{border-top:1px solid #e0e9e6;padding-top:9px}
-.workspace-generation-details>summary{cursor:pointer;color:#2f7166;font-size:11px;font-weight:700}
-.workspace-generation-details p{margin:7px 0 0;color:#5d756f;font-size:11px}
-.workspace-gemini-preview ol{padding-left:24px}
-.workspace-gemini-preview li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:10px;margin-bottom:8px;padding:9px 10px;border:1px solid #e0eae7;border-radius:8px;background:#fbfdfc}
-.workspace-gemini-preview li>div{min-width:0}
-.workspace-gemini-preview li strong{color:#345d56;font-size:11px;line-height:1.6}
-.interview-sharing-policy{display:block;grid-template-columns:none;padding:0}
-.interview-sharing-policy>summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:9px 14px;color:#315a53;font-size:11px}
-.interview-sharing-policy>summary span{color:#39776d;font-size:10px}
-.interview-sharing-policy>.sharing-policy-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0 14px 10px;border:0;border-radius:0;background:transparent}
-.sharing-policy-details p{display:grid;gap:3px;padding:8px 10px;border:1px solid #dbe7e3;border-radius:8px;background:#fff}
-.sharing-policy-details b{color:#2e6d62;font-size:10px}
-.sharing-policy-details span{color:#71817d;font-size:9px;line-height:1.45}
-@media(max-width:900px){.interview-sharing-policy>.sharing-policy-details{grid-template-columns:1fr}}
-@media(max-width:680px){.question-preview-heading,.workspace-gemini-preview li{grid-template-columns:1fr;align-items:stretch;flex-direction:column}.question-regenerate-button{width:100%}}
+.interview-hero{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:25px 28px;border-radius:18px;background:linear-gradient(120deg,#153f3b,#17695f 62%,#74ad91);color:#fff;box-shadow:0 16px 38px rgba(20,74,68,.14)}.interview-hero p{margin:0;color:#f2c96d;font-size:var(--fs-xs);font-weight:800;letter-spacing:1.3px}.interview-hero h1{margin:6px 0;font-size:25px}.interview-hero span{font-size:var(--fs-sm);color:rgba(255,255,255,.78)}.interview-hero .button{background:rgba(255,255,255,.95)}
+.interview-embedded-heading{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 17px;border-color:#b9dbd2;background:linear-gradient(110deg,#eef8f5,#fff)}.interview-embedded-heading>div:first-child{min-width:0}.interview-embedded-heading small,.interview-embedded-heading h2,.interview-embedded-heading p{display:block}.interview-embedded-heading small{color:#a56d17;font-size:var(--fs-xs);font-weight:900;letter-spacing:1px}.interview-embedded-heading h2{margin:3px 0;font-size:var(--fs-lg)}.interview-embedded-heading p{margin:0;color:#677d77;font-size:var(--fs-sm);line-height:1.55}.interview-embedded-actions{display:flex;flex:0 0 auto;align-items:center;gap:8px}
+.interview-alert{display:flex;align-items:center;gap:10px;padding:11px 14px;border:1px solid;border-radius:10px;font-size:var(--fs-sm)}.interview-alert>strong{width:22px;height:22px;border-radius:50%;display:grid;place-items:center}.interview-alert>span{flex:1}.interview-alert>button{border:0;background:transparent;color:inherit;font-size:18px}.interview-alert.error{border-color:#efd0cd;background:#fff0ef;color:#893d39}.interview-alert.error>strong{background:#e5b0ac}.interview-alert.success{border-color:#baddc3;background:#ecf8ef;color:#286547}.interview-alert.success>strong{background:#cbe8d2}
 
-/* 應徵者採一人一列，排程、題目與紀錄只在點開該列後顯示。 */
-.interview-list{grid-template-columns:1fr;gap:10px}
-.interview-card{padding:0;overflow:hidden;transition:border-color .18s ease,box-shadow .18s ease}
+.interview-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.interview-metrics article{padding:16px;border:1px solid var(--line);border-radius:12px;background:#fff}.interview-metrics small,.interview-metrics span{display:block;color:var(--muted);font-size:var(--fs-xs)}.interview-metrics strong{display:block;margin:4px 0;color:#185e56;font-size:23px}
+.interview-filters{display:flex;align-items:end;gap:12px;padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:#fff}.interview-filters>div{margin-right:auto}.interview-filters>div strong,.interview-filters>div span{display:block}.interview-filters>div strong{font-size:var(--fs-md)}.interview-filters>div span{margin-top:3px;color:var(--muted);font-size:var(--fs-xs)}.interview-filters label{display:grid;gap:5px;color:#61756f;font-size:var(--fs-xs)}.interview-filters select{width:230px;height:38px;padding:0 10px;border:1px solid #d8e3df;border-radius:8px;background:#fff;color:#31534d;font-size:var(--fs-sm)}.interview-filters em{padding-bottom:10px;color:var(--muted);font-size:var(--fs-xs);font-style:normal}
+
+/* 共享規則只在頁面說明一次，不重複出現在每張卡片。 */
+.interview-sharing-policy{border:1px solid var(--line);border-radius:12px;background:#fff}.interview-sharing-policy>summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;padding:11px 15px;color:#315a53;font-size:var(--fs-sm);font-weight:700}.interview-sharing-policy>summary span{color:#39776d;font-size:var(--fs-xs);font-weight:400}.sharing-policy-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0 15px 12px}.sharing-policy-details p{display:grid;gap:3px;margin:0;padding:9px 11px;border:1px solid #dbe7e3;border-radius:8px;background:#f8fbfa}.sharing-policy-details b{color:#2e6d62;font-size:var(--fs-sm)}.sharing-policy-details span{color:#71817d;font-size:var(--fs-xs);line-height:1.5}
+
+.interview-empty{text-align:center;padding:60px 20px;color:var(--muted)}.interview-empty strong,.interview-empty p{display:block}.interview-empty strong{font-size:var(--fs-md)}.interview-empty p{font-size:var(--fs-sm)}.interview-empty .spinner{margin-bottom:12px}
+
+/* 一人一列：排程、題目與紀錄只在點開該列後顯示；展開本身就是「開始評分」。 */
+.interview-list{display:grid;grid-template-columns:1fr;gap:10px}
+.interview-card{min-width:0;padding:0;overflow:hidden;transition:border-color .18s ease,box-shadow .18s ease}
 .interview-card.expanded{border-color:#8fc4b7;box-shadow:0 8px 24px rgba(31,91,81,.08)}
-.interview-card>.interview-row-summary{display:block;width:100%}
-.interview-row-toggle{display:grid;grid-template-columns:minmax(260px,1fr) minmax(310px,auto) 36px;align-items:center;gap:18px;width:100%;padding:14px 16px;border:0;background:#fff;color:inherit;text-align:left;cursor:pointer}
+.interview-row-summary{display:grid;grid-template-columns:minmax(0,1fr);width:100%}
+.interview-row-toggle{display:grid;grid-template-columns:minmax(260px,1fr) minmax(320px,auto) 36px;align-items:center;gap:18px;width:100%;padding:14px 16px;border:0;background:#fff;color:inherit;text-align:left;cursor:pointer}
 .interview-row-toggle:hover{background:#f5faf8}.interview-row-toggle:focus-visible{outline:3px solid rgba(35,130,116,.2);outline-offset:-3px}
-.interview-row-toggle .candidate-identity>div{min-width:0}.interview-row-toggle .candidate-identity h2,.interview-row-toggle .candidate-identity p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.interview-row-progress{display:grid;grid-template-columns:auto minmax(210px,auto);align-items:center;justify-items:end;gap:4px 12px}.interview-row-progress .application-status{grid-row:1/3}.interview-row-progress strong{font-size:10px;color:#315f57}.interview-row-progress small{font-size:8px;color:#71847f}
-.interview-row-toggle .row-chevron{width:30px;height:30px;display:grid;place-items:center;border:1px solid #cfe0db;border-radius:50%;background:#f3f8f6;color:#236f64;font-size:18px;font-weight:500}
-.interview-card-detail{padding:1px 16px 16px;border-top:1px solid #e0ebe7;background:#fff}
-@media(max-width:820px){.interview-row-toggle{grid-template-columns:minmax(0,1fr) 32px;gap:10px;padding:13px}.interview-row-progress{grid-column:1;grid-row:2;justify-items:start;grid-template-columns:auto 1fr}.interview-row-progress .application-status{grid-row:auto}.interview-row-toggle .row-chevron{grid-column:2;grid-row:1/3}.interview-card-detail{padding-inline:12px}.stage-grid{grid-template-columns:1fr}}
-@media(max-width:680px){.interview-embedded-heading{align-items:stretch;flex-direction:column}.interview-embedded-actions{align-items:stretch;flex-direction:column}.interview-embedded-actions .button{width:100%}}
+.candidate-identity{display:flex;align-items:center;gap:10px;min-width:0}.candidate-identity>span{width:40px;height:40px;flex:0 0 auto;border-radius:50%;display:grid;place-items:center;background:#dceee8;color:#1f6b61;font-weight:800}.candidate-identity>div{min-width:0}.candidate-identity h2{margin:0;font-size:var(--fs-md)}.candidate-identity p{margin:3px 0 0;color:var(--muted);font-size:var(--fs-xs)}.interview-row-toggle .candidate-identity h2,.interview-row-toggle .candidate-identity p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.application-status{padding:4px 8px;border-radius:99px;background:#edf2f0;color:#60736e;font-size:var(--fs-xs);white-space:nowrap}.application-status[data-status="interview"],.application-status[data-status="interviewing"]{background:#e3eff9;color:#326f9d}.application-status[data-status="offered"],.application-status[data-status="hired"]{background:#e1f2e9;color:#27725b}.application-status[data-status="rejected"],.application-status[data-status="withdrawn"]{background:#f8e7e5;color:#a64b46}
+.interview-row-progress{display:grid;grid-template-columns:auto minmax(210px,auto);align-items:center;justify-items:end;gap:4px 12px}.interview-row-progress .application-status{grid-row:1/3}.interview-row-progress strong{font-size:var(--fs-sm);color:#315f57}.interview-row-progress small{font-size:var(--fs-xs);color:#71847f}
+.row-chevron{width:30px;height:30px;display:grid;place-items:center;border:1px solid #cfe0db;border-radius:50%;background:#f3f8f6;color:#236f64;font-size:18px;font-weight:500}
+.interview-card-detail{display:grid;gap:12px;padding:14px 16px 16px;border-top:1px solid #e0ebe7;background:#fff}
+
+.application-job{display:grid;gap:3px;padding:11px 12px;border-radius:9px;background:#f3f8f6}.application-job small{color:#2c786c;font-size:var(--fs-xs);font-weight:700}.application-job strong{font-size:var(--fs-md)}.application-job span{color:var(--muted);font-size:var(--fs-sm)}
+.application-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.application-details>div{min-width:0;padding:9px 10px;border:1px solid #e8eeec;border-radius:8px}.application-details small,.application-details strong{display:block}.application-details small{color:var(--muted);font-size:var(--fs-xs)}.application-details strong{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-sm)}
+
+.workspace-message{display:flex;align-items:center;gap:8px;padding:10px 13px;border:1px solid;border-radius:9px;font-size:var(--fs-sm)}.workspace-message>span{flex:1}.workspace-message>button{border:0;background:transparent;color:inherit;font-size:18px}.workspace-message.error{border-color:#eac6c2;background:#fff0ef;color:#8e403b}.workspace-message.success{border-color:#c7dfcf;background:#edf8f1;color:#2d674a}
+
+/* 關卡頁籤是卡片的主軸：切換後排程、題目、評分與總評都跟著換。 */
+.question-stage-tabs{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.question-stage-tabs button{display:grid;grid-template-columns:1fr auto;align-items:center;gap:3px 8px;min-height:62px;padding:10px 13px;border:1px solid #d4e2de;border-radius:10px;background:#fff;color:#5b706b;text-align:left;cursor:pointer}
+.question-stage-tabs button small{grid-row:1;color:inherit;font-size:var(--fs-sm);font-weight:700}
+.question-stage-tabs button strong{grid-area:1/2/3/3;color:#1e665b;font-size:21px}
+.question-stage-tabs button span{grid-row:2;color:#82918d;font-size:var(--fs-xs)}
+.question-stage-tabs button.active{border-color:#278477;background:#e7f5f1;color:#1e665b;box-shadow:0 0 0 2px rgba(39,132,119,.08)}
+.question-stage-tabs button:focus-visible{outline:3px solid rgba(35,130,116,.24);outline-offset:2px}
+.record-discard-confirm{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid #e0cf9c;border-radius:9px;background:#fff9e8;color:#6e5525}.record-discard-confirm strong,.record-discard-confirm span{display:block}.record-discard-confirm strong{font-size:var(--fs-sm)}.record-discard-confirm span{margin-top:3px;color:#806b42;font-size:var(--fs-xs);line-height:1.5}.record-discard-confirm>div:last-child{display:flex;flex:0 0 auto;gap:7px}
+.card-stage-body{display:grid;gap:12px}
+
+.stage-grid{display:grid;grid-template-columns:1fr;gap:9px}
+.interview-stage{min-width:0;border:1px solid #cde5dc;border-radius:10px;background:#f0f9f5;overflow:hidden}.interview-stage.unscheduled{border-style:dashed;background:#fafcfb}
+.interview-stage>header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:11px 13px;border-bottom:1px solid #dce9e5}.interview-stage>header small{display:block;color:#b37c20;font-size:var(--fs-xs);font-weight:800;letter-spacing:.8px}.interview-stage>header h3{margin:3px 0 0;font-size:var(--fs-md)}.interview-stage>header>span{padding:4px 8px;border-radius:99px;background:#fff;color:#28675d;font-size:var(--fs-xs);white-space:nowrap}
+.stage-content{display:grid;gap:3px;padding:11px 13px}.stage-content small{margin-top:4px;color:var(--muted);font-size:var(--fs-xs)}.stage-content strong{color:#245f56;font-size:var(--fs-md)}.stage-content p{margin:2px 0 0;color:#5f746f;font-size:var(--fs-sm);line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}.stage-content p.structured-record-locked{padding:7px 9px;border:1px dashed #dfc994;border-radius:6px;background:#fffaf0;color:#876323}
+.interview-stage>footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:9px 12px;border-top:1px solid #dce9e5;background:rgba(255,255,255,.5)}.interview-stage>footer>span{margin-right:auto;color:var(--muted);font-size:var(--fs-xs)}
+.peer-stage-note{border:1px dashed #cfe0db;border-radius:9px;background:#fafcfb}.peer-stage-note>summary{list-style:none;cursor:pointer;padding:10px 13px;color:#4f6b65;font-size:var(--fs-sm)}.peer-stage-note>summary::-webkit-details-marker{display:none}.peer-stage-note>summary:before{content:'＋';margin-right:7px;color:#27766b;font-weight:800}.peer-stage-note[open]>summary:before{content:'－'}.peer-stage-note>div{padding:0 13px 11px}.peer-stage-note small{display:block;color:var(--muted);font-size:var(--fs-xs)}.peer-stage-note p{margin:4px 0 0;color:#5f746f;font-size:var(--fs-sm);line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
+.interview-editor{margin:0;border:1px solid #bcdcd2;border-width:1px 0 0;background:#fbfdfc;overflow:hidden}
+.interview-editor>header{display:flex;align-items:flex-start;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #dce9e5}.interview-editor>header small{color:#b37c20;font-size:var(--fs-xs);font-weight:800;letter-spacing:1px}.interview-editor>header h3{margin:3px 0 0;font-size:var(--fs-md)}.interview-editor>header button{border:0;background:transparent;color:#61736f;font-size:19px}
+.editor-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px}.editor-grid label{display:grid;gap:5px;color:#536e68;font-size:var(--fs-sm)}.editor-grid .wide{grid-column:1/-1}.editor-grid input,.editor-grid select,.editor-grid textarea{width:100%;padding:10px;border:1px solid #d5e2de;border-radius:7px;background:#fff;color:#284a44;font:inherit;font-size:var(--fs-md)}.editor-grid textarea{resize:vertical;line-height:1.6}
+.interview-editor>footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 14px;border-top:1px solid #dce9e5;background:#f5f9f7}.interview-editor>footer>span{color:var(--muted);font-size:var(--fs-xs)}.interview-editor>footer>div{display:flex;gap:7px}
+
+/* 題目與評分：五題只渲染一次，可編輯時就是表單本身，唯讀時為純文字。 */
+.record-editor{border:1px solid #d8e5e1;border-radius:12px;background:#fff;box-shadow:0 5px 18px rgba(24,74,65,.05)}
+.record-editor>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid #e0e9e6}.record-editor>header>div:first-child{min-width:0;flex:1}.record-editor>header small{color:#ad761f;font-size:var(--fs-xs);font-weight:800;letter-spacing:1px}.record-editor>header h3{margin:3px 0;font-size:var(--fs-lg)}.record-editor>header p{margin:0;color:#70817d;font-size:var(--fs-sm);line-height:1.55}
+.record-answer-progress{flex:0 0 auto;display:grid;justify-items:center;min-width:84px;padding:9px 13px;border-radius:9px;background:#eaf6f2;color:#236b60}.record-answer-progress strong{font-size:21px}.record-answer-progress span{font-size:var(--fs-xs)}
+.record-editor fieldset{margin:0;padding:0;border:0}
+/* 唯讀說明放在表單最上方，重新開啟的入口就在旁邊。 */
+.record-readonly-notice{display:flex;align-items:center;gap:11px;margin:13px 16px 0;padding:12px 13px;border:1px solid #d8c7a2;border-radius:10px;background:#fff8ea;color:#6f5726}.record-readonly-notice>span{font-size:18px}.record-readonly-notice>div{flex:1;min-width:0}.record-readonly-notice strong{display:block;font-size:var(--fs-md)}.record-readonly-notice p{margin:4px 0 0;font-size:var(--fs-sm);line-height:1.6}.record-readonly-notice .button{flex:0 0 auto}
+.record-audit-strip{display:flex;flex-wrap:wrap;gap:9px;margin:12px 16px 0;padding:10px 12px;border-radius:9px;background:#f4f8f7}.record-audit-strip span{display:flex;align-items:center;gap:5px;padding:5px 9px;border-radius:99px;background:#fff;color:#4f6d66;font-size:var(--fs-xs)}.record-audit-strip b{color:#286d62}
+.record-reopen-history{display:flex;align-items:flex-start;gap:10px;margin:11px 16px 0;padding:10px 12px;border:1px solid #e2d4a7;border-radius:8px;background:#fff9e9;color:#735b28}.record-reopen-history strong{flex:0 0 auto;font-size:var(--fs-sm)}.record-reopen-history p{margin:0;font-size:var(--fs-sm);line-height:1.55}
+.evaluation-lock-notice{display:flex;align-items:flex-start;gap:10px;margin:12px 16px 0;padding:11px 12px;border:1px solid #ead7ad;border-radius:9px;background:#fff9eb;color:#765722}.evaluation-lock-notice>span{font-size:16px}.evaluation-lock-notice strong{display:block;font-size:var(--fs-md)}.evaluation-lock-notice p{margin:4px 0 0;font-size:var(--fs-sm);line-height:1.6}
+.record-basic-details{margin:13px 16px 0;border:1px solid #dce7e3;border-radius:9px;background:#fbfdfc}.record-basic-details>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer;padding:12px 14px}.record-basic-details>summary::-webkit-details-marker{display:none}.record-basic-details>summary:before{content:'＋';margin-right:7px;color:#27766b;font-weight:800}.record-basic-details[open]>summary:before{content:'－'}.record-basic-details>summary strong,.record-basic-details>summary span{display:block}.record-basic-details>summary strong{color:#315d55;font-size:var(--fs-md)}.record-basic-details>summary span{margin-top:3px;color:#748681;font-size:var(--fs-sm)}.record-basic-details>summary em{color:#287469;font-size:var(--fs-sm);font-style:normal;font-weight:700}.record-basic-details[open]>summary{border-bottom:1px solid #e1e9e6}
+.record-meta-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:13px 14px}.record-meta-grid label{display:grid;gap:5px;color:#536e68;font-size:var(--fs-sm)}.record-meta-grid label>small{color:#778984;font-size:var(--fs-xs);line-height:1.45}.record-meta-grid input,.record-meta-grid select{width:100%;padding:10px;border:1px solid #d5e2de;border-radius:7px;background:#fff;color:#284a44;font:inherit;font-size:var(--fs-md)}
+
+.question-progress{padding:13px 16px 0}
+.question-plan-meta{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:0 0 10px;border-bottom:1px solid #e6eeeb}.question-plan-meta>span{padding:5px 9px;border-radius:99px;background:#e7f3ef;color:#216d61;font-size:var(--fs-sm);font-weight:700}.question-plan-meta>span[data-stage="manager"]{background:#fff3d8;color:#8a621a}.question-plan-meta>small{margin-left:auto;color:#798984;font-size:var(--fs-sm)}
+.generation-button{min-height:38px;padding:8px 13px;font-size:var(--fs-sm);white-space:nowrap}
+.evaluation-release-chip{padding:5px 9px;border-radius:99px;background:#fff0df;color:#93601c;font-size:var(--fs-xs);font-weight:700}.evaluation-release-chip.unlocked{background:#e1f3e9;color:#257052}
+.question-plan-details{margin:10px 0 0;border:1px solid #e0e9e6;border-radius:8px;background:#fafcfb}.question-plan-details>summary{cursor:pointer;padding:8px 10px;color:#3a7067;font-size:var(--fs-sm);font-weight:700}.question-plan-details>span{display:block;padding:0 10px 9px;color:#647b75;font-size:var(--fs-sm);line-height:1.55}
+.question-generation-warning,.question-generation-error,.question-context-warning{display:flex;align-items:flex-start;gap:8px;margin:10px 0 0;padding:10px 11px;border:1px solid;border-radius:8px;font-size:var(--fs-sm);line-height:1.6}.question-generation-warning strong,.question-generation-error strong{white-space:nowrap}
+.question-generation-warning{border-color:#e7c98c;background:#fff8e8;color:#785a20}.question-generation-error{border-color:#e5b9b5;background:#fff1f0;color:#8c403b}.question-context-warning{border-color:#d8c28d;background:#fffaf0;color:#765b25}
+.question-progress-loading,.question-preview-error{display:flex;align-items:center;justify-content:center;gap:8px;min-height:90px;padding:20px;color:#748681;font-size:var(--fs-sm)}.question-preview-error{color:#96524c}
+
+.rating-progress-bar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0 0;padding:9px 12px;border:1px solid #d8e8e3;border-radius:9px;background:#f4faf8}.rating-progress-bar>span{padding:4px 10px;border-radius:99px;background:#fff;color:#6d807a;font-size:var(--fs-xs)}.rating-progress-bar>span b{margin-right:4px;color:#1f7165;font-size:var(--fs-md)}
+.rating-scale-guide{margin-left:auto}.rating-scale-guide>summary{list-style:none;cursor:pointer;color:#2f7166;font-size:var(--fs-xs);font-weight:700}.rating-scale-guide>summary::-webkit-details-marker{display:none}.rating-scale-guide>summary:before{content:'＋';margin-right:5px}.rating-scale-guide[open]>summary:before{content:'－'}
+.rating-scale-guide ol{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:9px 0 0;padding:0;list-style:none}.rating-scale-guide li{display:flex;align-items:center;gap:8px;padding:8px 9px;border:1px solid #dce9e5;border-radius:7px;background:#fff;color:#506c65;font-size:var(--fs-sm)}.rating-scale-guide li b{width:27px;height:27px;display:grid;place-items:center;flex:0 0 auto;border-radius:50%;background:#dff1eb;color:#1e6b60;font-size:var(--fs-sm)}
+.rating-scale-guide[open]{flex-basis:100%}
+.compliance-chip{flex:0 0 auto;padding:4px 9px;border-radius:99px;background:#e3f4eb;color:#237052;font-size:var(--fs-xs);font-weight:700;cursor:help}
+.exceptional-status-note{display:flex;align-items:center;gap:9px;margin:12px 0 0;padding:10px 12px;border:1px solid #e6d2ad;border-radius:8px;background:#fff8e9;color:#755b2a}.exceptional-status-note strong{font-size:var(--fs-md)}.exceptional-status-note span{font-size:var(--fs-sm)}
+
+/* `.question-preview-list` 已無樣式，僅保留給 e2e 既有選擇器使用。 */
+.record-question-list{display:grid;gap:12px;margin:12px 0 0;padding:0;list-style:none}
+.record-question-card{display:grid;grid-template-columns:minmax(280px,.78fr) minmax(420px,1.22fr);column-gap:12px;align-items:start;overflow:hidden;border:1px solid #dbe6e2;border-radius:10px;background:#fbfdfc}
+.record-question-card.invalid{border-color:#d88982;box-shadow:0 0 0 2px rgba(190,74,65,.08)}
+.record-question-card>header,.record-question-card>.question-compliance,.record-question-card>.record-question-context{grid-column:1/-1}
+.record-question-card>header{display:grid;grid-template-columns:36px minmax(0,1fr);align-items:start;gap:10px;padding:13px;border-bottom:1px solid #e2ebe8}
+.record-question-card>header>span{width:34px;height:34px;display:grid;place-items:center;border-radius:50%;background:#dff0eb;color:#226e63;font-size:var(--fs-md);font-weight:800}
+.record-question-card.answered>header>span{background:#2a8879;color:#fff}
+.record-question-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;min-width:0}
+.record-question-heading>strong{min-width:0;flex:1;color:#2b4f49;font-size:var(--fs-md);line-height:1.7}
+.record-question-text-label{min-width:0;flex:1;display:grid;gap:5px;color:#536e68;font-size:var(--fs-sm)}
+.record-question-text-input{width:100%;min-height:58px;max-height:110px;box-sizing:border-box;padding:10px 11px;border:1px solid #c9ddd7;border-radius:8px;background:#fff;color:#284a44;font:inherit;font-size:var(--fs-md);font-weight:650;line-height:1.55;resize:vertical}
+.record-question-tools{display:flex;flex:0 0 auto;align-items:center;gap:7px}
+.question-inline-button,.question-regenerate-button{min-height:34px;padding:6px 10px;border:1px solid #78b8aa;border-radius:8px;background:#f2faf7;color:#1f7165;font-size:var(--fs-sm);font-weight:800;white-space:nowrap;cursor:pointer}
+.question-inline-button{border-color:#cfe0db;color:#4d6b64}
+.question-inline-button:hover,.question-regenerate-button:hover:not(:disabled){border-color:#287f72;background:#e5f5f0}
+.question-regenerate-button:disabled{cursor:not-allowed;opacity:.55}
+.question-remove-button{width:30px;height:30px;flex:0 0 auto;border:0;border-radius:8px;background:transparent;color:#a05b54;font-size:18px;cursor:pointer}
+.record-question-context{display:block;padding:0;border-bottom:1px solid #e2ebe8;background:#f5f9f7}.record-question-context>summary{list-style:none;cursor:pointer;padding:9px 13px;color:#3b7168;font-size:var(--fs-sm);font-weight:700}.record-question-context>summary::-webkit-details-marker{display:none}.record-question-context>summary:before{content:'＋';margin-right:7px}.record-question-context[open]>summary:before{content:'－'}.record-question-context>div{display:grid;gap:6px;padding:0 13px 11px}.record-question-context small{color:#617771;font-size:var(--fs-sm);line-height:1.55}.record-question-context b{margin-right:7px;color:#2f7065}
+/* 回答紀錄是面試當下的主要產出，給它最大的視覺權重。 */
+.record-quick-answer{grid-column:1;padding:13px 0 14px 13px}.record-quick-answer label{display:grid;gap:7px}
+.answer-label{display:flex;align-items:center;gap:6px;color:#1f6b60;font-size:var(--fs-sm);font-weight:800}.answer-label:before{content:'';width:3px;height:14px;border-radius:2px;background:#2a8879}
+.record-quick-answer textarea{width:100%;box-sizing:border-box;min-height:120px;padding:12px 13px;border:1px solid #bfd9d1;border-radius:8px;background:#fff;color:#284a44;font:inherit;font-size:var(--fs-md);line-height:1.7;resize:vertical}.record-quick-answer textarea:focus{border-color:#258174;outline:3px solid rgba(37,129,116,.1)}
+.record-quick-answer.readonly{display:grid;gap:7px}.record-quick-answer.readonly p{margin:0;padding:11px 13px;border-left:3px solid #2a8879;border-radius:0 7px 7px 0;background:#f3f9f7;color:#2f544e;font-size:var(--fs-md);line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere}.record-quick-answer.readonly p.empty{border-left-color:#d7dfdd;background:#f8faf9;color:#8a9693;font-style:italic}
+.question-evaluation-direct{grid-column:2;display:grid;gap:11px;margin:13px 13px 14px 0;padding:13px;border:1px solid #cfe2dc;border-radius:9px;background:#fff}
+.rating-radio-group{min-width:0}.rating-radio-group>legend{margin-bottom:9px;color:#365f58;font-size:var(--fs-md);font-weight:800}
+.rating-segments{display:grid;grid-template-columns:repeat(6,minmax(74px,1fr));gap:7px}
+.rating-segments label{position:relative;min-height:62px;display:grid;place-content:center;justify-items:center;gap:3px;padding:8px;border:1px solid #cfdfda;border-radius:9px;background:#fff;color:#5c716c;text-align:center;cursor:pointer;transition:border-color .15s ease,background .15s ease,box-shadow .15s ease}
+.rating-segments label:hover{border-color:#62a99b;background:#f2faf7}
+.rating-segments label.selected{border-color:#247f72;background:#e3f4ef;color:#175f55;box-shadow:0 0 0 2px rgba(36,127,114,.1)}
+.rating-segments label.not-asked-option.selected{border-color:#a9792d;background:#fff4dc;color:#79581e}
+.rating-segments input{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.rating-segments label:focus-within{outline:3px solid rgba(25,111,99,.25);outline-offset:2px}
+.rating-segments b{font-size:21px}.rating-segments span{font-size:var(--fs-xs);line-height:1.3}
+.record-editor fieldset:disabled .rating-segments label{cursor:default}.record-editor fieldset:disabled .rating-segments label:hover{border-color:#cfdfda;background:#fff}.record-editor fieldset:disabled .rating-segments label.selected{border-color:#247f72;background:#e3f4ef}
+.not-asked-reason{display:grid;gap:5px;color:#6e5727;font-size:var(--fs-sm);font-weight:700}.not-asked-reason input{width:100%;box-sizing:border-box;padding:10px 11px;border:1px solid #d9c28d;border-radius:7px;background:#fffdf7;color:#4b412d;font:inherit;font-size:var(--fs-md)}
+.field-error{margin:0!important;color:#a23f37!important;font-size:var(--fs-sm)!important;line-height:1.45!important}
+.question-observation-details{border-top:1px solid #e4ebe9}.question-observation-details>summary{display:flex;align-items:center;gap:8px;padding:9px 2px 0;list-style:none;cursor:pointer;color:#56716a;font-size:var(--fs-sm)}.question-observation-details>summary::-webkit-details-marker{display:none}.question-observation-details>summary:before{content:'＋';color:#27766b;font-weight:800}.question-observation-details[open]>summary:before{content:'－'}.question-observation-details>summary span{flex:1}.question-observation-details>summary em{font-style:normal}
+.record-answer-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;padding:10px 0 0}.record-answer-grid .wide{grid-column:1/-1}.record-answer-grid label{display:grid;gap:5px;color:#536e68;font-size:var(--fs-sm)}.record-answer-grid input,.record-answer-grid textarea{width:100%;box-sizing:border-box;padding:10px;border:1px solid #d5e2de;border-radius:7px;background:#fff;color:#284a44;font:inherit;font-size:var(--fs-sm);line-height:1.6;resize:vertical}
+.question-evaluation-readonly{grid-column:2;display:grid;gap:7px;align-content:start;margin:13px 13px 14px 0;padding:12px;border:1px dashed #cfe2dc;border-radius:9px;background:#fbfdfc}.question-evaluation-readonly>span{color:#5f746f;font-size:var(--fs-sm);line-height:1.6}
+.rating-chip{justify-self:start;padding:5px 10px;border-radius:99px;background:#e3f4ef;color:#1f7165;font-size:var(--fs-md);font-weight:800}.rating-chip.skipped{background:#fff4dc;color:#79581e;font-weight:700}.rating-chip.empty{background:#eef2f1;color:#71827d;font-weight:700}
+.evaluation-locked{color:#8a641f;font-size:var(--fs-sm);font-style:normal;font-weight:600}
+.evaluation-lock-inline{grid-column:2;display:flex;align-items:center;gap:9px;margin:13px 13px 14px 0;padding:11px;border:1px dashed #dfc994;border-radius:8px;background:#fffaf0;color:#785b22}.evaluation-lock-inline p{margin:0}.evaluation-lock-inline b,.evaluation-lock-inline small{display:block}.evaluation-lock-inline b{font-size:var(--fs-sm)}.evaluation-lock-inline small{margin-top:2px;font-size:var(--fs-xs)}
+.question-list-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.question-list-actions>span{color:#748580;font-size:var(--fs-sm)}
+
+/* 特質出題工具排在題目清單之後，且維持收合。 */
+.question-builder{margin:12px 0 16px;border:1px solid #d8e5e1;border-radius:12px;background:#fff}
+.question-builder>summary{display:flex;align-items:center;justify-content:space-between;gap:16px;list-style:none;cursor:pointer;padding:14px 16px}.question-builder>summary::-webkit-details-marker{display:none}.question-builder>summary:before{content:'＋';margin-right:7px;color:#27766b;font-weight:800}.question-builder[open]>summary:before{content:'－'}
+.question-builder>summary>div{min-width:0}.question-builder>summary small{color:#ae761d;font-size:var(--fs-xs);font-weight:800;letter-spacing:1px}.question-builder>summary h3{margin:4px 0;font-size:var(--fs-md)}.question-builder>summary p{margin:0;color:#6b7e79;font-size:var(--fs-sm);line-height:1.55}.question-builder>summary>span{flex:0 0 auto;padding:7px 10px;border-radius:99px;background:#eef5f3;color:#386b63;font-size:var(--fs-sm);font-weight:700}.question-builder[open]>summary{border-bottom:1px solid #e1ebe7}
+.question-builder-body{padding:0 16px 16px}
+.trait-picker,.selected-custom-traits{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}.trait-picker button,.selected-custom-traits button{padding:7px 10px;border:1px solid #d6e3df;border-radius:99px;background:#fff;color:#516d67;font-size:var(--fs-sm)}.trait-picker button.selected{border-color:#2c897b;background:#e4f4ef;color:#1d6e62;font-weight:700}.selected-custom-traits button{border-color:#d6c590;background:#fff9e9;color:#79602b}
+.custom-trait{display:flex;gap:7px;margin-top:10px}.custom-trait input{min-width:0;flex:1;height:38px;padding:0 10px;border:1px solid #d5e2de;border-radius:8px;font-size:var(--fs-sm)}
+.generate-questions{margin-top:11px}
+.question-guidance{margin:13px 0 0;padding:11px 13px;border-left:3px solid #d5a74c;border-radius:7px;background:#fff9eb;color:#735c33;font-size:var(--fs-sm);line-height:1.65}
+.question-personalization-basis{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:10px;padding:9px 10px;border:1px solid #d7e7e2;border-radius:8px;background:#f3f9f7}.question-personalization-basis strong{margin-right:3px;color:#315f57;font-size:var(--fs-sm)}.question-personalization-basis span{padding:4px 8px;border-radius:99px;background:#fff;color:#527069;font-size:var(--fs-xs)}
+.suggestion-groups{display:grid;gap:9px;margin-top:11px}.suggestion-groups>article{overflow:hidden;border:1px solid #dce7e3;border-radius:9px}.suggestion-groups>article>header{display:flex;justify-content:space-between;gap:10px;padding:9px 12px;background:#f2f7f5}.suggestion-groups>article>header strong{font-size:var(--fs-sm);color:#2d6d62}.suggestion-groups>article>header span{color:#758681;font-size:var(--fs-xs)}
+.suggested-question{display:flex;align-items:flex-start;gap:12px;padding:12px;border-top:1px solid #e5ece9}.suggested-question:first-of-type{border-top:0}.suggested-question>div{min-width:0;flex:1}.suggested-question>div>strong{display:block;font-size:var(--fs-sm);line-height:1.6}.suggested-question p{margin:5px 0 0;color:#667b75;font-size:var(--fs-sm);line-height:1.6}.suggested-question p b{margin-right:5px;color:#397268}.suggested-question>.button{flex:0 0 auto}.suggested-question .question-source{display:block;margin-bottom:5px;color:#a16e18;font-size:var(--fs-xs);font-weight:700}
 
 /* 面試題目合規檢核（就服法§5 / 性平法§7·§11）：綠=合法、紅=疑似違法。 */
-.question-compliance{display:grid !important;gap:2px;margin:7px 0 0 !important;padding:8px 10px !important;border-left:3px solid !important;border-radius:0 6px 6px 0 !important;font-size:11px !important;line-height:1.55 !important}
-.question-compliance b{font-weight:800}
-.question-compliance span{font-size:10px}
-.question-compliance em{font-style:normal;font-size:10px;line-height:1.5}
-.question-compliance.ok{border-left-color:#2a8879 !important;background:#edf8f3 !important;color:#1f6b60 !important}
-.question-compliance.warning{border-left-color:#c94b43 !important;background:#fdeceb !important;color:#8f342e !important}
-.suggested-question .question-compliance{margin-top:6px !important}
-.question-compliance-inline{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:99px;font-size:9px;font-weight:700;vertical-align:middle}
-.question-compliance-inline.ok{background:#e3f4eb;color:#237052}
-.question-compliance-inline.warning{background:#fbe0de;color:#a2352e;cursor:help}
+.question-compliance{display:grid!important;gap:2px;margin:10px 13px 0!important;padding:9px 11px!important;border-left:3px solid!important;border-radius:0 6px 6px 0!important;font-size:var(--fs-sm)!important;line-height:1.6!important}
+.question-compliance b{font-weight:800}.question-compliance span,.question-compliance em{font-size:var(--fs-sm);font-style:normal;line-height:1.55}
+.question-compliance.ok{border-left-color:#2a8879!important;background:#edf8f3!important;color:#1f6b60!important}
+.question-compliance.warning{border-left-color:#c94b43!important;background:#fdeceb!important;color:#8f342e!important}
+.suggested-question .question-compliance{margin:6px 0 0!important}
 
-/* 逐題 1–5 分與整體總評：radio 保留原生鍵盤語意，外層提供清楚的分段外觀。 */
-.record-audit-strip{display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px;border-bottom:1px solid #e4ebe9;background:#f8fbfa}.record-audit-strip span{display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:99px;background:#edf5f2;color:#4f6d66;font-size:10px}.record-audit-strip b{color:#286d62}.record-reopen-history{display:flex;align-items:flex-start;gap:10px;margin:11px 16px 0;padding:10px 12px;border:1px solid #e2d4a7;border-radius:8px;background:#fff9e9;color:#735b28}.record-reopen-history strong{flex:0 0 auto;font-size:10px}.record-reopen-history p{margin:0;font-size:10px;line-height:1.55}.record-meta-grid label>small{color:#778984;font-size:9px;line-height:1.45}
-.rating-scale-guide{overflow:hidden;margin:0 0 14px;border:1px solid #bcded4;border-radius:11px;background:#f7fcfa}.rating-scale-guide>header{display:flex;align-items:center;gap:16px;padding:12px 13px;border-bottom:1px solid #d8e8e3;background:#edf8f4}.rating-scale-guide>header>div:first-child{min-width:150px;flex:1}.rating-scale-guide>header strong,.rating-scale-guide>header span{display:block}.rating-scale-guide>header strong{color:#225f56;font-size:12px}.rating-scale-guide>header span{margin-top:2px;color:#6d807a;font-size:9px}.rating-progress{display:grid;grid-template-columns:repeat(4,minmax(54px,auto));gap:6px}.rating-progress span{min-width:56px;padding:5px 7px;border-radius:7px;background:#fff;text-align:center}.rating-progress b{display:block;color:#1f7165;font-size:15px}.rating-progress small{display:block;color:#8b6a2b;font-size:7px}.rating-scale-guide ol{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;margin:0;padding:10px 12px;list-style:none}.rating-scale-guide li{display:flex;align-items:center;gap:7px;padding:7px 8px;border:1px solid #dce9e5;border-radius:7px;background:#fff;color:#506c65;font-size:9px}.rating-scale-guide li b{width:23px;height:23px;display:grid;place-items:center;flex:0 0 auto;border-radius:50%;background:#dff1eb;color:#1e6b60;font-size:11px}.rating-scale-guide>p{margin:0;padding:0 12px 10px;color:#71837e;font-size:9px;line-height:1.5}.exceptional-status-note{display:flex;align-items:center;gap:9px;margin:0 0 12px;padding:10px 12px;border:1px solid #e6d2ad;border-radius:8px;background:#fff8e9;color:#755b2a}.exceptional-status-note strong{font-size:10px}.exceptional-status-note span{font-size:9px}
-.record-question-card.invalid{border-color:#d88982;box-shadow:0 0 0 2px rgba(190,74,65,.08)}.question-evaluation-direct{display:grid;gap:9px;margin:0 12px 12px;padding:11px;border:1px solid #cfe2dc;border-radius:9px;background:#fff}.rating-radio-group{min-width:0}.rating-radio-group>legend{margin-bottom:7px;color:#365f58;font-size:11px;font-weight:800}.rating-segments{display:grid;grid-template-columns:repeat(6,minmax(70px,1fr));gap:6px}.rating-segments label{position:relative;min-height:54px;display:grid;place-content:center;justify-items:center;gap:2px;padding:6px;border:1px solid #cfdfda;border-radius:8px;background:#fff;color:#5c716c;text-align:center;cursor:pointer;transition:border-color .15s ease,background .15s ease,box-shadow .15s ease}.rating-segments label:hover{border-color:#62a99b;background:#f2faf7}.rating-segments label.selected{border-color:#247f72;background:#e3f4ef;color:#175f55;box-shadow:0 0 0 2px rgba(36,127,114,.1)}.rating-segments label.not-asked-option.selected{border-color:#a9792d;background:#fff4dc;color:#79581e}.rating-segments input{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}.rating-segments label:focus-within{outline:3px solid rgba(25,111,99,.25);outline-offset:2px}.rating-segments b{font-size:16px}.rating-segments span{font-size:8px;line-height:1.25}.record-editor>fieldset:disabled .rating-segments label{cursor:default}.record-editor>fieldset:disabled .rating-segments label:hover{border-color:#cfdfda;background:#fff}.record-editor>fieldset:disabled .rating-segments label.selected{border-color:#247f72;background:#e3f4ef}.not-asked-reason{display:grid;gap:5px;color:#6e5727;font-size:10px;font-weight:700}.not-asked-reason input{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d9c28d;border-radius:7px;background:#fffdf7;color:#4b412d;font:inherit}.field-error{margin:0!important;color:#a23f37!important;font-size:10px!important;line-height:1.45!important}.question-observation-details{border-top:1px solid #e4ebe9}.question-observation-details>summary{display:flex;align-items:center;gap:8px;padding:8px 2px 0;list-style:none;cursor:pointer;color:#56716a;font-size:10px}.question-observation-details>summary::-webkit-details-marker{display:none}.question-observation-details>summary:before{content:'＋';color:#27766b;font-weight:800}.question-observation-details[open]>summary:before{content:'－'}.question-observation-details>summary span{flex:1}.question-observation-details>summary em{font-style:normal}.question-observation-details .record-answer-grid{padding:10px 0 0}
-.record-conclusion-section{margin:0 16px 14px;border:1px solid #bcded4;border-radius:10px;background:#f8fcfa}.record-conclusion-section>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid #d7e8e2}.record-conclusion-section>header strong,.record-conclusion-section>header span{display:block}.record-conclusion-section>header strong{color:#255f56;font-size:13px}.record-conclusion-section>header span{margin-top:3px;color:#6e817b;font-size:10px}.record-conclusion-section>header em{color:#2a756a;font-size:10px;font-style:normal;font-weight:700}.record-conclusion-section .record-conclusion{grid-template-columns:minmax(0,2fr) minmax(220px,1fr);padding:13px 14px 14px}.overall-rating-group{grid-column:1/-1}.overall-rating-group .rating-segments{grid-template-columns:repeat(5,minmax(80px,1fr))}.record-conclusion-section .wide{grid-column:1/-1}.record-conclusion-section textarea{width:100%;box-sizing:border-box}.record-conclusion-section [aria-invalid="true"]{border-color:#c8675f}.record-reopen-panel{display:grid;grid-template-columns:minmax(180px,1fr) minmax(280px,2fr) auto;align-items:end;gap:12px;padding:13px 16px;border-top:1px solid #e0cf9c;background:#fff9e8}.record-reopen-panel strong{color:#6e5525;font-size:11px}.record-reopen-panel p{margin:3px 0 0;color:#806b42;font-size:9px;line-height:1.5}.record-reopen-panel label{display:grid;gap:5px;color:#6e5727;font-size:10px}.record-reopen-panel input{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d5bd7f;border-radius:7px;background:#fff;color:#4e452f;font:inherit}.record-reopen-panel>div:last-child{display:flex;gap:7px}.reopen-button{border-color:#c99d47;color:#76551b}.record-editor :is(input,select,textarea,button):focus-visible{outline:3px solid rgba(35,128,114,.22);outline-offset:2px}.record-editor [aria-invalid="true"]{border-color:#c8675f}.record-editor>footer .button:disabled{cursor:not-allowed;opacity:.58}
-@media(max-width:980px){.rating-scale-guide>header{align-items:flex-start;flex-direction:column}.rating-progress{width:100%;grid-template-columns:repeat(4,1fr)}.rating-scale-guide ol{grid-template-columns:repeat(3,1fr)}.rating-segments{grid-template-columns:repeat(3,1fr)}.record-reopen-panel{grid-template-columns:1fr}.record-reopen-panel>div:last-child{justify-content:flex-end}}
-@media(max-width:680px){.record-audit-strip{display:grid}.rating-progress{grid-template-columns:repeat(2,1fr)}.rating-scale-guide ol{grid-template-columns:1fr}.rating-segments,.overall-rating-group .rating-segments{grid-template-columns:repeat(2,minmax(0,1fr))}.rating-segments label{min-height:50px}.record-conclusion-section{margin-inline:10px}.record-conclusion-section>header{align-items:flex-start;flex-direction:column}.record-conclusion-section .record-conclusion{grid-template-columns:1fr}.overall-rating-group,.record-conclusion-section .wide{grid-column:auto}.record-reopen-panel>div:last-child,.record-editor>footer>div{display:grid;grid-template-columns:1fr;width:100%}.record-reopen-panel .button,.record-editor>footer .button{width:100%}}
+/* 整體總評：面試總分為 0–100 的人工判斷，題目平均只是參考值。 */
+.record-conclusion-section{margin:0 16px 14px;border:1px solid #bcded4;border-radius:10px;background:#f8fcfa}
+.record-conclusion-section>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid #d7e8e2}.record-conclusion-section>header strong,.record-conclusion-section>header span{display:block}.record-conclusion-section>header strong{color:#255f56;font-size:var(--fs-lg)}.record-conclusion-section>header span{margin-top:3px;color:#6e817b;font-size:var(--fs-sm)}.record-conclusion-section>header em{color:#2a756a;font-size:var(--fs-sm);font-style:normal;font-weight:700}
+.record-conclusion{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,1fr);align-items:start;gap:14px;padding:15px}
+.record-conclusion label{display:grid;gap:6px;color:#536e68;font-size:var(--fs-sm)}.record-conclusion .wide{grid-column:1/-1}
+.record-conclusion select,.record-conclusion textarea{width:100%;box-sizing:border-box;padding:10px 11px;border:1px solid #d5e2de;border-radius:7px;background:#fff;color:#284a44;font:inherit;font-size:var(--fs-md);line-height:1.6;resize:vertical}
+.overall-score-field>small{color:#778984;font-size:var(--fs-xs);line-height:1.5}
+.overall-score-input{display:flex;align-items:center;gap:9px}.overall-score-input input{width:130px;padding:11px 12px;border:2px solid #9ccabf;border-radius:8px;background:#fff;color:#1c5a52;font:inherit;font-size:22px;font-weight:800;text-align:center}.overall-score-input input:focus{border-color:#218174;outline:3px solid rgba(35,128,114,.18)}.overall-score-input b{color:#4d6b64;font-size:var(--fs-md)}
+.score-reference{color:#93a09c!important;font-size:var(--fs-xs)!important;font-style:italic}
+.record-conclusion-section [aria-invalid="true"]{border-color:#c8675f}
+.record-conclusion-locked{display:flex;align-items:center;gap:10px;margin:0 16px 16px;padding:13px;border:1px dashed #dfc994;border-radius:9px;background:#fffaf0;color:#795c25}.record-conclusion-locked strong{display:block;font-size:var(--fs-md)}.record-conclusion-locked p{margin:3px 0 0;font-size:var(--fs-sm)}
+
+.hr-private-notes{margin:0 16px 16px;border:1px solid #d3c6eb;border-radius:10px;background:#faf7ff}.hr-private-notes>summary{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;list-style:none;cursor:pointer;padding:12px 13px}.hr-private-notes>summary::-webkit-details-marker{display:none}.hr-private-notes>summary>span{padding:5px 8px;border-radius:6px;background:#6f5799;color:#fff;font-size:var(--fs-xs);font-weight:800;letter-spacing:.7px}.hr-private-notes>summary strong,.hr-private-notes>summary small{display:block}.hr-private-notes>summary strong{color:#54416f;font-size:var(--fs-md)}.hr-private-notes>summary small{margin-top:2px;color:#81728f;font-size:var(--fs-xs)}.hr-private-notes>summary em{color:#705c86;font-size:var(--fs-sm);font-style:normal}.hr-private-notes>label{display:grid;gap:5px;margin:0 13px 13px;color:#665577;font-size:var(--fs-sm)}.hr-private-notes textarea{width:100%;box-sizing:border-box;padding:11px;border:1px solid #d8cee7;border-radius:8px;background:#fff;color:#453952;font:inherit;font-size:var(--fs-md);line-height:1.6;resize:vertical}
+
+.record-reopen-panel{display:grid;grid-template-columns:minmax(180px,1fr) minmax(280px,2fr) auto;align-items:end;gap:12px;padding:13px 16px;border-top:1px solid #e0cf9c;background:#fff9e8}.record-reopen-panel strong{color:#6e5525;font-size:var(--fs-md)}.record-reopen-panel p{margin:3px 0 0;color:#806b42;font-size:var(--fs-sm);line-height:1.5}.record-reopen-panel label{display:grid;gap:5px;color:#6e5727;font-size:var(--fs-sm)}.record-reopen-panel input{width:100%;box-sizing:border-box;padding:10px 11px;border:1px solid #d5bd7f;border-radius:7px;background:#fff;color:#4e452f;font:inherit;font-size:var(--fs-md)}.record-reopen-panel>div:last-child{display:flex;gap:7px}.reopen-button{border-color:#c99d47;color:#76551b}
+.record-editor>footer{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;border-top:1px solid #dde7e3;background:#f5f9f7}.record-editor>footer>span{color:#71837e;font-size:var(--fs-sm);line-height:1.55}.record-editor>footer>div{display:flex;gap:7px}.record-editor>footer .button{min-height:44px;padding:10px 16px;font-size:var(--fs-md)}.record-editor>footer .button:disabled{cursor:not-allowed;opacity:.58}
+.record-editor :is(input,select,textarea,button):focus-visible{outline:3px solid rgba(35,128,114,.22);outline-offset:2px}.record-editor [aria-invalid="true"]{border-color:#c8675f}
+
+/* 面試紀錄歷程：卡片最下方的收合區，舊版問答仍可回查。 */
+.record-history{border:1px solid #dce7e3;border-radius:11px;background:#fff}
+.record-history>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer;padding:12px 15px}.record-history>summary::-webkit-details-marker{display:none}.record-history>summary:before{content:'＋';margin-right:7px;color:#27766b;font-weight:800}.record-history[open]>summary:before{content:'－'}.record-history[open]>summary{border-bottom:1px solid #e5edea}
+.record-history>summary strong{font-size:var(--fs-md)}.record-history>summary span{margin-left:8px;color:#748580;font-size:var(--fs-sm)}.record-history>summary em{color:#31786d;font-size:var(--fs-sm);font-style:normal}
+.record-history-body{padding:12px 15px 15px}
+.record-history-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.record-history-actions>span{color:#748580;font-size:var(--fs-sm)}
+.workspace-loading{display:flex;align-items:center;gap:8px;padding:22px 12px;color:#6d807a;font-size:var(--fs-sm)}
+.record-history-item{position:relative;width:100%;display:grid;gap:5px;padding:13px 14px;border:1px solid #e9efed;border-radius:9px;background:#fff;color:#34554f;text-align:left;cursor:pointer}.record-history-item+.record-history-item{margin-top:8px}
+.record-history-item:hover,.record-history-item.active{border-color:#a8d2c7;background:#eef8f5}
+.record-history-item.active:before{content:"";position:absolute;inset:9px auto 9px 0;width:4px;border-radius:0 4px 4px 0;background:#218174}
+.record-history-item strong{font-size:var(--fs-md);line-height:1.45}.record-history-item small{color:#71827d;font-size:var(--fs-sm)}.record-history-item em{justify-self:end;color:#31786d;font-size:var(--fs-sm);font-style:normal}
+.record-status{justify-self:start;padding:4px 8px;border-radius:99px;background:#e8f3ef;color:#2b7365;font-size:var(--fs-xs)}.record-status[data-status="planned"]{background:#e8f0f8;color:#326c99}.record-status[data-status="cancelled"],.record-status[data-status="no_show"]{background:#f7e9e7;color:#a04f49}
+.history-visibility{justify-self:start;padding:4px 8px;border-radius:99px;background:#fff1dc!important;color:#8a601b!important}.history-visibility.unlocked{background:#e3f3ea!important;color:#267052!important}
+.record-history-empty{padding:30px 20px;text-align:center;color:#758681}.record-history-empty strong{font-size:var(--fs-md)}.record-history-empty p{font-size:var(--fs-sm);line-height:1.6}
+
+@media(max-width:1260px){.record-question-card{display:block}.record-quick-answer{padding:13px}.question-evaluation-direct,.question-evaluation-readonly,.evaluation-lock-inline{margin:0 13px 13px}}
+@media(max-width:1120px){.interview-filters{align-items:stretch;flex-wrap:wrap}.interview-filters>div{flex-basis:100%}.interview-filters label{flex:1}.interview-filters select{width:100%}.rating-segments{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:980px){.rating-scale-guide>header{align-items:flex-start;flex-direction:column}.rating-progress{width:100%;grid-template-columns:repeat(3,1fr)}.rating-scale-guide ol{grid-template-columns:repeat(3,1fr)}.record-reopen-panel{grid-template-columns:1fr}.record-reopen-panel>div:last-child{justify-content:flex-end}}
+@media(max-width:900px){.sharing-policy-details{grid-template-columns:1fr}.application-details{grid-template-columns:1fr 1fr}.record-meta-grid{grid-template-columns:1fr 1fr}.record-conclusion{grid-template-columns:1fr}}
+@media(max-width:820px){.interview-row-toggle{grid-template-columns:minmax(0,1fr) 32px;gap:10px;padding:13px}.interview-row-progress{grid-column:1;grid-row:2;justify-items:start;grid-template-columns:auto 1fr}.interview-row-progress .application-status{grid-row:auto}.interview-row-toggle .row-chevron{grid-column:2;grid-row:1/3}.interview-card-detail{padding-inline:12px}}
+@media(max-width:680px){
+.interview-hero{align-items:flex-start;flex-direction:column}
+.interview-embedded-heading,.interview-embedded-actions{align-items:stretch;flex-direction:column}.interview-embedded-actions .button{width:100%}
+.interview-metrics,.application-details,.editor-grid,.record-meta-grid,.record-answer-grid{grid-template-columns:1fr}.editor-grid .wide,.record-answer-grid .wide{grid-column:auto}
+.interview-filters label{flex-basis:100%}
+.question-stage-tabs{grid-template-columns:1fr}
+.record-discard-confirm,.question-list-actions,.record-history-actions,.interview-editor>footer,.record-editor>footer,.record-editor>header,.question-builder>summary{align-items:flex-start;flex-direction:column}
+.record-discard-confirm>div:last-child,.interview-editor>footer>div,.record-editor>footer>div{display:grid;grid-template-columns:1fr;width:100%}
+.record-discard-confirm .button,.interview-editor>footer .button,.record-editor>footer .button,.question-list-actions .button,.record-history-actions .button{width:100%}
+.record-readonly-notice{align-items:stretch;flex-direction:column;margin-inline:10px}.record-readonly-notice .button{width:100%}
+.record-audit-strip{display:grid;margin-inline:10px}.record-basic-details,.record-conclusion-section,.hr-private-notes{margin-inline:10px}
+.question-progress{padding-inline:10px}
+.rating-progress{grid-template-columns:repeat(3,1fr)}.rating-scale-guide ol{grid-template-columns:1fr}
+.rating-segments{grid-template-columns:repeat(2,minmax(0,1fr))}.rating-segments label{min-height:60px}
+.record-question-card>header{grid-template-columns:30px minmax(0,1fr);padding:11px}.record-question-heading{align-items:stretch;flex-direction:column;gap:9px}.record-question-tools{flex-wrap:wrap}.question-inline-button,.question-regenerate-button{flex:1}
+.suggested-question{flex-direction:column}.suggested-question>.button{width:100%}
+}
 </style>

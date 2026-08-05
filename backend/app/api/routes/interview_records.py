@@ -179,6 +179,7 @@ def _record_read(
             summary=None,
             recommendation=None,
             overall_rating=None,
+            overall_score=None,
             submitted_by_id=None,
             submitted_by_name=None,
             last_reopen_reason=None,
@@ -196,6 +197,7 @@ def _evaluation_audit_details(record: InterviewRecord) -> dict[str, object]:
         "not_asked_question_count": not_asked_count,
         "completed_question_count": rated_count + not_asked_count,
         "overall_rating_present": record.overall_rating is not None,
+        "overall_score_present": record.overall_score is not None,
         "recommendation_present": record.recommendation is not None,
         "summary_present": bool(record.summary and record.summary.strip()),
         "revision_number": record.revision_number,
@@ -209,6 +211,7 @@ def _validate_completed_update(
     summary_value: str | None,
     recommendation_value: str | None,
     overall_rating_value: int | None,
+    overall_score_value: int | None,
 ) -> None:
     try:
         questions = [
@@ -221,6 +224,7 @@ def _validate_completed_update(
             summary=summary_value,
             recommendation=recommendation_value,  # type: ignore[arg-type]
             overall_rating=overall_rating_value,
+            overall_score=overall_score_value,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -782,6 +786,7 @@ def create_interview_record(
         private_notes=payload.private_notes,
         recommendation=payload.recommendation,
         overall_rating=payload.overall_rating,
+        overall_score=payload.overall_score,
         submitted_at=submitted_at,
         submitted_by_id=user.id if submitted_at else None,
         submitted_by_name=actor_name if submitted_at else None,
@@ -871,12 +876,14 @@ def update_interview_record(
     next_summary = updates.get("summary", record.summary)
     next_recommendation = updates.get("recommendation", record.recommendation)
     next_overall_rating = updates.get("overall_rating", record.overall_rating)
+    next_overall_score = updates.get("overall_score", record.overall_score)
     _validate_completed_update(
         status_value=next_status,
         questions_value=next_questions,
         summary_value=next_summary,
         recommendation_value=next_recommendation,
         overall_rating_value=next_overall_rating,
+        overall_score_value=next_overall_score,
     )
     for field, value in updates.items():
         setattr(record, field, value)

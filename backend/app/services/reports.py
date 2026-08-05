@@ -13,6 +13,9 @@ FUNNEL_STAGES = {
         "recommended",
         "shortlisted",
         "contacted",
+        # Marked ready to interview but no interview has happened yet, so it counts
+        # at the top of the funnel only.
+        "interview_ready",
         "interview",
         "interviewing",
         "offered",

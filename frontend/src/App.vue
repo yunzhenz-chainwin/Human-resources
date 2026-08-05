@@ -12,8 +12,10 @@ import { authSession } from './services/auth'
 import {
   API_BASE,
   hrApi,
+  isInterviewEntryStatus,
   type ActivityDto,
   type ApplicationDto,
+  type CandidateApplicationDetailDto,
   type CandidateDetailDto,
   type CandidateDto,
   type CandidateResumeSummaryDto,
@@ -55,8 +57,17 @@ type UploadItem = {
   resumeId?: number
   message?: string
 }
+// Hand-off payload for 人才庫 →「進入面試」; shape matches RecruitmentWorkspace's initial-focus prop.
+type InterviewFocus = {
+  candidateId: number
+  candidateName: string
+  requisitionId: number
+  applicationId: number | null
+}
 
 const ASSIGNABLE_JOB_STATUSES = new Set(['draft', 'submitted', 'returned', 'approved', 'sourcing', 'interviewing'])
+// 確定面試 only moves a live application forward; already-closed outcomes stay untouched.
+const CLOSED_APPLICATION_STATUSES = new Set(['offered', 'hired', 'rejected', 'withdrawn'])
 const RESUME_ALLOWED_EXTENSIONS = new Set(['pdf', 'doc', 'docx'])
 const RESUME_MAX_FILE_SIZE = 10 * 1024 * 1024
 
@@ -77,6 +88,8 @@ const retentionSavingCandidateId = ref<number | null>(null)
 const retentionYearOptions = Array.from({ length: 20 }, (_, index) => index + 1)
 const applications = ref<ApplicationDto[]>([])
 const applicationsLoaded = ref(false)
+const interviewFocus = ref<InterviewFocus | null>(null)
+const interviewReadyPendingId = ref<number | null>(null)
 const departments = ref<Department[]>([])
 const resumes = ref<ResumeDto[]>([])
 const jobs = ref<RequisitionDto[]>([])
@@ -360,6 +373,65 @@ function departmentsFromJobs(items: RequisitionDto[]): Department[] {
 const candidateStatusLabels: Record<string, string> = {
   new: '新進人才', contacted: '已聯繫', priority: '優先聯繫', interviewing: '面試中', archived: '已封存',
 }
+const applicationStatusLabels: Record<string, string> = {
+  submitted: '已投遞', screening: '履歷審查', interview_ready: '確定面試', interview: '面試中', interviewing: '面試中',
+  offered: '已發 Offer', hired: '已錄取', rejected: '未錄取', withdrawn: '已撤回',
+}
+const canMarkInterviewReady = computed(() => authState.user?.role === 'hr')
+// A talent row can only show one application, so keep whichever is closest to an interview.
+const listedApplications = computed(() => {
+  const index = new Map<number, ApplicationDto>()
+  applications.value.forEach(application => {
+    const current = index.get(application.candidate_id)
+    if (!current || (!isInterviewEntryStatus(current.status) && isInterviewEntryStatus(application.status))) {
+      index.set(application.candidate_id, application)
+    }
+  })
+  return index
+})
+function listedApplication(candidateId: number) {
+  return listedApplications.value.get(candidateId) || null
+}
+function talentApplicationLabel(candidateId: number) {
+  if (!applicationsLoaded.value) return '應徵資料未載入'
+  const application = listedApplication(candidateId)
+  if (!application) return '尚未指派職缺'
+  return applicationStatusLabels[application.status] || application.status
+}
+const interviewEntryApplication = computed(() => (
+  selectedCandidate.value?.applications.find(application => isInterviewEntryStatus(application.status)) || null
+))
+function canConfirmInterview(application: CandidateApplicationDetailDto) {
+  return canMarkInterviewReady.value
+    && !isInterviewEntryStatus(application.status)
+    && !CLOSED_APPLICATION_STATUSES.has(application.status)
+}
+
+async function markInterviewReady(application: CandidateApplicationDetailDto) {
+  if (interviewReadyPendingId.value !== null) return
+  interviewReadyPendingId.value = application.id
+  error.value = ''
+  try {
+    const updated = (await hrApi.markApplicationInterviewReady(application.id)).data
+    application.status = updated.status
+    const listed = applications.value.find(item => item.id === updated.id)
+    if (listed) listed.status = updated.status
+    else applications.value.unshift(updated)
+    setNotice(`已確定面試：${updated.candidate.name}／${updated.requisition.title}`)
+  } catch (cause) { showError(cause) } finally { interviewReadyPendingId.value = null }
+}
+
+// Carry the candidate + requisition into 人才評估與面試 so the interview card opens already expanded.
+async function enterInterview(candidate: CandidateDetailDto, application: CandidateApplicationDetailDto) {
+  interviewFocus.value = {
+    candidateId: candidate.id,
+    candidateName: candidate.name,
+    requisitionId: application.requisition_id,
+    applicationId: application.id,
+  }
+  selectedCandidate.value = null
+  await navigate('matching')
+}
 const activityRoleLabels: Record<string, string> = {
   admin: '系統管理員', hr: 'HR', manager: '部門主管', it: 'IT',
 }
@@ -523,6 +595,8 @@ async function navigate(target: Page, options?: { intakeTab?: 'upload' | 'manual
   page.value = target
   sidebarOpen.value = false
   error.value = ''
+  // A talent-pool hand-off is single-use: leaving 人才評估與面試 must not re-focus it on the next visit.
+  if (target !== 'matching') interviewFocus.value = null
   // The unified intake page defaults to the upload tab; explicit callers can land on manual filling.
   if (target === 'resumes') setIntakeTab(options?.intakeTab ?? 'upload')
   if (['candidates', 'resumes', 'jobs', 'matching', 'reports'].includes(target)) {
@@ -1219,6 +1293,7 @@ async function logout() {
     candidateJobId.value = null
     selectedCandidate.value = null
     selectedResume.value = null
+    interviewFocus.value = null
     page.value = 'dashboard'
     logoutPending.value = false
   }
@@ -1344,13 +1419,14 @@ onBeforeUnmount(closeResumeFilePreview)
           <TalentRetentionPanel v-if="authState.user.role === 'hr' || authState.user.role === 'admin'" @policy-loaded="retentionPolicyYears = $event" @policy-updated="refreshAll(true)" @purged="refreshAll(true)" />
           <div id="candidate-retention-list" class="filter-bar panel"><label class="search-field"><span>⌕</span><input v-model="search" placeholder="搜尋姓名、Email、電話、職稱或來源"></label><label class="search-field"><span>◆</span><input v-model="skillSearch" data-testid="candidate-skill-search" placeholder="依技能搜尋（後端比對）" @input="scheduleSkillSearch" @keyup.enter="applySkillSearch"></label><select v-model="candidateStatus"><option value="all">全部狀態</option><option v-for="(label, key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select><span>{{ skillSearching ? '技能搜尋中…' : `${filteredCandidates.length} 筆結果` }}</span></div>
           <div v-if="filteredCandidates.length" class="talent-list panel" role="list" data-testid="talent-list">
-            <div class="talent-list-head" aria-hidden="true"><span>人才</span><span>目前職務</span><span>來源／更新</span><span>保存期限</span><span>狀態</span><span></span></div>
+            <div class="talent-list-head" aria-hidden="true"><span>人才</span><span>目前職務</span><span>來源／更新</span><span>保存期限</span><span>應徵狀態</span><span>狀態</span><span></span></div>
             <article v-for="candidate in filteredCandidates" :key="candidate.id" role="listitem">
               <button type="button" class="talent-list-row" :data-testid="`talent-row-${candidate.id}`" @click="viewCandidate(candidate)">
                 <span class="talent-list-identity"><img v-if="candidatePhotoPreviews[candidate.id]" class="person-avatar candidate-photo" :src="candidatePhotoPreviews[candidate.id]" :alt="`${candidate.name}的大頭照`"><span v-else class="person-avatar">{{ candidate.name.slice(0,1) }}</span><span><strong>{{ candidate.name }}</strong><small>{{ candidate.code }}</small></span></span>
                 <span class="talent-list-role"><strong>{{ candidate.current_title || '職稱待補' }}</strong><small>{{ candidate.city || '地區待補' }} · {{ candidate.total_years ?? 0 }} 年經驗</small></span>
                 <span class="talent-list-source"><strong>{{ sourceLabels[candidate.source || ''] || candidate.source || '未知來源' }}</strong><small>更新於 {{ date(candidate.updated_at) }}</small></span>
                 <span class="talent-list-retention" :class="{ custom: candidate.retention_years_override !== null }"><strong>{{ candidate.retention_years_override === null ? `公司預設 ${retentionPolicyYears} 年` : `個別 ${candidate.retention_years_override} 年` }}</strong><small>{{ candidate.retention_until ? `保存至 ${dateOnly(candidate.retention_until)}` : '到期日待計算' }}</small></span>
+                <span class="talent-list-application" :data-testid="`talent-application-status-${candidate.id}`"><b class="status" :data-status="listedApplication(candidate.id)?.status">{{ talentApplicationLabel(candidate.id) }}</b><small>{{ listedApplication(candidate.id)?.requisition.title || '—' }}</small></span>
                 <span class="status" :data-status="candidate.status">{{ candidateStatusLabels[candidate.status] || candidate.status }}</span>
                 <span class="talent-list-open">查看 <b aria-hidden="true">›</b></span>
               </button>
@@ -1494,7 +1570,8 @@ onBeforeUnmount(closeResumeFilePreview)
           :jobs="jobs"
           :role="authState.user.role"
           :refresh-key="recruitmentRefreshKey"
-          initial-mode="matching"
+          :initial-mode="interviewFocus ? 'interviews' : 'matching'"
+          :initial-focus="interviewFocus"
           :can-configure="authState.user.role === 'hr' || authState.user.role === 'admin'"
           :can-configure-weights="['hr', 'admin', 'manager'].includes(authState.user.role)"
           :can-manage="['hr', 'admin', 'manager'].includes(authState.user.role)"
@@ -1519,7 +1596,7 @@ onBeforeUnmount(closeResumeFilePreview)
         </nav>
 
         <div class="candidate-detail-actionbar">
-          <div><button class="button primary" data-testid="add-shared-activity" @click="openActivity(selectedCandidate)">＋ {{ authState.user.role === 'manager' ? '新增主管留言' : '新增 HR 留言／聯繫' }}</button><template v-if="authState.user.role !== 'manager'"><button class="button secondary" @click="openCandidate(selectedCandidate)">編輯人才</button><button v-if="selectedCandidate.has_photo" class="button secondary" :disabled="saving" @click="removeCandidatePhoto(selectedCandidate)">移除照片</button></template></div>
+          <div><button v-if="interviewEntryApplication" class="button primary" data-testid="candidate-enter-interview" @click="enterInterview(selectedCandidate, interviewEntryApplication)">進入面試</button><button class="button primary" data-testid="add-shared-activity" @click="openActivity(selectedCandidate)">＋ {{ authState.user.role === 'manager' ? '新增主管留言' : '新增 HR 留言／聯繫' }}</button><template v-if="authState.user.role !== 'manager'"><button class="button secondary" @click="openCandidate(selectedCandidate)">編輯人才</button><button v-if="selectedCandidate.has_photo" class="button secondary" :disabled="saving" @click="removeCandidatePhoto(selectedCandidate)">移除照片</button></template></div>
           <div v-if="authState.user.role !== 'manager'" class="candidate-detail-danger-actions"><button class="button danger" @click="archiveCandidate(selectedCandidate)">封存</button><button class="button danger" :disabled="saving" @click="removeCandidate(selectedCandidate)">刪除人才</button></div>
         </div>
 
@@ -1565,7 +1642,12 @@ onBeforeUnmount(closeResumeFilePreview)
               <div class="candidate-block-heading"><div><h3>應徵職缺與申請資料</h3><p>目前權限範圍內可查看的正式應徵紀錄。</p></div><span>{{ selectedCandidate.applications.length }} 筆</span></div>
               <div v-if="selectedCandidate.applications.length" class="candidate-application-list">
                 <article v-for="application in selectedCandidate.applications" :key="application.id">
-                  <header><div><small>{{ application.requisition.department_name || `部門 #${application.requisition.department_id}` }}</small><strong>{{ application.requisition.title }}</strong><span>{{ application.requisition.req_no }} · {{ date(application.applied_at) }}</span></div><b class="status" :data-status="application.status">{{ application.status }}</b></header>
+                  <header><div><small>{{ application.requisition.department_name || `部門 #${application.requisition.department_id}` }}</small><strong>{{ application.requisition.title }}</strong><span>{{ application.requisition.req_no }} · {{ date(application.applied_at) }}</span></div><b class="status" :data-status="application.status">{{ applicationStatusLabels[application.status] || application.status }}</b></header>
+                  <div v-if="canConfirmInterview(application) || isInterviewEntryStatus(application.status)" class="candidate-application-actions">
+                    <button v-if="canConfirmInterview(application)" type="button" class="button secondary" :data-testid="`candidate-mark-interview-ready-${application.id}`" :disabled="interviewReadyPendingId !== null" @click="markInterviewReady(application)">{{ interviewReadyPendingId === application.id ? '確認中…' : '確定面試' }}</button>
+                    <button v-if="isInterviewEntryStatus(application.status)" type="button" class="button primary" :data-testid="`candidate-enter-interview-${application.id}`" @click="enterInterview(selectedCandidate, application)">進入此職缺面試</button>
+                    <small>{{ isInterviewEntryStatus(application.status) ? '會直接帶到這位人才在本職缺的面試卡片，不需要重新搜尋。' : '確定面試後，這筆應徵才會出現在面試流程中。' }}</small>
+                  </div>
                   <div v-if="safeExternalUrl(application.portfolio_url) || safeExternalUrl(application.linkedin_url)" class="candidate-links"><a v-if="safeExternalUrl(application.portfolio_url)" :href="safeExternalUrl(application.portfolio_url)" target="_blank" rel="noopener noreferrer">作品集／個人網站 ↗</a><a v-if="safeExternalUrl(application.linkedin_url)" :href="safeExternalUrl(application.linkedin_url)" target="_blank" rel="noopener noreferrer">LinkedIn ↗</a></div>
                   <div v-if="application.cover_letter" class="candidate-cover-letter"><small>求職信</small><p>{{ application.cover_letter }}</p></div>
                   <p v-if="!application.cover_letter && !safeExternalUrl(application.portfolio_url) && !safeExternalUrl(application.linkedin_url)" class="candidate-empty-line">這筆應徵未提供作品連結、LinkedIn 或求職信。</p>
@@ -1627,6 +1709,13 @@ onBeforeUnmount(closeResumeFilePreview)
 </template>
 
 <style scoped>
+/* 應徵狀態 column added to the talent list; the shared grid in style.css only declares six tracks. */
+.talent-list-head,.talent-list-row{grid-template-columns:minmax(185px,1.35fr) minmax(115px,.95fr) minmax(105px,.8fr) minmax(120px,.95fr) minmax(100px,.75fr) minmax(72px,.55fr) 58px}
+.talent-list-application{min-width:0}.talent-list-application>.status{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.status[data-status="interview_ready"]{background:#e2f2eb;color:#28745f}.status[data-status="interview"]{background:#e4eff9;color:#3472a6}
+@media(max-width:1100px){.talent-list-head,.talent-list-row{grid-template-columns:minmax(0,1fr) auto}.talent-list-application{grid-column:1;grid-row:5}.talent-list-open{grid-row:2/6}}
+@media(max-width:560px){.talent-list-application{grid-column:1/-1}}
+.candidate-application-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:11px;padding-top:11px;border-top:1px dashed #dbe8e4}.candidate-application-actions .button{height:34px;font-size:11px}.candidate-application-actions>small{flex:1;min-width:150px;color:#7a8d87;font-size:11px;line-height:1.5}
 .intake-tab-bar{display:inline-flex;gap:6px;margin:0 0 16px;padding:5px;border:1px solid #dbe7e3;border-radius:12px;background:#eef4f2}.intake-tab{min-width:132px;padding:9px 18px;border:1px solid transparent;border-radius:9px;background:transparent;color:#5c716b;font-size:12px;font-weight:800;cursor:pointer}.intake-tab:hover{color:#165f55}.intake-tab.active{border-color:#71b8aa;background:#fff;color:#165f55;box-shadow:0 4px 12px rgba(24,95,84,.08)}
 .intake-manual-panel{display:block}.intake-manual-card{padding:18px 20px 16px}.intake-manual-card .section-head{margin-bottom:14px}.intake-manual-actions{display:flex;justify-content:flex-end;margin-top:16px}
 .manager-job-target{display:grid;gap:6px;margin:14px 16px 12px;padding:13px;border:1px solid #cfe2dc;border-radius:10px;background:#f8fbfa;color:#496c66;font-size:9px;font-weight:700}.manager-job-target select{width:100%;height:40px;border:1px solid #c9dcd7;border-radius:8px;background:#fff;padding:0 11px;color:#274f49;font-size:10px}.manager-job-target small{color:#7f918d;font-weight:400}.manager-job-target .target-warning{color:#a25e38}.dropzone:disabled{cursor:not-allowed;opacity:.62}.resume-target-summary{margin:14px 17px 0;padding:12px 14px;border:1px solid #c9e4da;border-radius:9px;background:#eef8f4;color:#285f56}.resume-target-summary small,.resume-target-summary strong{display:block}.resume-target-summary small{font-size:8px;color:#6e877f}.resume-target-summary strong{margin-top:3px;font-size:11px}.resume-target-summary p{margin:5px 0 0;font-size:8px;color:#668078}

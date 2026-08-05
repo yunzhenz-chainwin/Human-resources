@@ -128,6 +128,101 @@ def test_completed_requires_overall_rating_recommendation_and_nonblank_summary(
     assert client.post(endpoint, headers=headers, json=null_recommendation).status_code == 422
 
 
+def test_completed_accepts_overall_score_alone_and_enforces_its_range(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    endpoint = f"/api/v1/applications/{ids['engineering_application']}/interview-records"
+    headers = _headers(client, "hr")
+
+    payload = _completed_payload("hr")
+    payload.pop("overall_rating")
+    payload["overall_score"] = 87
+    created = client.post(endpoint, headers=headers, json=payload)
+    assert created.status_code == 201, created.text
+    assert created.json()["overall_score"] == 87
+    assert created.json()["overall_rating"] is None
+
+    for boundary in (0, 100):
+        bounded = _completed_payload("hr")
+        bounded.pop("overall_rating")
+        bounded["overall_score"] = boundary
+        response = client.post(endpoint, headers=headers, json=bounded)
+        assert response.status_code == 201, (boundary, response.text)
+        assert response.json()["overall_score"] == boundary
+
+    for out_of_range in (-1, 101):
+        invalid = _completed_payload("hr")
+        invalid["overall_score"] = out_of_range
+        response = client.post(endpoint, headers=headers, json=invalid)
+        assert response.status_code == 422, (out_of_range, response.text)
+
+    neither = _completed_payload("hr")
+    neither.pop("overall_rating")
+    assert client.post(endpoint, headers=headers, json=neither).status_code == 422
+
+    with testing_session() as db:
+        record = db.get(InterviewRecord, created.json()["id"])
+        assert record is not None
+        assert record.overall_score == 87
+        assert record.overall_rating is None
+
+
+def test_rating_only_record_stays_submittable_after_a_reopen(application_client) -> None:
+    """A record predating overall_score must survive reopen and resubmission."""
+
+    client, testing_session, ids = application_client
+    endpoint = f"/api/v1/applications/{ids['engineering_application']}/interview-records"
+    headers = _headers(client, "hr")
+
+    created = client.post(endpoint, headers=headers, json=_completed_payload("hr"))
+    assert created.status_code == 201, created.text
+    record_id = created.json()["id"]
+    assert created.json()["overall_rating"] == 4
+    assert created.json()["overall_score"] is None
+
+    record_endpoint = f"{endpoint}/{record_id}"
+    reopened = client.post(
+        record_endpoint + "/reopen",
+        headers=headers,
+        json={"reason": "補正舊制紀錄的敘述，總分欄位仍為空白"},
+    )
+    assert reopened.status_code == 200, reopened.text
+    assert reopened.json()["overall_score"] is None
+
+    resubmitted = client.patch(
+        record_endpoint,
+        headers=headers,
+        json={"status": "completed"},
+    )
+    assert resubmitted.status_code == 200, resubmitted.text
+    assert resubmitted.json()["overall_rating"] == 4
+    assert resubmitted.json()["overall_score"] is None
+    assert resubmitted.json()["revision_number"] == 2
+
+    # Clearing the only score present must still fail the completed contract.
+    reopened_again = client.post(
+        record_endpoint + "/reopen",
+        headers=headers,
+        json={"reason": "確認清空唯一分數欄位會被擋下"},
+    )
+    assert reopened_again.status_code == 200, reopened_again.text
+    assert (
+        client.patch(
+            record_endpoint,
+            headers=headers,
+            json={"status": "completed", "overall_rating": None},
+        ).status_code
+        == 422
+    )
+
+    with testing_session() as db:
+        record = db.get(InterviewRecord, record_id)
+        assert record is not None
+        assert record.overall_rating == 4
+        assert record.overall_score is None
+
+
 @pytest.mark.parametrize("record_status", ["planned", "in_progress", "cancelled", "no_show"])
 def test_non_completed_statuses_allow_partial_scorecards(
     application_client,

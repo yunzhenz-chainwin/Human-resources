@@ -138,6 +138,7 @@ _TABLE_REDACTED_COLUMNS: dict[str, frozenset[str]] = {
             "summary",
             "recommendation",
             "overall_rating",
+            "overall_score",
             "private_notes",
             "last_reopen_reason",
         }

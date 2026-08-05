@@ -45,12 +45,31 @@ sys.path.insert(0, backend_path)
 
 from app.db.session import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models.consent import ConsentNotice  # noqa: E402
+from app.services.consent import activate_notice, active_notice, next_version  # noqa: E402
 from app.services.initial_data import seed_initial_data  # noqa: E402
 from app.services.matching_benchmark import seed_matching_benchmark  # noqa: E402
 
 with SessionLocal() as database:
     seed_initial_data(database)
     seed_matching_benchmark(database)
+    # Product behaviour: the public career page withholds its consent checkbox
+    # until an administrator publishes a notice, and nothing seeds one -- the
+    # privacy text is a deliberate human decision, not a shipped default. The
+    # public-submission specs still need one, so publish a disposable notice
+    # here rather than weakening that rule in the application itself.
+    if active_notice(database) is None:
+        notice = ConsentNotice(
+            version=next_version(database),
+            title="E2E 測試用招募個資告知事項",
+            body="本告知事項僅供端對端測試使用，不含真實個人資料處理政策。",
+            purpose_code="e2e-test",
+            is_active=False,
+        )
+        database.add(notice)
+        database.flush()
+        activate_notice(database, notice)
+        database.commit()
 
 import uvicorn  # noqa: E402
 

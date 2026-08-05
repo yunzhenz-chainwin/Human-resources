@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 import { hrApi, type ApplicationDto, type RequisitionDto } from '../services/hrApi'
 import type { UserRole } from '../services/auth'
@@ -15,6 +15,14 @@ type InterviewRequest = {
   source: 'applicant' | 'talent_pool'
   applicationId: number | null
 }
+// Entry point handed in by another page (today: 人才庫) so the recruiter lands on one
+// candidate's interview card instead of searching the matching list again.
+type WorkspaceInterviewFocus = {
+  candidateId: number
+  candidateName: string
+  requisitionId: number
+  applicationId: number | null
+}
 
 const props = withDefaults(defineProps<{
   jobs: RequisitionDto[]
@@ -23,20 +31,24 @@ const props = withDefaults(defineProps<{
   canConfigureWeights?: boolean
   canManage?: boolean
   initialMode?: WorkspaceMode
+  initialFocus?: WorkspaceInterviewFocus | null
   refreshKey?: number
 }>(), {
   canConfigure: false,
   canConfigureWeights: false,
   canManage: false,
   initialMode: 'matching',
+  initialFocus: null,
   refreshKey: 0,
 })
 
-const mode = ref<WorkspaceMode>(props.initialMode)
-const selectedRequisitionId = ref<number | null>(props.jobs[0]?.id ?? null)
+// Seed the incoming focus synchronously so the interview card is already the one on screen
+// while `openInterview` re-resolves (and, when needed, creates) the application record.
+const mode = ref<WorkspaceMode>(props.initialFocus ? 'interviews' : props.initialMode)
+const selectedRequisitionId = ref<number | null>(props.initialFocus?.requisitionId ?? props.jobs[0]?.id ?? null)
 const selectedSource = ref<Exclude<MatchSource, 'all'>>('applicants')
-const focusedCandidateId = ref<number | null>(null)
-const focusedApplicationId = ref<number | null>(null)
+const focusedCandidateId = ref<number | null>(props.initialFocus?.candidateId ?? null)
+const focusedApplicationId = ref<number | null>(props.initialFocus?.applicationId ?? null)
 const interviewFocusRequestKey = ref(0)
 const pendingCandidateId = ref<number | null>(null)
 const bridgeError = ref('')
@@ -143,6 +155,13 @@ async function openInterview(request: InterviewRequest) {
     pendingCandidateId.value = null
   }
 }
+
+// A focus handed in from another page reuses the exact matching-page path, so the
+// "create the application if it does not exist yet" behaviour stays in one place.
+onMounted(() => {
+  if (!props.initialFocus) return
+  void openInterview({ ...props.initialFocus, source: 'talent_pool' })
+})
 </script>
 
 <template>

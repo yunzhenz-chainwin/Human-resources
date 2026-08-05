@@ -180,6 +180,14 @@ export type CandidateDetailDto = CandidateDto & {
   applications: CandidateApplicationDetailDto[]
   resumes: CandidateResumeSummaryDto[]
 }
+// job_applications.status values the UI reasons about. `interview_ready`（確定面試）is the HR
+// hand-off that unlocks the interview workspace for a candidate sourced from the talent pool.
+export type ApplicationStatus = 'submitted' | 'screening' | 'interview_ready' | 'interview' | 'interviewing' | 'offered' | 'hired' | 'rejected' | 'withdrawn'
+// Statuses that already grant access to the interview flow, so 「進入面試」 may be offered.
+export const INTERVIEW_ENTRY_STATUSES: readonly ApplicationStatus[] = ['interview_ready', 'interview', 'interviewing']
+export function isInterviewEntryStatus(status: string): boolean {
+  return (INTERVIEW_ENTRY_STATUSES as readonly string[]).includes(status)
+}
 export type ApplicationWrite = { candidate_id: number; requisition_id: number }
 export type ApplicationAssignmentWrite = { requisition_id: number }
 export type InterviewResult = 'pending' | 'advance' | 'hold' | 'rejected' | 'offered' | 'hired' | 'no_show' | 'cancelled'
@@ -223,6 +231,7 @@ export type InterviewRecordWrite = {
   summary?: string | null
   private_notes?: string | null
   recommendation?: InterviewRecommendation | null
+  overall_score?: number | null
   overall_rating?: number | null
 }
 export type InterviewRecordDto = InterviewRecordWrite & {
@@ -485,6 +494,10 @@ export const hrApi = {
   }),
   reassignApplication: (id: number, payload: ApplicationAssignmentWrite) => apiRequest<ApplicationDto>(`/applications/${id}/assignment`, {
     method: 'PATCH', body: JSON.stringify(payload),
+  }),
+  // HR-only hand-off that moves an application to `interview_ready`（確定面試）.
+  markApplicationInterviewReady: (applicationId: number) => apiRequest<ApplicationDto>(`/applications/${applicationId}/mark-interview-ready`, {
+    method: 'POST',
   }),
   downloadResume: (id: number) => apiBlob(`/resumes/${id}/file`),
   previewResume: (id: number) => apiBlob(`/resumes/${id}/preview`),

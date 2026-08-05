@@ -166,6 +166,11 @@ class JobApplication(TimestampMixin, Base):
     cover_letter: Mapped[str | None] = mapped_column(Text)
     linkedin_url: Mapped[str | None] = mapped_column(String(1000))
     portfolio_url: Mapped[str | None] = mapped_column(String(1000))
+    # Allowed values: submitted, screening, interview_ready, interview, offered,
+    # hired, rejected, withdrawn. "interview_ready" is set explicitly by HR
+    # ("確定面試") before any interview data exists, so the process can be gated on
+    # readiness; it upgrades to "interview" once a stage carries real data. No
+    # database CHECK governs this column, so the enumeration stays advisory.
     status: Mapped[str] = mapped_column(
         String(20), default="submitted", server_default="submitted", index=True
     )

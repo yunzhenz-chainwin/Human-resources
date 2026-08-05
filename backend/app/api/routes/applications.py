@@ -34,6 +34,10 @@ RESULT_APPLICATION_STATUSES = {
 ASSIGNABLE_REQUISITION_STATUSES = frozenset(
     {"draft", "submitted", "returned", "approved", "sourcing", "interviewing"}
 )
+# Only an application that has not started interviewing yet can be marked
+# "確定面試". Anything further along already carries its own status.
+PRE_INTERVIEW_APPLICATION_STATUSES = frozenset({"submitted", "screening"})
+INTERVIEW_READY_STATUS = "interview_ready"
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -209,8 +213,14 @@ def _sync_application_status(application: JobApplication) -> None:
     ) or RESULT_APPLICATION_STATUSES.get(application.hr_interview_result or "")
     if result_status is not None:
         application.status = result_status
-    elif _stage_has_data(application, "hr") or _stage_has_data(application, "manager"):
+        return
+    if _stage_has_data(application, "hr") or _stage_has_data(application, "manager"):
         application.status = "interview"
+        return
+    # No interview data and no decision yet: leave the status alone. An explicit
+    # "確定面試" mark (interview_ready) must survive stage edits that only clear
+    # fields, otherwise the application would silently fall back out of the state
+    # the interview hand-off is gated on.
 
 
 @router.get("", response_model=list[ApplicationRead])
@@ -413,6 +423,55 @@ def update_application_assignment(
         ) from exc
     db.refresh(application)
     return _application_read(application, candidate, target_requisition, user)
+
+
+@router.post("/{application_id}/mark-interview-ready", response_model=ApplicationRead)
+def mark_application_interview_ready(
+    application_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_recruiting_manager),
+) -> ApplicationRead:
+    """HR confirms an application is ready to interview before any stage has data.
+
+    Without this, an application can only reach "interview" once interview data
+    already exists, so nothing can be gated on "ready to interview".
+    """
+
+    application, candidate, requisition = _application_row(db, application_id)
+    if application.status == INTERVIEW_READY_STATUS:
+        return _application_read(application, candidate, requisition, user)
+    if _stage_has_data(application, "hr") or _stage_has_data(application, "manager"):
+        raise HTTPException(
+            status_code=409,
+            detail="Application already holds interview data",
+        )
+    if application.status not in PRE_INTERVIEW_APPLICATION_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Only a pre-interview application can be marked ready to interview",
+        )
+
+    previous_status = application.status
+    application.status = INTERVIEW_READY_STATUS
+    write_audit(
+        db,
+        user,
+        "application.mark_interview_ready",
+        "job_application",
+        application.id,
+        requisition.department_id,
+        details={
+            "candidate_id": application.candidate_id,
+            "requisition_id": application.requisition_id,
+            "status": {"from": previous_status, "to": application.status},
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    db.commit()
+    db.refresh(application)
+    return _application_read(application, candidate, requisition, user)
 
 
 def _update_interview_stage(

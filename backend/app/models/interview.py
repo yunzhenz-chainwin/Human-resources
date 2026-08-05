@@ -34,6 +34,10 @@ class InterviewRecord(TimestampMixin, Base):
             name="valid_overall_rating",
         ),
         CheckConstraint(
+            "overall_score IS NULL OR overall_score BETWEEN 0 AND 100",
+            name="valid_overall_score",
+        ),
+        CheckConstraint(
             "question_plan_version IS NULL OR question_plan_version >= 1",
             name="valid_question_plan_version",
         ),
@@ -63,6 +67,10 @@ class InterviewRecord(TimestampMixin, Base):
     private_notes: Mapped[str | None] = mapped_column(Text)
     recommendation: Mapped[str | None] = mapped_column(String(20))
     overall_rating: Mapped[int | None] = mapped_column(Integer)
+    # Interviewer-entered total score on a 0-100 scale. Independent of the 1-5
+    # overall_rating: records created before this column exist keep it NULL and
+    # are never derived from the rating, which the interviewer never entered.
+    overall_score: Mapped[int | None] = mapped_column(Integer)
     submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     submitted_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
