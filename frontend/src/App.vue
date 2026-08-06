@@ -490,6 +490,12 @@ function showError(cause: unknown) {
   error.value = cause instanceof Error ? cause.message : '發生未預期錯誤'
 }
 
+// `error` stays the only error state; this merely picks which open surface renders it. The page
+// banner lives in .content, below every fixed overlay declared here (.modal-overlay z-index 100,
+// .drawer-overlay z-index 80), so a failure raised while one of them is open has to move up with it
+// instead of being painted out of sight behind the scrim — and it is never rendered in two places.
+const errorSurface = computed<'modal' | 'drawer' | 'page'>(() => dialog.value ? 'modal' : selectedCandidate.value ? 'drawer' : 'page')
+
 async function refreshAll(silent = false) {
   if (!authSession.authenticated.value) return
   loading.value = true
@@ -632,6 +638,8 @@ function resetCandidateForm() {
 }
 
 async function openCandidate(candidate?: CandidateDto) {
+  // Dialogs now render `error` themselves, so a message from an earlier attempt must not reopen with them.
+  error.value = ''
   if (candidate && !applicationsLoaded.value && ['admin', 'hr'].includes(authState.user?.role || '')) {
     try {
       applications.value = (await hrApi.applications()).data
@@ -850,6 +858,7 @@ const resumeFilePreviewIsPdf = computed(() => isPdfResume(resumeFilePreview.valu
 const resumeFilePreviewIsGenerated = computed(() => resumeFilePreview.value?.document_origin === 'system_generated')
 
 function openActivity(candidate: CandidateDetailDto) {
+  error.value = ''
   selectedCandidate.value = candidate
   selectCandidateDetailTab('activity')
   const managerMessage = authState.user?.role === 'manager'
@@ -864,6 +873,7 @@ function openActivity(candidate: CandidateDetailDto) {
 async function saveActivity() {
   if (!selectedCandidate.value || !activityForm.content.trim()) return showError('請填寫活動紀錄')
   saving.value = true
+  error.value = ''
   try {
     const managerMessage = authState.user?.role === 'manager'
     const payload = managerMessage
@@ -1173,6 +1183,7 @@ async function reviewResumeSource(value: ResumeSource) {
 }
 
 function openJob(job?: RequisitionDto) {
+  error.value = ''
   clearJobComplianceLint()
   editingJob.value = job || null
   Object.assign(jobForm, job ? {
@@ -1190,6 +1201,7 @@ function openJob(job?: RequisitionDto) {
 async function saveJob() {
   if (!jobForm.title.trim() || !jobForm.jd.trim()) return showError('職缺名稱與職務說明為必填')
   saving.value = true
+  error.value = ''
   try {
     const payload: RequisitionWrite = {
       req_no: jobForm.req_no, title: jobForm.title, department_id: jobForm.department_id, employment_type: jobForm.employment_type,
@@ -1357,7 +1369,7 @@ onBeforeUnmount(closeResumeFilePreview)
       </header>
 
       <div class="content">
-        <div v-if="error" class="alert error-alert" role="alert"><span>!</span><p><strong>操作未完成</strong>{{ error }}</p><button aria-label="關閉錯誤訊息" @click="error = ''">×</button></div>
+        <div v-if="error && errorSurface === 'page'" class="alert error-alert" role="alert"><span>!</span><p><strong>操作未完成</strong>{{ error }}</p><button aria-label="關閉錯誤訊息" @click="error = ''">×</button></div>
 
         <DepartmentWorkspace v-if="page === 'department'" />
 
@@ -1612,6 +1624,8 @@ onBeforeUnmount(closeResumeFilePreview)
           <div v-if="authState.user.role !== 'manager'" class="candidate-detail-danger-actions"><button class="button danger" @click="archiveCandidate(selectedCandidate)">封存</button><button class="button danger" :disabled="saving" @click="removeCandidate(selectedCandidate)">刪除人才</button></div>
         </div>
 
+        <div v-if="error && errorSurface === 'drawer'" class="alert error-alert dialog-alert" role="alert" data-testid="drawer-error"><span>!</span><p><strong>操作未完成</strong>{{ error }}</p><button type="button" aria-label="關閉錯誤訊息" @click="error = ''">×</button></div>
+
         <div ref="candidateDetailBody" class="detail-body candidate-detail-body">
           <section id="candidate-panel-profile" v-show="candidateDetailTab === 'profile'" role="tabpanel" aria-labelledby="candidate-tab-profile" data-testid="candidate-detail-panel-profile">
             <div class="candidate-section-heading"><div><small>PROFILE</small><h3>基本資料</h3><p>聯絡方式、保存期限與人才經歷集中在這一頁。</p></div></div>
@@ -1714,6 +1728,8 @@ onBeforeUnmount(closeResumeFilePreview)
         <div class="jd-compliance-head"><span aria-hidden="true">⚠</span><div><strong>可能涉及就業歧視用語（{{ jobComplianceFindings.length }} 項）</strong><small>依就業服務法第 5 條、中高齡就業促進法、性別平等工作法，職缺不得限制受保護特徵。以下為系統偵測提示，仍需人工／法務判斷，警示不會阻擋儲存。</small></div></div>
         <ul class="jd-compliance-list"><li v-for="(finding, index) in jobComplianceFindings" :key="index"><span class="jd-compliance-tag">{{ jobComplianceLabel(finding.category) }}</span><span class="jd-compliance-matched">「{{ finding.matched }}」</span><small class="jd-compliance-where">（{{ finding.field === 'title' ? '職缺名稱' : finding.field === 'summary' ? '職缺摘要' : '職務說明' }}）</small><p>{{ finding.suggestion }}</p></li></ul>
       </div>
+      <!-- Sits directly above the submit button, where the eye already is; type="button" keeps the dismiss out of the form's submit path. -->
+      <div v-if="error && errorSurface === 'modal'" class="alert error-alert dialog-alert" role="alert" data-testid="dialog-error"><span>!</span><p><strong>操作未完成</strong>{{ error }}</p><button type="button" aria-label="關閉錯誤訊息" @click="error = ''">×</button></div>
       <footer><button type="button" class="button secondary" @click="dialog = null">取消</button><button type="submit" class="button primary" data-testid="activity-submit" :disabled="saving || (dialog === 'candidate' && candidateAssignmentInvalid)">{{ saving ? '儲存中…' : dialog === 'activity' ? '送出共享留言' : '儲存至資料庫' }}</button></footer></form></div>
 
     <Transition name="toast"><div v-if="notice" class="toast" role="status" aria-live="polite"><span>✓</span>{{ notice }}</div></Transition>
@@ -1733,6 +1749,8 @@ onBeforeUnmount(closeResumeFilePreview)
 .manager-job-target{display:grid;gap:6px;margin:14px 16px 12px;padding:13px;border:1px solid #cfe2dc;border-radius:10px;background:#f8fbfa;color:#496c66;font-size:9px;font-weight:700}.manager-job-target select{width:100%;height:40px;border:1px solid #c9dcd7;border-radius:8px;background:#fff;padding:0 11px;color:#274f49;font-size:10px}.manager-job-target small{color:#7f918d;font-weight:400}.manager-job-target .target-warning{color:#a25e38}.dropzone:disabled{cursor:not-allowed;opacity:.62}.resume-target-summary{margin:14px 17px 0;padding:12px 14px;border:1px solid #c9e4da;border-radius:9px;background:#eef8f4;color:#285f56}.resume-target-summary small,.resume-target-summary strong{display:block}.resume-target-summary small{font-size:8px;color:#6e877f}.resume-target-summary strong{margin-top:3px;font-size:11px}.resume-target-summary p{margin:5px 0 0;font-size:8px;color:#668078}
 .shared-activity-hint{margin:-5px 0 14px;color:#70827e;font-size:9px;line-height:1.6}.shared-timeline article{padding:12px 12px 12px 23px;border:1px solid #e0ebe7;border-radius:9px;background:#fbfdfc}.shared-timeline article[data-author-role="hr"]{border-left:3px solid #19917e}.shared-timeline article[data-author-role="manager"]{border-left:3px solid #d59b32}.timeline-author{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}.timeline-author strong{color:#174f48;font-size:10px}.timeline-author span{padding:3px 6px;border-radius:99px;background:#edf5f2;color:#56706a;font-size:7px}.shared-timeline article>small{display:block;color:#80908c}.shared-timeline article>p{white-space:pre-wrap;overflow-wrap:anywhere}
 .candidate-assignment-list{display:flex;flex-wrap:wrap;gap:6px;padding:10px 12px;border:1px solid #d8e7e2;border-radius:9px;background:#f8fbfa}.candidate-assignment-list>small{flex-basis:100%;color:#6e827d}.candidate-assignment-list>span{padding:5px 8px;border-radius:99px;background:#e6f2ee;color:#27675e;font-size:8px}.form-grid label>small{display:block;margin-top:5px;color:#788b86;font-size:8px;line-height:1.45}.form-grid label>.assignment-warning{color:#a45445;font-weight:700}.form-grid label>.inline-check{display:inline-block;width:auto;height:auto;margin:0 6px 0 0;padding:0;vertical-align:-1px}.form-grid label>.inline-check:disabled{cursor:not-allowed;opacity:.55}
+/* Same .error-alert treatment as the page banner, re-flowed for the modal card and the drawer column. */
+.dialog-alert{flex:0 0 auto;margin:14px 16px 4px}.dialog-alert>p{overflow-wrap:anywhere}
 .jd-compliance-alert{margin:14px 16px 4px;padding:13px 15px;border:1px solid #e4c579;border-radius:11px;background:#fff8e8;color:#6e561f}.jd-compliance-head{display:flex;align-items:flex-start;gap:11px}.jd-compliance-head>span{flex:0 0 auto;width:26px;height:26px;display:grid;place-items:center;border-radius:7px;background:#e6a532;color:#fff;font-size:14px;font-weight:900}.jd-compliance-head strong{display:block;color:#6a4d13;font-size:12px}.jd-compliance-head small{display:block;margin-top:4px;color:#8a7233;font-size:9px;line-height:1.6}.jd-compliance-list{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:9px}.jd-compliance-list>li{padding:9px 11px;border:1px solid #ecd6a0;border-radius:9px;background:#fffdf6}.jd-compliance-tag{display:inline-block;padding:3px 7px;border-radius:99px;background:#e6a532;color:#fff;font-size:8px;font-weight:800;vertical-align:middle}.jd-compliance-matched{margin-left:6px;color:#a2381f;font-size:10px;font-weight:800}.jd-compliance-where{margin-left:4px;color:#94805a;font-size:8px}.jd-compliance-list p{margin:6px 0 0;color:#5f6f4e;font-size:9px;line-height:1.6}
 .candidate-profile-block{margin:18px 0;padding-top:4px}.candidate-profile-block>h3,.candidate-history-grid h3{margin:0 0 10px}.candidate-application-list,.candidate-resume-list{display:grid;gap:9px}.candidate-application-list>article,.candidate-resume-list>article,.candidate-history-card{padding:12px;border:1px solid #dce9e5;border-radius:10px;background:#fbfdfc}.candidate-application-list article>header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.candidate-application-list header div>*{display:block}.candidate-application-list header small,.candidate-application-list header span,.candidate-history-card small,.candidate-history-card span,.candidate-resume-list span{color:#778a85;font-size:8px}.candidate-application-list header strong,.candidate-history-card strong,.candidate-resume-list strong{margin:3px 0;color:#214f49;font-size:10px}.candidate-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}.candidate-links a,.candidate-resume-list a{color:#087b6c;font-size:8px;font-weight:700;text-decoration:none}.candidate-cover-letter{margin-top:10px;padding:9px;border-radius:8px;background:#f1f7f5}.candidate-cover-letter small{color:#6f827d;font-size:8px}.candidate-cover-letter p,.candidate-summary,.candidate-history-card p{margin:5px 0 0;white-space:pre-wrap;color:#405f59;font-size:9px;line-height:1.65}.candidate-empty-line{margin:8px 0 0;color:#879691;font-size:8px}.candidate-skill-list{display:flex;flex-wrap:wrap;gap:6px}.candidate-skill-list span{padding:5px 8px;border-radius:99px;background:#e6f2ee;color:#27675e;font-size:8px;font-weight:700}.candidate-history-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.candidate-history-card{margin-bottom:8px}.candidate-history-card>*{display:block}.candidate-resume-list>article{display:flex;align-items:center;justify-content:space-between;gap:10px}.candidate-resume-list article>div:first-child>*{display:block}.candidate-resume-list article>div:last-child{display:flex;align-items:center;gap:8px}.candidate-resume-preview{margin-top:10px;padding:12px;border:1px solid #cfe3dc;border-radius:10px;background:#f4faf8}.candidate-resume-preview>header{display:flex;align-items:center;justify-content:space-between}.candidate-resume-preview>header div>*{display:block}.candidate-resume-preview>header button{border:0;background:none;color:#607772;font-size:18px}.resume-highlight-list{display:grid;gap:7px;margin-top:10px}.resume-highlight-list>div{padding:8px;border-radius:7px;background:#fff}.resume-highlight-list small{color:#71847f;font-size:7px}.resume-highlight-list p{margin:3px 0 0;white-space:pre-wrap;color:#345b54;font-size:8px;line-height:1.55}.candidate-resume-preview pre{max-height:240px;overflow:auto;margin:10px 0 0;padding:10px;border-radius:7px;background:#173b36;color:#e8f5f1;white-space:pre-wrap;font:8px/1.6 monospace}@media(max-width:700px){.candidate-history-grid{grid-template-columns:1fr}.candidate-resume-list>article{align-items:flex-start;flex-direction:column}}
 .resume-origin-badge{display:inline-flex!important;width:max-content;margin-top:5px;padding:3px 6px;border-radius:99px;font-size:7px!important;font-style:normal;font-weight:800}.resume-origin-badge.generated{background:#e1f2eb;color:#1b7463}.resume-origin-badge.missing{background:#fff0df;color:#9b612c}.candidate-resume-file-error{margin:9px 0 0}.resume-preview-trigger{font-weight:800}.resume-file-preview-overlay{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:18px;background:rgba(10,34,31,.7);backdrop-filter:blur(4px)}.resume-file-preview-dialog{display:flex;flex-direction:column;width:min(1120px,100%);height:min(92vh,920px);overflow:hidden;border-radius:16px;background:#fff;box-shadow:0 28px 90px rgba(5,27,24,.4)}.resume-file-preview-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:17px 20px;border-bottom:1px solid #dfe9e6}.resume-file-preview-dialog>header small{color:#218174;font-size:8px;font-weight:800;letter-spacing:1px}.resume-file-preview-dialog>header h2{margin:4px 0;font-size:17px;color:#173f3a}.resume-file-preview-dialog>header p{margin:0;color:#71837f;font-size:9px}.resume-file-preview-actions{display:flex;align-items:center;gap:8px}.resume-file-preview-close{width:38px;height:38px;border:0;background:transparent;color:#647672;font-size:26px}.resume-file-preview-canvas{flex:1;min-height:0;padding:12px;background:#dce3e1}.resume-file-preview-canvas iframe{width:100%;height:100%;border:0;border-radius:7px;background:#fff}.resume-word-preview{flex:1;min-height:0;overflow:auto;padding:18px 22px;background:#f5f8f7}.resume-preview-notice{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #ead9b8;border-radius:9px;background:#fff8e9;color:#765c2c}.resume-preview-notice strong{font-size:10px;white-space:nowrap}.resume-preview-notice span{font-size:9px;line-height:1.55}.resume-word-preview .resume-highlight-list{grid-template-columns:repeat(2,minmax(0,1fr))}.resume-word-preview pre{margin:12px 0 0;padding:16px;border:1px solid #dce7e3;border-radius:9px;background:#fff;color:#294f49;white-space:pre-wrap;overflow-wrap:anywhere;font:10px/1.75 monospace}.resume-file-preview-dialog>footer{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 18px;border-top:1px solid #dfe9e6}.resume-file-preview-dialog>footer span{color:#71837f;font-size:8px}@media(max-width:700px){.resume-file-preview-overlay{padding:0}.resume-file-preview-dialog{width:100%;height:100vh;border-radius:0}.resume-file-preview-dialog>header{align-items:stretch;flex-direction:column}.resume-file-preview-actions{justify-content:space-between}.resume-word-preview .resume-highlight-list{grid-template-columns:1fr}.resume-file-preview-dialog>footer span{display:none}}
