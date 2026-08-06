@@ -196,6 +196,8 @@ export const matchingReportsApi = {
     }),
   matches: (requisitionId: number, includeIneligible = true) =>
     request<MatchList>(`/requisitions/${requisitionId}/matches?include_ineligible=${includeIneligible}`),
+  candidateMatch: (requisitionId: number, candidateId: number) =>
+    request<MatchDto>(`/requisitions/${requisitionId}/candidates/${candidateId}/match`),
   rematch: (requisitionId: number) =>
     request<MatchList>(`/requisitions/${requisitionId}/rematch`, { method: 'POST' }),
   readiness: (requisitionId: number, source: MatchSource = 'all') =>

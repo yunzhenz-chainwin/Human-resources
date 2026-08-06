@@ -1299,11 +1299,13 @@ async function loadMatchScore(application: ApplicationDto) {
   if (application.id in matchScoreByApplication.value) return
   matchScoreLoading.value = true
   try {
-    const matches = (await matchingReportsApi.matches(application.requisition_id, true)).items
-    const hit = matches.find(item => item.candidate_id === application.candidate_id)
+    const match = await matchingReportsApi.candidateMatch(
+      application.requisition_id,
+      application.candidate_id,
+    )
     matchScoreByApplication.value = {
       ...matchScoreByApplication.value,
-      [application.id]: hit ? Number(hit.total_score) : null,
+      [application.id]: Number(match.total_score),
     }
   } catch {
     matchScoreByApplication.value = { ...matchScoreByApplication.value, [application.id]: null }
