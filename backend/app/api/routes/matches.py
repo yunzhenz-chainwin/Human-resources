@@ -151,9 +151,18 @@ def _effective_source(user: User, source: MatchSource) -> MatchSource:
     return source
 
 
+def _visible_candidate_conditions(user: User) -> list:
+    """Who this caller may see at all: active people inside their candidate scope.
+
+    The permission half of _candidate_conditions below, split out so the single-match
+    read enforces the very same rule as the list rather than a restatement of it.
+    """
+    return [Candidate.deleted_at.is_(None), candidate_scope_clause(user)]
+
+
 def _candidate_conditions(user: User, requisition_id: int, source: MatchSource) -> list:
     effective = _effective_source(user, source)
-    conditions = [Candidate.deleted_at.is_(None), candidate_scope_clause(user)]
+    conditions = _visible_candidate_conditions(user)
     applied = _application_exists(requisition_id)
     if effective == "applicants":
         conditions.append(applied)
@@ -254,6 +263,51 @@ def list_matches(
         statement = statement.limit(limit)
     items = list(db.scalars(statement).all())
     return MatchList(items=[_match_read(item, user) for item in items], total=total)
+
+
+@router.get(
+    "/requisitions/{requisition_id}/candidates/{candidate_id}/match",
+    response_model=MatchRead,
+)
+def get_candidate_match(
+    requisition_id: int,
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> MatchRead:
+    """Read one candidate's match on this requisition without listing the rest.
+
+    The interview card needs a single resume score; pulling
+    ``GET /requisitions/{id}/matches`` for it downloads every candidate on the
+    requisition. Same row, same total_score, same MatchRead shape as one item of
+    that list -- including the manager contact masking _match_read applies.
+
+    Permissions are the list's, not a restatement: the requisition goes through
+    _requisition (404 unknown, 403 outside the department, exactly as the list
+    does), and the candidate through _visible_candidate_conditions, the same
+    scope clause the list filters on. min_score / status / include_ineligible /
+    source are the list's display filters rather than permissions, so they are
+    not applied here; the invariant that holds is that this returns a row only if
+    some list query by the same caller would return it too. Anything else -- no
+    match computed, a soft-deleted candidate, someone outside the caller's
+    candidate scope -- is 404, so the response never confirms that a pair the
+    caller may not see exists.
+    """
+
+    _requisition(db, requisition_id, user)
+    result = db.scalar(
+        select(MatchResult)
+        .join(Candidate, Candidate.id == MatchResult.candidate_id)
+        .options(joinedload(MatchResult.candidate))
+        .where(
+            MatchResult.requisition_id == requisition_id,
+            MatchResult.candidate_id == candidate_id,
+            *_visible_candidate_conditions(user),
+        )
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Match not found")
+    return _match_read(result, user)
 
 
 @router.get(

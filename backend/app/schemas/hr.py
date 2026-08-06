@@ -197,6 +197,11 @@ class RequisitionCreate(BaseModel):
     salary_type: str | None = None
     headcount: int = Field(default=1, ge=1)
     status: str = "draft"
+    # Only HR may open a requisition with blind review already switched off, same
+    # rule the route enforces on RequisitionUpdate. None means "no decision in this
+    # request", which leaves the model default (blind review on) in place -- the
+    # column is NOT NULL, so an explicit null cannot be stored either way.
+    blind_review_enabled: bool | None = None
 
     @field_validator("status")
     @classmethod

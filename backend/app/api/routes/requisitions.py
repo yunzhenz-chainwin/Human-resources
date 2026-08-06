@@ -37,6 +37,14 @@ _PUBLISHED_STATUSES = frozenset({"approved", "sourcing", "interviewing"})
 # Upper bound for an explicitly requested page size.
 _MAX_PAGE_SIZE = 200
 
+# The rule a requisition gets when nobody decides one: blind review on. Mirrors
+# JobRequisition.blind_review_enabled's column default, which is what actually
+# writes the row; the create path needs the value up front to tell a real decision
+# apart from a client restating the default. The two cannot drift silently -- the
+# create tests pin both ends, since a create with no flag must come back blind and
+# a non-HR caller restating that same default must not be refused.
+DEFAULT_BLIND_REVIEW_ENABLED = True
+
 
 def _apply_status_timestamps(requisition: JobRequisition, new_status: str) -> None:
     """Stamp workflow timestamps as a requisition enters ``new_status``.
@@ -89,11 +97,29 @@ def list_requisitions(
 @router.post("", response_model=RequisitionRead, status_code=status.HTTP_201_CREATED)
 def create_requisition(
     payload: RequisitionCreate,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_manager),
 ) -> JobRequisition:
     enforce_department_scope(user, payload.department_id)
     data = payload.model_dump()
+    # The column is NOT NULL, so an explicit null carries no decision at all and the
+    # model default has to stay in charge -- same handling as the PATCH path.
+    requested_blind_review = data.pop("blind_review_enabled", None)
+    # Only a real decision is policed, exactly as on PATCH: a new requisition starts
+    # blind, so a client that posts the whole form and restates that default decides
+    # nothing and must not 403. The PATCH lock rule has nothing to apply to here --
+    # blind_review_locked is derived from submitted interviews, and a requisition
+    # that does not exist yet has no applications and therefore no interviews (the
+    # create tests assert the flag comes back unlocked).
+    blind_review_change = (
+        requested_blind_review is not None
+        and requested_blind_review != DEFAULT_BLIND_REVIEW_ENABLED
+    )
+    if blind_review_change and user.role != "hr":
+        raise HTTPException(status_code=403, detail="僅人資可設定面試評分揭露規則")
+    if requested_blind_review is not None:
+        data["blind_review_enabled"] = requested_blind_review
     if data["status"] not in REQUISITION_STATUSES:
         raise HTTPException(status_code=422, detail="未知的需求單狀態")
     if data["status"] not in {"draft", "submitted"}:
@@ -110,6 +136,32 @@ def create_requisition(
     requisition = JobRequisition(**data)
     db.add(requisition)
     try:
+        # Flush first so the audit below can reference the new id, and so a duplicate
+        # req_no still surfaces as the same 409 it always did.
+        db.flush()
+        if blind_review_change:
+            # Opening a requisition already un-blinded is the same decision as
+            # relaxing it later, and stays attributable the same way.
+            write_audit(
+                db,
+                user,
+                "requisition.blind_review.update",
+                "job_requisition",
+                requisition.id,
+                requisition.department_id,
+                details={
+                    "req_no": requisition.req_no,
+                    "blind_review_enabled": {
+                        # "from" is the default a new requisition would have had;
+                        # there is no earlier stored value to report.
+                        "from": DEFAULT_BLIND_REVIEW_ENABLED,
+                        "to": requisition.blind_review_enabled,
+                    },
+                    "on_create": True,
+                },
+                ip_address=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+            )
         db.commit()
     except IntegrityError as exc:
         db.rollback()

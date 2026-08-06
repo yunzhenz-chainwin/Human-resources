@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import select
 from test_application_interviews import _headers, application_client
 
-from app.models import InterviewRecord, JobApplication, User
+from app.models import InterviewRecord, JobApplication, JobRequisition, User
 from app.models.security import AuditLog
 
 Stage = Literal["hr", "manager"]
@@ -875,6 +875,145 @@ def test_only_hr_may_change_the_blind_review_rule(application_client) -> None:
     assert logs[0].actor_user_id == hr_user_id
     assert logs[0].created_at is not None
     assert logs[0].details["blind_review_enabled"] == {"from": True, "to": False}
+
+
+def _new_requisition(req_no: str, department_id: int, **overrides) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "req_no": req_no,
+        "title": "新產品設計師",
+        "department_id": department_id,
+        "employment_type": "full_time",
+        "work_city": "台北市",
+        "jd": "負責設計流程與使用者研究。",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _blind_review_audits(db, requisition_id: int | None = None) -> list[AuditLog]:
+    conditions = [
+        AuditLog.action == "requisition.blind_review.update",
+        AuditLog.resource_type == "job_requisition",
+    ]
+    if requisition_id is not None:
+        conditions.append(AuditLog.resource_id == str(requisition_id))
+    return list(db.scalars(select(AuditLog).where(*conditions)).all())
+
+
+def test_hr_may_create_a_requisition_with_blind_review_already_off(
+    application_client,
+) -> None:
+    """The rule is settable at create time, so nobody has to edit a new job to fix it."""
+
+    client, testing_session, ids = application_client
+    hr_headers = _headers(client, "hr")
+    created = client.post(
+        "/api/v1/requisitions",
+        headers=hr_headers,
+        json=_new_requisition("APP-DES-900", ids["design"], blind_review_enabled=False),
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["blind_review_enabled"] is False
+    # The PATCH lock has nothing to apply to yet: a requisition created a moment ago
+    # has no applications, so it cannot carry a submitted interview.
+    assert created.json()["blind_review_locked"] is False
+
+    requisition_id = created.json()["id"]
+    stored = client.get(f"/api/v1/requisitions/{requisition_id}", headers=hr_headers)
+    assert stored.status_code == 200, stored.text
+    assert stored.json()["blind_review_enabled"] is False
+    assert stored.json()["blind_review_locked"] is False
+
+    with testing_session() as db:
+        logs = _blind_review_audits(db, requisition_id)
+        hr_user_id = db.scalar(select(User.id).where(User.username == "hr"))
+    assert len(logs) == 1
+    assert logs[0].actor_user_id == hr_user_id
+    assert logs[0].department_id == ids["design"]
+    assert logs[0].created_at is not None
+    assert logs[0].details["req_no"] == "APP-DES-900"
+    assert logs[0].details["blind_review_enabled"] == {"from": True, "to": False}
+
+    # Auditing the decision means the row has to be flushed before the commit, which
+    # must not change how a duplicate 需求單號 reports itself.
+    duplicate = client.post(
+        "/api/v1/requisitions",
+        headers=hr_headers,
+        json=_new_requisition("APP-DES-900", ids["design"]),
+    )
+    assert duplicate.status_code == 409, duplicate.text
+    assert duplicate.json()["detail"] == "需求單號重複或關聯資料不存在"
+
+
+def test_only_hr_may_create_a_requisition_with_blind_review_off(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    admin_headers = _headers(client, "admin")
+    forbidden = client.post(
+        "/api/v1/requisitions",
+        headers=admin_headers,
+        json=_new_requisition("APP-DES-901", ids["design"], blind_review_enabled=False),
+    )
+    assert forbidden.status_code == 403, forbidden.text
+    assert forbidden.json()["detail"] == "僅人資可設定面試評分揭露規則"
+    # A refused decision leaves no half-created requisition and no audit trail.
+    with testing_session() as db:
+        refused = db.scalar(
+            select(JobRequisition).where(JobRequisition.req_no == "APP-DES-901")
+        )
+        assert refused is None
+        assert _blind_review_audits(db) == []
+
+    # Restating the default is not a decision, exactly as on PATCH, so an admin whose
+    # client posts the whole form keeps working.
+    restated = client.post(
+        "/api/v1/requisitions",
+        headers=admin_headers,
+        json=_new_requisition("APP-DES-902", ids["design"], blind_review_enabled=True),
+    )
+    assert restated.status_code == 201, restated.text
+    assert restated.json()["blind_review_enabled"] is True
+
+    # Managers never reach the rule at all: they cannot create here in the first place.
+    for username in ("design-manager", "engineering-manager", "it"):
+        blocked = client.post(
+            "/api/v1/requisitions",
+            headers=_headers(client, username),
+            json=_new_requisition("APP-DES-903", ids["design"], blind_review_enabled=False),
+        )
+        assert blocked.status_code == 403, (username, blocked.text)
+
+
+def test_a_created_requisition_stays_blind_when_the_flag_is_absent(
+    application_client,
+) -> None:
+    client, testing_session, ids = application_client
+    hr_headers = _headers(client, "hr")
+    absent = client.post(
+        "/api/v1/requisitions",
+        headers=hr_headers,
+        json=_new_requisition("APP-DES-904", ids["design"]),
+    )
+    assert absent.status_code == 201, absent.text
+    assert absent.json()["blind_review_enabled"] is True
+    assert absent.json()["blind_review_locked"] is False
+
+    # An explicit null decides nothing either: the column is NOT NULL, so the model
+    # default has to stay in charge.
+    explicit_null = client.post(
+        "/api/v1/requisitions",
+        headers=hr_headers,
+        json=_new_requisition("APP-DES-905", ids["design"], blind_review_enabled=None),
+    )
+    assert explicit_null.status_code == 201, explicit_null.text
+    assert explicit_null.json()["blind_review_enabled"] is True
+
+    # Nothing decided, nothing audited. Together with the two tests above this also
+    # pins the create path's idea of the default to the column default: move one
+    # without the other and one of the three fails.
+    with testing_session() as db:
+        assert _blind_review_audits(db) == []
 
 
 def test_masked_field_list_is_unchanged_while_blind_review_is_on(

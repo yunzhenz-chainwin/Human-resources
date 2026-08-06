@@ -46,6 +46,12 @@ try {
             if ($LASTEXITCODE -ne 0) {
                 throw "Database migration failed with exit code $LASTEXITCODE."
             }
+            # run_backend.py enables uvicorn's reloader by default because it is
+            # primarily the local dev launcher and a stale process there has cost
+            # real debugging time. As a SYSTEM autostart service that default is
+            # wrong: the reloader spawns a child process the service manager does
+            # not know about, and watches the source tree for the life of the host.
+            $env:BACKEND_RELOAD = "0"
             & $python run_backend.py
             $exitCode = $LASTEXITCODE
         }

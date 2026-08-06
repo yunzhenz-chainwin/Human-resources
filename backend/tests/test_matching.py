@@ -223,6 +223,109 @@ def test_rematch_ranks_and_preserves_manual_status(matching_client) -> None:
     assert sum(not item["gate_passed"] for item in all_results["items"]) == 2
 
 
+def test_single_candidate_match_read_returns_the_same_row_as_the_list(
+    matching_client,
+) -> None:
+    """The narrow read exists so one interview card need not download every match."""
+
+    client, testing_session = matching_client
+    assert client.post("/api/v1/requisitions/1/rematch").status_code == 200
+    listed = client.get(
+        "/api/v1/requisitions/1/matches", params={"include_ineligible": "true"}
+    )
+    assert listed.status_code == 200, listed.text
+    items = listed.json()["items"]
+    assert len(items) == 4
+
+    for item in items:
+        single = client.get(
+            f"/api/v1/requisitions/1/candidates/{item['candidate_id']}/match"
+        )
+        assert single.status_code == 200, single.text
+        # Same total_score semantics because it is literally the same serialized row,
+        # including the gate-failed candidates the list only shows on request.
+        assert single.json() == item
+
+    # Nothing to report is 404, never an empty score: a candidate who was never
+    # scored against this requisition, and a requisition that does not exist.
+    with testing_session() as db:
+        db.add(Candidate(code="T-MATCH-5", name="Unscored", status="new"))
+        db.commit()
+        unscored_id = db.scalar(select(Candidate.id).where(Candidate.code == "T-MATCH-5"))
+    unscored = client.get(f"/api/v1/requisitions/1/candidates/{unscored_id}/match")
+    assert unscored.status_code == 404, unscored.text
+    assert unscored.json()["detail"] == "Match not found"
+    assert client.get("/api/v1/requisitions/1/candidates/9999/match").status_code == 404
+    unknown_requisition = client.get("/api/v1/requisitions/9999/candidates/1/match")
+    assert unknown_requisition.status_code == 404
+    assert unknown_requisition.json()["detail"] == "Requisition not found"
+
+    # A soft-deleted candidate drops out of the list, so the narrow read must not
+    # keep serving their score.
+    removed_id = items[0]["candidate_id"]
+    with testing_session() as db:
+        db.get(Candidate, removed_id).deleted_at = datetime.now(UTC)
+        db.commit()
+    removed = client.get(f"/api/v1/requisitions/1/candidates/{removed_id}/match")
+    assert removed.status_code == 404, removed.text
+    assert "total_score" not in removed.text
+
+
+def test_single_candidate_match_read_is_scoped_exactly_like_the_list(
+    matching_client,
+) -> None:
+    client, testing_session = matching_client
+    with testing_session() as db:
+        own_department = Department(name="Single Match Owner")
+        other_department = Department(name="Single Match Other")
+        db.add_all([own_department, other_department])
+        db.flush()
+        db.get(JobRequisition, 1).department_id = own_department.id
+        db.add(
+            JobApplication(
+                requisition_id=1,
+                candidate_id=1,
+                status="submitted",
+                source="career_site",
+            )
+        )
+        db.commit()
+        own_department_id = own_department.id
+        other_department_id = other_department.id
+    assert client.post("/api/v1/requisitions/1/rematch").status_code == 200
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=10, role="manager", department_id=own_department_id, is_active=True
+    )
+    listed = client.get(
+        "/api/v1/requisitions/1/matches", params={"include_ineligible": "true"}
+    )
+    assert listed.status_code == 200, listed.text
+    assert {item["candidate_id"] for item in listed.json()["items"]} == {1}
+    visible = client.get("/api/v1/requisitions/1/candidates/1/match")
+    assert visible.status_code == 200, visible.text
+    # Down to the masked contact fields a manager is allowed to see.
+    assert visible.json() == listed.json()["items"][0]
+    assert visible.json()["candidate"]["email"] == "p***@app.test"
+    assert visible.json()["candidate"]["phone"] == "*******678"
+
+    # Candidate 2 applied to nothing in this manager's department, so they are
+    # outside candidate scope: 404, not a 403 that would confirm the score exists.
+    outside_candidate_scope = client.get("/api/v1/requisitions/1/candidates/2/match")
+    assert outside_candidate_scope.status_code == 404, outside_candidate_scope.text
+    assert "total_score" not in outside_candidate_scope.text
+
+    # A manager who cannot see the requisition cannot read a score through it: the
+    # narrow read answers exactly what the list answers, so it is not a side door.
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=11, role="manager", department_id=other_department_id, is_active=True
+    )
+    other_list = client.get("/api/v1/requisitions/1/matches")
+    blocked = client.get("/api/v1/requisitions/1/candidates/1/match")
+    assert blocked.status_code == other_list.status_code == 403
+    assert "total_score" not in blocked.text
+
+
 def test_candidate_match_overview_includes_uncomputed_people(matching_client) -> None:
     client, testing_session = matching_client
     before = client.get("/api/v1/requisitions/1/candidate-match-overview")
