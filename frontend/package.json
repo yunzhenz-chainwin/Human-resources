@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --configLoader native --host 0.0.0.0",
     "build": "vue-tsc --noEmit && vite build --configLoader native",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "html2canvas": "^1.4.1",
@@ -17,6 +18,7 @@
     "@vitejs/plugin-vue": "^6.0.0",
     "typescript": "~5.9.3",
     "vite": "^7.0.0",
+    "vitest": "^4.1.10",
     "vue-tsc": "^3.1.0"
   }
 }
