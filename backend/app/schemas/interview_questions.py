@@ -67,12 +67,19 @@ class InterviewQuestionSuggestionResponse(BaseModel):
     personalization_basis: list[str] = Field(default_factory=list)
 
 
+# A generated question is copied into an interview record when the interviewer
+# starts scoring, so anything longer than the record column accepts is content the
+# system produces and then refuses to store. Keep this equal to
+# InterviewRecordQuestion.source in app/schemas/interviews.py.
+QUESTION_SOURCE_MAX_LENGTH = 200
+
+
 class InterviewQuestionPlanItem(BaseModel):
     category: str
     question: str
     purpose: str
     follow_up: str
-    source: str
+    source: str = Field(max_length=QUESTION_SOURCE_MAX_LENGTH)
     compliance: QuestionCompliance | None = None
 
 

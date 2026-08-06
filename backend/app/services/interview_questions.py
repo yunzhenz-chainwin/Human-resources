@@ -11,12 +11,29 @@ import httpx
 
 from app.core.config import get_settings
 from app.schemas.interview_questions import (
+    QUESTION_SOURCE_MAX_LENGTH,
     InterviewQuestionPlanItem,
     QuestionCompliance,
     SuggestedInterviewQuestion,
     TraitQuestionSuggestion,
 )
 from app.services.interview_question_compliance import check_question
+
+
+def _bounded_source(value: str) -> str:
+    """Keep a generated question's provenance within what a record can store.
+
+    The model occasionally returns a long ``source`` -- sometimes several hundred
+    characters, including scratch text that leaked past the response parser. The
+    plan schema does not reject it, but ``InterviewRecordQuestion.source`` caps at
+    200, so the interviewer filled in an entire scoring form and only then got a
+    422 they could do nothing about. Truncating here degrades the provenance note
+    instead of blocking the submission it belongs to.
+    """
+    clean = " ".join(value.split())
+    if len(clean) <= QUESTION_SOURCE_MAX_LENGTH:
+        return clean
+    return clean[: QUESTION_SOURCE_MAX_LENGTH - 1] + "…"
 
 
 def _evaluate_compliance(
@@ -870,7 +887,7 @@ def _parse_gemini_questions(
                         question=values["question"],
                         purpose=values["purpose"],
                         follow_up=values["follow_up"],
-                        source=f"Gemini 客製題目｜{values['source']}",
+                        source=_bounded_source(f"Gemini 客製題目｜{values['source']}"),
                         compliance=_evaluate_compliance(
                             values["question"], values["follow_up"]
                         ),
