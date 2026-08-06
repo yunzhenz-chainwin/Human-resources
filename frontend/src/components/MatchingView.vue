@@ -541,7 +541,7 @@ function requestInterview(item: CandidateMatchOverviewItem) {
 <template>
   <section class="matching-view">
     <header v-if="!props.embedded" class="match-hero">
-      <div><p>MATCHING EXPLAINABILITY</p><h1>{{ workspaceMode === 'matching' ? '職缺 × 每位人才媒合程度' : '小樣本媒合驗證' }}</h1><span>{{ workspaceMode === 'matching' ? '系統適配只提供排序依據；人工招募階段與例外覆核會分開保存，不因重新計算而消失。' : '使用 50 組無真實個資案例，由 HR 與主管先盲評，再檢查排序與必要條件是否合理。' }}</span></div>
+      <div><p>MATCHING EXPLAINABILITY</p><h1>{{ workspaceMode === 'matching' ? '職缺 × 每位人才媒合程度' : '小樣本媒合驗證' }}</h1><span>{{ workspaceMode === 'matching' ? '履歷適配只比對書面條件、不含面試，僅提供排序依據；人工招募階段與例外覆核會分開保存，不因重新計算而消失。' : '使用 50 組無真實個資案例，由 HR 與主管先盲評，再檢查排序與必要條件是否合理。' }}</span></div>
       <strong>{{ workspaceMode === 'matching' ? '系統判斷＋人工決策' : '盲評＋揭盲報表' }}<small>{{ workspaceMode === 'matching' ? '兩條資訊分開呈現' : '未知結果不顯示成 0' }}</small></strong>
     </header>
 
@@ -684,7 +684,7 @@ function requestInterview(item: CandidateMatchOverviewItem) {
             @click="toggleCandidateDetails(item)"
           >
             <div class="candidate"><span>{{ item.candidate.name.slice(0, 1) }}</span><div><h2>{{ item.candidate.name }} <small>{{ item.source === 'applicant' ? '實際應徵' : '人才庫推薦' }}</small></h2><p>{{ item.candidate.code }} · {{ item.candidate.current_title || '職稱資料不足' }} · {{ item.candidate.total_years === null ? '年資資料不足' : `${item.candidate.total_years} 年` }}</p></div></div>
-            <div v-if="item.match" class="score" :class="{ failed: !item.match.gate_passed }"><strong>{{ item.match.total_score.toFixed(1) }}<b>%</b></strong><small>初步規則適配 · {{ resultLabel(item) }}</small><em :data-confidence="item.match.confidence">資料 {{ Math.round(item.match.data_completeness * 100) }}% · 可信度{{ confidenceLabels[item.match.confidence] }}</em><b class="composite-chip" :class="{ empty: compositeByCandidate[item.candidate.id] === null || compositeByCandidate[item.candidate.id] === undefined }">綜合 {{ compositeByCandidate[item.candidate.id] ?? '—' }}<i>{{ compositeByCandidate[item.candidate.id] === null || compositeByCandidate[item.candidate.id] === undefined ? '兩關面試提交後產生' : '面試綜合參考分' }}</i></b></div>
+            <div v-if="item.match" class="score" :class="{ failed: !item.match.gate_passed }"><strong>{{ item.match.total_score.toFixed(1) }}<b>%</b></strong><small>履歷適配（未含面試）· {{ resultLabel(item) }}</small><em :data-confidence="item.match.confidence">資料 {{ Math.round(item.match.data_completeness * 100) }}% · 可信度{{ confidenceLabels[item.match.confidence] }}</em><b class="composite-chip" :class="{ empty: compositeByCandidate[item.candidate.id] === null || compositeByCandidate[item.candidate.id] === undefined }">綜合 {{ compositeByCandidate[item.candidate.id] ?? '—' }}<i>{{ compositeByCandidate[item.candidate.id] === null || compositeByCandidate[item.candidate.id] === undefined ? '兩關面試提交後產生' : '面試綜合參考分' }}</i></b></div>
             <div v-else class="score uncomputed"><strong>—</strong><small>尚未計算</small></div>
             <span class="row-action-copy">{{ expandedCandidateId === item.candidate.id ? '收合人才詳情' : '查看評估、分析與面試' }}</span>
             <span class="row-chevron" aria-hidden="true">{{ expandedCandidateId === item.candidate.id ? '−' : '＋' }}</span>
@@ -744,7 +744,7 @@ function requestInterview(item: CandidateMatchOverviewItem) {
           <strong>媒合重點</strong>
           <ul><li v-for="(highlight, index) in matchHighlights(item.match)" :key="`${highlight.category}-${index}`" :data-kind="highlight.kind"><b>{{ highlightKindLabels[highlight.kind] }} · {{ highlightCategoryLabels[highlight.category] || highlight.category }}</b><span>{{ highlight.text }}</span></li></ul>
           </section>
-          <div v-if="item.match && !item.match.gate_passed" class="gate-warning"><strong>系統適配 {{ item.match.total_score.toFixed(1) }}%，但必要條件未通過</strong><span>{{ gateReasons(item.match) }}</span><small v-if="!item.match.manual_override_at">這是系統判斷；授權人員可填寫原因後人工覆核，不會改寫原始分數。</small></div>
+          <div v-if="item.match && !item.match.gate_passed" class="gate-warning"><strong>履歷適配 {{ item.match.total_score.toFixed(1) }}%，但必要條件未通過</strong><span>{{ gateReasons(item.match) }}</span><small v-if="!item.match.manual_override_at">這是系統判斷；授權人員可填寫原因後人工覆核，不會改寫原始分數。</small></div>
           <div v-else-if="!item.match" class="pending-message"><b>等待第一次計算</b><span>按上方「計算全部人才」後，這裡會顯示百分比與技能、年資、薪資、學歷、地點等評分依據。</span></div>
 
           <div v-if="item.match?.manual_override_at" class="manual-override"><strong>已人工覆核 · {{ decisionCategoryLabel(item.match, 'override') }}</strong><span>{{ item.match.manual_override_note || '未補充備註' }}</span><small>操作者 #{{ item.match.manual_override_by }} · {{ dateTime(item.match.manual_override_at) }}；系統必要條件結果仍保留。</small></div>
@@ -774,7 +774,7 @@ function requestInterview(item: CandidateMatchOverviewItem) {
 
     <div v-if="decisionMatch && decisionMode" class="decision-backdrop" @click.self="closeDecision">
       <form class="decision-dialog" @submit.prevent="submitDecision">
-        <header><div><small>{{ decisionMode === 'override' ? 'MANUAL OVERRIDE' : 'STRUCTURED REJECTION' }}</small><h2>{{ decisionMode === 'override' ? '人工覆核必要條件' : '記錄婉拒原因' }}</h2><p>{{ decisionMatch.candidate.name }} · 系統適配 {{ decisionMatch.total_score.toFixed(1) }}%</p></div><button type="button" aria-label="關閉" @click="closeDecision">×</button></header>
+        <header><div><small>{{ decisionMode === 'override' ? 'MANUAL OVERRIDE' : 'STRUCTURED REJECTION' }}</small><h2>{{ decisionMode === 'override' ? '人工覆核必要條件' : '記錄婉拒原因' }}</h2><p>{{ decisionMatch.candidate.name }} · 履歷適配 {{ decisionMatch.total_score.toFixed(1) }}%</p></div><button type="button" aria-label="關閉" @click="closeDecision">×</button></header>
         <div v-if="decisionMode === 'override'" class="decision-warning">覆核只會允許人才進入人工招募流程；原始必要條件結果與分數仍會保留，重新媒合也不會刪除這次決策。</div>
         <label>原因類別<select v-model="decisionCategory" required><option v-for="item in decisionCategories" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
         <label v-if="decisionMode === 'override'">覆核後階段<select v-model="decisionTargetStage"><option value="shortlisted">入選名單</option><option value="contacted">已聯絡</option><option value="interview">面試中</option></select></label>
