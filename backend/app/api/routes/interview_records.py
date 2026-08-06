@@ -50,6 +50,11 @@ from app.services.interview_questions import (
     personalized_trait_interview_questions,
     standard_hr_question_plan,
 )
+from app.services.interview_scoring import (
+    application_interview_records,
+    both_stages_submitted,
+    recompute_application_composite_score,
+)
 from app.services.security import write_audit
 
 router = APIRouter(prefix="/applications")
@@ -142,13 +147,11 @@ def _owns_stage(user: User, stage: str) -> bool:
 
 
 def _peer_evaluations_released(records: list[InterviewRecord]) -> bool:
-    latest: dict[str, InterviewRecord] = {}
-    for record in records:
-        latest.setdefault(record.stage, record)
-    return all(
-        latest.get(stage) is not None and latest[stage].status == "completed"
-        for stage in ("hr", "manager")
-    )
+    # Shares its definition with the composite score, which may only exist once
+    # both stages are submitted. Keeping one implementation is what guarantees the
+    # composite cannot appear one moment before the scores it is built from are
+    # released.
+    return both_stages_submitted(records)
 
 
 def _record_read(
@@ -242,16 +245,7 @@ def _validate_completed_update(
 
 
 def _application_records(db: Session, application_id: int) -> list[InterviewRecord]:
-    return list(
-        db.scalars(
-            select(InterviewRecord)
-            .where(InterviewRecord.application_id == application_id)
-            .order_by(
-                InterviewRecord.interviewed_at.desc(),
-                InterviewRecord.id.desc(),
-            )
-        ).all()
-    )
+    return application_interview_records(db, application_id)
 
 
 def _record(db: Session, application_id: int, record_id: int) -> InterviewRecord:
@@ -763,7 +757,7 @@ def create_interview_record(
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
 ) -> InterviewRecordRead:
-    _, requisition = _application_requisition(db, application_id, user)
+    application, requisition = _application_requisition(db, application_id, user)
     _enforce_stage_write(user, payload.stage)
     _enforce_private_notes_write(user, payload.stage, payload.model_fields_set)
     question_plan: InterviewQuestionPlan | None = None
@@ -806,6 +800,7 @@ def create_interview_record(
     )
     db.add(record)
     db.flush()
+    recompute_application_composite_score(db, application, requisition)
     write_audit(
         db,
         user,
@@ -858,7 +853,7 @@ def update_interview_record(
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
 ) -> InterviewRecordRead:
-    _, requisition = _application_requisition(db, application_id, user)
+    application, requisition = _application_requisition(db, application_id, user)
     record = _record(db, application_id, record_id)
     _enforce_stage_write(user, record.stage)  # type: ignore[arg-type]
     if record.status == "completed":
@@ -903,6 +898,8 @@ def update_interview_record(
         record.submitted_by_id = user.id
         record.submitted_by_name = actor_name
         record.revision_number = (record.revision_number or 0) + 1
+    db.flush()
+    recompute_application_composite_score(db, application, requisition)
     write_audit(
         db,
         user,
@@ -938,7 +935,7 @@ def reopen_interview_record(
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
 ) -> InterviewRecordRead:
-    _, requisition = _application_requisition(db, application_id, user)
+    application, requisition = _application_requisition(db, application_id, user)
     record = _record(db, application_id, record_id)
     _enforce_stage_write(user, record.stage)  # type: ignore[arg-type]
     if record.status != "completed":
@@ -951,6 +948,12 @@ def reopen_interview_record(
     record.last_reopen_reason = payload.reason
     record.updated_by_id = user.id
     record.updated_by_name = _actor_name(user)
+    # A reopened stage no longer has a submitted record, so by the composite's own
+    # invariant the stored number has to go back to pending. It also closes the
+    # only window in which a stale composite could outlive the re-masking that a
+    # reopen performs on the peer's evaluation.
+    db.flush()
+    recompute_application_composite_score(db, application, requisition)
     write_audit(
         db,
         user,

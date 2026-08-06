@@ -24,6 +24,7 @@ from app.schemas.matching import (
     JobComplianceLintRequest,
     JobComplianceResult,
 )
+from app.services.interview_scoring import resolve_composite_weights
 from app.services.jd_compliance import JD_COMPLIANCE_RULES_VERSION, lint_job_text
 from app.services.security import write_audit
 
@@ -185,6 +186,22 @@ def update_requisition(
                 status_code=409,
                 detail="已有面試提交紀錄，評分揭露規則不可變更",
             )
+    # Same "only a real change is policed" rule as blind review above, compared on
+    # the normalised weights rather than the raw dict: re-sending the whole
+    # requisition, or restating the same split written differently (20/15/25/15/25
+    # and 40/30/50/30/50 weigh identically), decides nothing and must not 403.
+    # Unlike blind review this has no lock -- a stored composite keeps the weights
+    # its breakdown records, so reweighting never rewrites a past decision.
+    previous_weights = requisition.composite_score_weights
+    previous_resolved_weights = requisition.composite_score_weights_resolved
+    composite_weights_change = "composite_score_weights" in updates and (
+        resolve_composite_weights(updates["composite_score_weights"])
+        != previous_resolved_weights
+    )
+    if not composite_weights_change:
+        updates.pop("composite_score_weights", None)
+    elif user.role != "hr":
+        raise HTTPException(status_code=403, detail="僅人資可設定綜合評分權重")
     previous_blind_review = requisition.blind_review_enabled
     new_status = updates.get("status")
     if new_status is not None and new_status not in REQUISITION_STATUSES:
@@ -220,6 +237,30 @@ def update_requisition(
                 "blind_review_enabled": {
                     "from": previous_blind_review,
                     "to": requisition.blind_review_enabled,
+                },
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    if composite_weights_change:
+        # Reweighting changes how every future candidate on this requisition ranks,
+        # so who changed it and to what has to stay attributable, same as above.
+        write_audit(
+            db,
+            user,
+            "requisition.composite_score_weights.update",
+            "job_requisition",
+            requisition.id,
+            requisition.department_id,
+            details={
+                "req_no": requisition.req_no,
+                "composite_score_weights": {
+                    "from": previous_weights,
+                    "to": requisition.composite_score_weights,
+                },
+                "resolved_weights": {
+                    "from": previous_resolved_weights,
+                    "to": requisition.composite_score_weights_resolved,
                 },
             },
             ip_address=request.client.host if request.client else None,

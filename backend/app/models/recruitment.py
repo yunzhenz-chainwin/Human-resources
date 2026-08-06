@@ -59,6 +59,14 @@ class JobRequisition(TimestampMixin, Base):
     )
     return_reason: Mapped[str | None] = mapped_column(String(500))
     match_weights: Mapped[dict | None] = mapped_column(JSON)
+    # How this requisition weighs the five candidate scores into the composite:
+    # resume / hr_questions / hr_overall / manager_questions / manager_overall.
+    # NULL means "use the defaults"; a partial dict overrides only the keys it
+    # names. Normalised on read by services.interview_scoring.resolve_composite_weights,
+    # exactly like match_weights above. Only HR may change it (see the requisitions
+    # route), and a stored composite keeps the weights it was computed with, which
+    # the breakdown records, so a later reweighting never rewrites past decisions.
+    composite_score_weights: Mapped[dict | None] = mapped_column(JSON)
     # Blind review is the default: each interviewer's evaluation stays hidden from
     # the other side until both stages are submitted. HR may switch it off for a
     # single requisition, but only before scoring starts (see blind_review_locked).
@@ -79,6 +87,16 @@ class JobRequisition(TimestampMixin, Base):
     @property
     def department_name(self) -> str | None:
         return self.department.name if self.department else None
+
+    @property
+    def composite_score_weights_resolved(self) -> dict[str, float]:
+        """The composite weights actually applied, rescaled to sum 1."""
+
+        # Imported lazily: services import models, so a module-level import here
+        # would close the cycle.
+        from app.services.interview_scoring import resolve_composite_weights
+
+        return resolve_composite_weights(self.composite_score_weights)
 
 
 class ResumeFile(Base):
@@ -212,6 +230,18 @@ class JobApplication(TimestampMixin, Base):
     manager_interview_updated_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime()
     )
+    # Sixth score: the weighted combination of the resume match, both stages'
+    # per-question scores and both interviewers' own totals. Kept here because it
+    # is per candidate-per-requisition and interview records already key off
+    # application_id. Follows the MatchResult.total_score + score_breakdown
+    # precedent: a numeric column to rank on, and a JSON breakdown recording each
+    # component's value, the weight applied to it, and which components were
+    # missing. NULL until both interview stages are submitted; the breakdown's
+    # "status" separates "never computed" (breakdown NULL) from "computed and
+    # still null". Never influences ``status`` -- evaluation must not drive
+    # application state.
+    composite_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    composite_score_breakdown: Mapped[dict | None] = mapped_column(JSON)
 
 
 # Expressed against interview_records, which never imports this module, so the

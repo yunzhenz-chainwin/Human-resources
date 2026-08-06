@@ -65,6 +65,14 @@ export type ActivityDto = {
 }
 export type ActivityWrite = { type: string; content: string; happened_at?: string; next_status?: string }
 
+// The five scores the composite combines, and how much each counts. Server defaults are
+// resume 20 / hr_questions 15 / hr_overall 25 / manager_questions 15 / manager_overall 25:
+// HR and the hiring manager weigh the same in total, and within each side the interviewer's
+// own holistic total outweighs the mechanical per-question average. Values are relative and
+// need not sum to anything in particular; the server rescales them to sum 1.
+export type CompositeScoreComponent = 'resume' | 'hr_questions' | 'hr_overall' | 'manager_questions' | 'manager_overall'
+export type CompositeScoreWeights = Partial<Record<CompositeScoreComponent, number>>
+
 export type RequisitionDto = {
   id: number
   req_no: string
@@ -86,11 +94,16 @@ export type RequisitionDto = {
   blind_review_enabled: boolean
   /** Derived and read-only: true once any interview here has been submitted, after which blind_review_enabled can no longer change. */
   blind_review_locked: boolean
+  /** Configured composite-score weights, or null when this requisition uses the defaults. A partial object overrides only the keys it names. */
+  composite_score_weights: CompositeScoreWeights | null
+  /** Derived and read-only: the same weights rescaled to sum 1, which is what a composite is actually computed with. */
+  composite_score_weights_resolved: Required<CompositeScoreWeights>
   published_at: string | null
   created_at: string
 }
-// blind_review_enabled is optional on write and HR-only on the server; blind_review_locked is never written.
-export type RequisitionWrite = Omit<RequisitionDto, 'id' | 'department_name' | 'requested_by' | 'published_at' | 'created_at' | 'blind_review_enabled' | 'blind_review_locked'> & { blind_review_enabled?: boolean }
+// blind_review_enabled and composite_score_weights are optional on write and HR-only on the
+// server; blind_review_locked and composite_score_weights_resolved are never written.
+export type RequisitionWrite = Omit<RequisitionDto, 'id' | 'department_name' | 'requested_by' | 'published_at' | 'created_at' | 'blind_review_enabled' | 'blind_review_locked' | 'composite_score_weights' | 'composite_score_weights_resolved'> & { blind_review_enabled?: boolean; composite_score_weights?: CompositeScoreWeights | null }
 export type DepartmentRequisitionWrite = {
   title: string
   employment_type: string
@@ -141,9 +154,61 @@ export type ApplicationDto = {
   interview_notes: string | null
   hr_interview: InterviewStageDto
   manager_interview: InterviewStageDto
+  /**
+   * Sixth score: the weighted combination of the resume match, both stages' per-question
+   * scores and both interviewers' own totals, on the same 0-100 scale. Null until both
+   * interview stages are submitted — which is exactly when blind review releases the
+   * underlying scores — and null again after a reopen.
+   */
+  composite_score: number | null
+  /**
+   * Why the composite is what it is. Null only while no composite has ever been computed,
+   * which is what tells "not computed yet" apart from "computed as null".
+   */
+  composite_score_breakdown: CompositeScoreBreakdownDto | null
   candidate: CandidateDto
   requisition: RequisitionDto
 }
+export type CompositeScoreComponentDetailDto = {
+  /** The component's 0-100 score, or null when it is missing. Missing is never read as zero. */
+  value: number | null
+  /** This component's configured share, before the missing-component rules. */
+  weight: number
+  /**
+   * The share actually used. A stage whose questions were all 未詢問 folds that weight into
+   * the same stage's overall score; a missing resume match is renormalised across the rest.
+   */
+  applied_weight: number
+  included: boolean
+  excluded_reason: 'no_match_result' | 'no_rated_questions' | 'no_overall_score' | null
+}
+export type CompositeScoreStageDetailDto = {
+  record_id: number | null
+  submitted_at: string | null
+  revision_number: number | null
+  question_count: number
+  rated_question_count: number
+  not_asked_question_count: number
+}
+export type CompositeScoreBreakdownDto =
+  | {
+      version: string
+      /** Not both stages submitted yet, so no composite exists and no component values are exposed. */
+      status: 'pending_stages'
+      computed_at: string
+      pending_stages: InterviewStage[]
+    }
+  | {
+      version: string
+      status: 'computed'
+      computed_at: string
+      composite_score: number | null
+      configured_weights: CompositeScoreWeights | null
+      resolved_weights: Required<CompositeScoreWeights>
+      components: Record<CompositeScoreComponent, CompositeScoreComponentDetailDto>
+      missing_components: CompositeScoreComponent[]
+      stages: Record<InterviewStage, CompositeScoreStageDetailDto>
+    }
 export type CandidateResumeSummaryDto = {
   id: number
   target_requisition_id: number | null

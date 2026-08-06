@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from math import isfinite
 from typing import Literal
 
 from pydantic import (
@@ -34,6 +35,17 @@ ALLOWED_REQUISITION_TRANSITIONS: dict[str, frozenset[str]] = {
     "filled": frozenset({"closed"}),
     "closed": frozenset(),
 }
+# Keys accepted in job_requisitions.composite_score_weights. Kept as a literal
+# tuple rather than imported from the service so the schema layer stays free of
+# service imports; services.interview_scoring owns the default values and the
+# normalisation, and its COMPOSITE_WEIGHT_KEYS is asserted equal to this in tests.
+COMPOSITE_SCORE_WEIGHT_KEYS = (
+    "resume",
+    "hr_questions",
+    "hr_overall",
+    "manager_questions",
+    "manager_overall",
+)
 CANDIDATE_STATUSES = (
     "new",
     "contacted",
@@ -217,6 +229,12 @@ class RequisitionRead(BaseModel):
     # and turns true once any interview here has been submitted.
     blind_review_enabled: bool
     blind_review_locked: bool
+    # Configured composite weights, or null when this requisition uses the
+    # defaults. composite_score_weights_resolved is derived and read-only: the
+    # same numbers rescaled to sum 1, which is what a composite is actually
+    # computed with, so no client has to reimplement the normalisation.
+    composite_score_weights: dict[str, float] | None
+    composite_score_weights_resolved: dict[str, float]
     published_at: datetime | None
     created_at: datetime
 
@@ -281,12 +299,40 @@ class RequisitionUpdate(BaseModel):
     # Only HR may change this, and only before scoring starts; both rules are
     # enforced by the route. None means "no decision in this request".
     blind_review_enabled: bool | None = None
+    # Composite score weights. Only HR may change them (enforced by the route).
+    # A partial dict overrides only the keys it names; an explicit null resets the
+    # requisition to the built-in defaults. Absent from the request means "no
+    # decision", which is why this needs the sentinel below rather than None.
+    composite_score_weights: dict[str, float] | None = None
 
     @field_validator("status")
     @classmethod
     def validate_status(cls, value: str | None) -> str | None:
         if value is not None and value not in REQUISITION_STATUSES:
             raise ValueError("未知的需求單狀態")
+        return value
+
+    @field_validator("composite_score_weights")
+    @classmethod
+    def validate_composite_score_weights(
+        cls,
+        value: dict[str, float] | None,
+    ) -> dict[str, float] | None:
+        if value is None:
+            return None
+        unknown = sorted(set(value) - set(COMPOSITE_SCORE_WEIGHT_KEYS))
+        if unknown:
+            raise ValueError(f"未知的綜合評分權重項目：{'、'.join(unknown)}")
+        for key, weight in value.items():
+            # A negative weight would subtract a candidate's score from their own
+            # total, and an infinite or NaN one would poison every composite the
+            # requisition ever produces.
+            if not isfinite(weight) or weight < 0:
+                raise ValueError(f"綜合評分權重「{key}」必須為 0 或正數")
+        # An all-zero set is not rejected here: resolve_composite_weights treats a
+        # non-positive total as carrying no decision and falls back to the
+        # defaults, exactly as resolve_weights does for match_weights, and the
+        # requisition read shows the resolved weights so the fallback is visible.
         return value
 
 
@@ -490,5 +536,12 @@ class ApplicationRead(BaseModel):
     interview_notes: str | None
     hr_interview: ApplicationInterviewStageRead
     manager_interview: ApplicationInterviewStageRead
+    # The sixth score. Null both before the two interview stages are submitted and
+    # when nothing could be scored at all; composite_score_breakdown tells those
+    # apart -- it is null only while no composite has ever been computed, and
+    # otherwise carries a "status" of "pending_stages" or "computed" alongside each
+    # component's value, the weight applied to it and the missing-component list.
+    composite_score: float | None
+    composite_score_breakdown: dict | None
     candidate: CandidateRead
     requisition: RequisitionRead

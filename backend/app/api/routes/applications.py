@@ -84,6 +84,17 @@ def _application_read(
             updated_by=application.manager_interview_updated_by,
             updated_at=_aware(application.manager_interview_updated_at),
         ),
+        # Only ever populated once both interview stages are submitted, which is
+        # the same moment blind review releases each side's scores, so reading the
+        # composite can never reveal a masked evaluation early. The breakdown is
+        # written on every recompute, including the pending one, which is what
+        # separates "not computed yet" (null) from "computed as null".
+        composite_score=(
+            float(application.composite_score)
+            if application.composite_score is not None
+            else None
+        ),
+        composite_score_breakdown=application.composite_score_breakdown,
         candidate=candidate_read_for_user(candidate, user),
         requisition=RequisitionRead.model_validate(requisition),
     )

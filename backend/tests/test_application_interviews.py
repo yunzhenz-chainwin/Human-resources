@@ -56,6 +56,8 @@ APPLICATION_KEYS = {
     "interview_notes",
     "hr_interview",
     "manager_interview",
+    "composite_score",
+    "composite_score_breakdown",
     "candidate",
     "requisition",
 }
