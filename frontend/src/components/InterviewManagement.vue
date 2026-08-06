@@ -888,6 +888,53 @@ function peerEvaluationsReleased(applicationId: number) {
   return hrRecord?.status === 'completed' && managerRecord?.status === 'completed'
 }
 
+// Two interviewers scoring 95 and 60 average to the same 77.5 as two scoring 78
+// and 77, but they are opposite situations. The combined figure is only ever
+// shown next to a verdict on whether the two sides actually agree.
+const CONSENSUS_SCORE_GAP = 20
+const recommendationTone: Record<InterviewRecommendation, 'positive' | 'neutral' | 'negative'> = {
+  advance: 'positive', offer: 'positive', hold: 'neutral', reject: 'negative',
+}
+
+type InterviewConsensus = {
+  state: 'pending' | 'aligned' | 'divergent'
+  label: string
+  detail: string
+  combined: string | null
+}
+
+function interviewConsensus(applicationId: number): InterviewConsensus {
+  const hrRecord = currentPlanRecord(applicationId, 'hr')
+  const managerRecord = currentPlanRecord(applicationId, 'manager')
+  const hrDone = hrRecord?.status === 'completed'
+  const managerDone = managerRecord?.status === 'completed'
+  if (!hrDone || !managerDone) {
+    const waiting = hrDone ? '主管' : managerDone ? 'HR' : '雙方'
+    return {
+      state: 'pending',
+      label: `等待${waiting}提交`,
+      detail: '兩關都提交後才會計算面試綜合分，避免只用一半的評分做判斷。',
+      combined: null,
+    }
+  }
+  const hrScore = validScore(hrRecord?.overall_score) ? Number(hrRecord?.overall_score) : null
+  const managerScore = validScore(managerRecord?.overall_score) ? Number(managerRecord?.overall_score) : null
+  const combined = hrScore !== null && managerScore !== null
+    ? ((hrScore + managerScore) / 2).toFixed(1)
+    : null
+  const gap = hrScore !== null && managerScore !== null ? Math.abs(hrScore - managerScore) : 0
+  const hrTone = hrRecord?.recommendation ? recommendationTone[hrRecord.recommendation] : null
+  const managerTone = managerRecord?.recommendation ? recommendationTone[managerRecord.recommendation] : null
+  const recommendationDiffers = Boolean(hrTone && managerTone && hrTone !== managerTone)
+  if (recommendationDiffers || gap >= CONSENSUS_SCORE_GAP) {
+    const reason = recommendationDiffers
+      ? `HR 建議${recommendationLabels[hrRecord!.recommendation!]}，主管建議${recommendationLabels[managerRecord!.recommendation!]}`
+      : `兩關分數相差 ${gap} 分`
+    return { state: 'divergent', label: '意見分歧 · 建議討論', detail: `${reason}。請先釐清雙方看到的證據差異，再做錄用決定。`, combined }
+  }
+  return { state: 'aligned', label: '雙方共識一致', detail: '兩關的評分與錄用建議方向相同。', combined }
+}
+
 // Requisition-level opt-out of blind review, decided before scoring starts. The
 // backend field is being added separately; a missing value must read as "blind
 // review on" so the protection never loosens by accident.
@@ -1789,6 +1836,24 @@ onMounted(load)
             </button>
           </div>
 
+          <div class="consensus-strip" :class="interviewConsensus(application.id).state">
+            <div class="consensus-verdict">
+              <strong>{{ interviewConsensus(application.id).label }}</strong>
+              <span>{{ interviewConsensus(application.id).detail }}</span>
+            </div>
+            <div v-if="interviewConsensus(application.id).combined" class="consensus-score">
+              <strong>{{ interviewConsensus(application.id).combined }}</strong>
+              <small>面試綜合分 · 參考值</small>
+            </div>
+            <div class="consensus-sides">
+              <span v-for="stage in interviewStages" :key="stage.key">
+                <b>{{ stage.owner }}</b>
+                <template v-if="currentPlanRecord(application.id, stage.key)?.status === 'completed'">{{ validScore(currentPlanRecord(application.id, stage.key)?.overall_score) ? `${currentPlanRecord(application.id, stage.key)?.overall_score} 分` : '未填總分' }}<template v-if="currentPlanRecord(application.id, stage.key)?.recommendation"> · {{ recommendationLabels[currentPlanRecord(application.id, stage.key)!.recommendation!] }}</template></template>
+                <template v-else>{{ stageSubmissionLabel(application.id, stage.key) }}</template>
+              </span>
+            </div>
+          </div>
+
           <div v-if="pendingDiscard" class="record-discard-confirm" role="alert">
             <div><strong>這一關的評分內容尚未儲存</strong><span>{{ pendingDiscard.type === 'stage' ? '切換到另一關' : '離開這張卡片' }}會放棄目前填寫的內容。</span></div>
             <div><button class="button secondary" type="button" @click="cancelPendingDiscard">留在這裡</button><button class="button primary" type="button" @click="confirmPendingDiscard">放棄並繼續</button></div>
@@ -2097,6 +2162,19 @@ onMounted(load)
 .question-stage-tabs button.active{border-color:#278477;background:#e7f5f1;color:#1e665b;box-shadow:0 0 0 2px rgba(39,132,119,.08)}
 .question-stage-tabs button:focus-visible{outline:3px solid rgba(35,130,116,.24);outline-offset:2px}
 .record-discard-confirm{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid #e0cf9c;border-radius:9px;background:#fff9e8;color:#6e5525}.record-discard-confirm strong,.record-discard-confirm span{display:block}.record-discard-confirm strong{font-size:var(--fs-sm)}.record-discard-confirm span{margin-top:3px;color:#806b42;font-size:var(--fs-xs);line-height:1.5}.record-discard-confirm>div:last-child{display:flex;flex:0 0 auto;gap:7px}
+/* 綜合分永遠與共識判定並列：95/60 與 78/77 平均相同，處理方式卻完全不同。 */
+.consensus-strip{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;padding:11px 13px;border:1px solid #dbe7e3;border-left-width:4px;border-radius:9px;background:#f8fbfa}
+.consensus-strip.pending{border-left-color:#c9d6d2}
+.consensus-strip.aligned{border-left-color:#2a8879;background:#f4faf7}
+.consensus-strip.divergent{border-left-color:#c98a2d;background:#fff8e8}
+.consensus-verdict{min-width:0;flex:1}.consensus-verdict strong,.consensus-verdict span{display:block}
+.consensus-verdict strong{color:#2c4f49;font-size:var(--fs-md)}
+.consensus-strip.divergent .consensus-verdict strong{color:#8a5a16}
+.consensus-verdict span{margin-top:3px;color:#6b7e79;font-size:var(--fs-xs);line-height:1.55}
+.consensus-score{flex:0 0 auto;display:grid;justify-items:center;padding:6px 13px;border-radius:9px;background:#fff}
+.consensus-score strong{color:#1f6b60;font-size:var(--fs-lg)}.consensus-score small{color:#93a09c;font-size:var(--fs-xs)}
+.consensus-sides{flex:0 0 auto;display:grid;gap:3px}.consensus-sides span{color:#5f746f;font-size:var(--fs-xs)}.consensus-sides b{margin-right:6px;color:#2f7065}
+@media(max-width:680px){.consensus-strip{align-items:stretch;flex-direction:column}.consensus-score{justify-items:start}}
 .card-stage-body{display:grid;gap:12px}
 
 .stage-grid{display:grid;grid-template-columns:1fr;gap:9px}
