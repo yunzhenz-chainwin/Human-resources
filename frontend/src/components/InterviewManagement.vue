@@ -888,11 +888,19 @@ function peerEvaluationsReleased(applicationId: number) {
   return hrRecord?.status === 'completed' && managerRecord?.status === 'completed'
 }
 
+// Requisition-level opt-out of blind review, decided before scoring starts. The
+// backend field is being added separately; a missing value must read as "blind
+// review on" so the protection never loosens by accident.
+function blindReviewEnabled(application: ApplicationDto) {
+  return (application.requisition as { blind_review_enabled?: boolean }).blind_review_enabled !== false
+}
+
 // A bare lock icon reads as "you are not allowed to see this". Say who has
 // submitted, who is still pending, and that release is automatic.
-function evaluationReleaseHint(applicationId: number) {
-  const hrDone = currentPlanRecord(applicationId, 'hr')?.status === 'completed'
-  const managerDone = currentPlanRecord(applicationId, 'manager')?.status === 'completed'
+function evaluationReleaseHint(application: ApplicationDto) {
+  if (!blindReviewEnabled(application)) return '本職缺採即時共享評分'
+  const hrDone = currentPlanRecord(application.id, 'hr')?.status === 'completed'
+  const managerDone = currentPlanRecord(application.id, 'manager')?.status === 'completed'
   if (hrDone && managerDone) return '雙方已提交 · 評分已公開'
   if (hrDone) return 'HR 已提交 · 待主管提交後自動公開'
   if (managerDone) return '主管已提交 · 待 HR 提交後自動公開'
@@ -1864,7 +1872,7 @@ onMounted(load)
                     <b v-if="cardStageQuestions.length && !cardStageComplianceWarnings" class="compliance-chip">合規檢查通過</b>
                     <b v-else-if="cardStageComplianceWarnings" class="compliance-chip warn">{{ cardStageComplianceWarnings }} 題疑似違法</b>
                     <button v-if="canGenerateQuestionStage(stage.key) && !cardStagePlan?.questions.length" type="button" class="button generation-button" :disabled="cardStageGenerating" :data-testid="`question-plan-generate-${application.id}-${stage.key}`" @click="generateCardQuestionPlan(application, stage.key)">{{ cardStageGenerating ? '產生中…' : '使用 Gemini 產生 5 題' }}</button>
-                    <b class="evaluation-release-chip" :class="{ unlocked: peerEvaluationsReleased(application.id) }">{{ evaluationReleaseHint(application.id) }}</b>
+                    <b class="evaluation-release-chip" :class="{ unlocked: peerEvaluationsReleased(application.id) || !blindReviewEnabled(application), shared: !blindReviewEnabled(application) }">{{ evaluationReleaseHint(application) }}</b>
                     <small v-if="cardStageEditable && editorEvaluationVisible" class="meta-progress">已評 {{ recordRatedCount }} · 略過 {{ recordSkippedCount }} · 共 {{ recordQuestionTotal }} 題</small>
                     <details class="record-meta-summary">
                       <summary>紀錄資訊</summary>
@@ -2123,7 +2131,7 @@ onMounted(load)
 .question-progress{padding:13px 16px 0}
 .question-plan-meta{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:0 0 10px;border-bottom:1px solid #e6eeeb}.question-plan-meta>span{padding:5px 9px;border-radius:99px;background:#e7f3ef;color:#216d61;font-size:var(--fs-sm);font-weight:700}.question-plan-meta>span[data-stage="manager"]{background:#fff3d8;color:#8a621a}.question-plan-meta>small{margin-left:auto;color:#798984;font-size:var(--fs-sm)}
 .generation-button{min-height:38px;padding:8px 13px;font-size:var(--fs-sm);white-space:nowrap}
-.evaluation-release-chip{padding:5px 9px;border-radius:99px;background:#fff0df;color:#93601c;font-size:var(--fs-xs);font-weight:700}.evaluation-release-chip.unlocked{background:#e1f3e9;color:#257052}
+.evaluation-release-chip{padding:5px 9px;border-radius:99px;background:#fff0df;color:#93601c;font-size:var(--fs-xs);font-weight:700}.evaluation-release-chip.unlocked{background:#e1f3e9;color:#257052}.evaluation-release-chip.shared{background:#e3eff9;color:#326f9d}
 .meta-progress{margin-left:0!important;color:#5f746f}
 .record-meta-summary,.question-more{position:relative}
 .record-meta-summary>summary,.question-more>summary{list-style:none;cursor:pointer;color:#3a7067;font-size:var(--fs-xs);font-weight:700}.record-meta-summary>summary::-webkit-details-marker,.question-more>summary::-webkit-details-marker{display:none}
