@@ -21,6 +21,15 @@ import {
 import { matchingReportsApi } from '../services/matchingReportsApi'
 import { authSession } from '../services/auth'
 import { formatApiDateTime, parseApiDateTime } from '../utils/dateTime'
+import {
+  CONSENSUS_SCORE_GAP,
+  combinedInterviewScore,
+  evaluateConsensus,
+  questionScore,
+  ratedQuestionCount,
+  validRating,
+  validScore,
+} from '../utils/interviewScoring'
 
 const props = withDefaults(defineProps<{
   embedded?: boolean
@@ -894,30 +903,18 @@ function peerEvaluationsReleased(applicationId: number) {
   return hrRecord?.status === 'completed' && managerRecord?.status === 'completed'
 }
 
-// Per-question score on the same 0-100 scale as the interviewer's own total.
-// Questions marked 未詢問 are excluded from the denominator as well as the
-// numerator: a question that was never put to the candidate must not be scored
-// against them.
 function stageQuestionScore(applicationId: number, stage: InterviewStage): number | null {
   const record = currentPlanRecord(applicationId, stage)
-  if (!record) return null
-  const rated = record.questions.filter(question => validRating(question.rating))
-  if (!rated.length) return null
-  const total = rated.reduce((sum, question) => sum + Number(question.rating), 0)
-  return Math.round((total / (rated.length * 5)) * 1000) / 10
+  return record ? questionScore(record.questions) : null
 }
 
 function stageRatedCount(applicationId: number, stage: InterviewStage) {
-  return (currentPlanRecord(applicationId, stage)?.questions || []).filter(question => validRating(question.rating)).length
+  return ratedQuestionCount(currentPlanRecord(applicationId, stage)?.questions || [])
 }
 
 // Two interviewers scoring 95 and 60 average to the same 77.5 as two scoring 78
 // and 77, but they are opposite situations. The combined figure is only ever
 // shown next to a verdict on whether the two sides actually agree.
-const CONSENSUS_SCORE_GAP = 20
-const recommendationTone: Record<InterviewRecommendation, 'positive' | 'neutral' | 'negative'> = {
-  advance: 'positive', offer: 'positive', hold: 'neutral', reject: 'negative',
-}
 
 type InterviewConsensus = {
   state: 'pending' | 'aligned' | 'divergent'
@@ -942,17 +939,19 @@ function interviewConsensus(applicationId: number): InterviewConsensus {
   }
   const hrScore = validScore(hrRecord?.overall_score) ? Number(hrRecord?.overall_score) : null
   const managerScore = validScore(managerRecord?.overall_score) ? Number(managerRecord?.overall_score) : null
-  const combined = hrScore !== null && managerScore !== null
-    ? ((hrScore + managerScore) / 2).toFixed(1)
-    : null
-  const gap = hrScore !== null && managerScore !== null ? Math.abs(hrScore - managerScore) : 0
-  const hrTone = hrRecord?.recommendation ? recommendationTone[hrRecord.recommendation] : null
-  const managerTone = managerRecord?.recommendation ? recommendationTone[managerRecord.recommendation] : null
-  const recommendationDiffers = Boolean(hrTone && managerTone && hrTone !== managerTone)
-  if (recommendationDiffers || gap >= CONSENSUS_SCORE_GAP) {
-    const reason = recommendationDiffers
+  const combined = combinedInterviewScore(hrScore, managerScore)
+  const verdict = evaluateConsensus({
+    hrScore,
+    managerScore,
+    hrRecommendation: hrRecord?.recommendation ?? null,
+    managerRecommendation: managerRecord?.recommendation ?? null,
+  })
+  if (verdict.state === 'divergent') {
+    const differs = Boolean(hrRecord?.recommendation && managerRecord?.recommendation
+      && verdict.scoreGap < CONSENSUS_SCORE_GAP)
+    const reason = differs
       ? `HR 建議${recommendationLabels[hrRecord!.recommendation!]}，主管建議${recommendationLabels[managerRecord!.recommendation!]}`
-      : `兩關分數相差 ${gap} 分`
+      : `兩關分數相差 ${verdict.scoreGap} 分`
     return { state: 'divergent', label: '意見分歧 · 建議討論', detail: `${reason}。請先釐清雙方看到的證據差異，再做錄用決定。`, combined }
   }
   return { state: 'aligned', label: '雙方共識一致', detail: '兩關的評分與錄用建議方向相同。', combined }
@@ -1045,15 +1044,6 @@ const recordFormIsDirty = computed(() => (
   && recordFormSnapshot() !== recordFormBaseline.value
 ))
 
-function validRating(value: number | null | undefined) {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 5
-}
-
-// The backend stores overall_score as an integer 0-100; a fractional value would
-// be rejected with 422 instead of being rounded silently.
-function validScore(value: number | null | undefined) {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 100
-}
 
 function questionIsSkipped(question: InterviewRecordQuestion) {
   return question.not_asked_reason !== null && question.not_asked_reason !== undefined
