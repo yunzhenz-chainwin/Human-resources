@@ -1,6 +1,6 @@
 # 05. API 規格書
 
-**文件版本**：v1.1（2026-07-16）｜**Base URL**：`/api/v1`
+**文件版本**：v1.3（2026-08-06）｜**Base URL**：`/api/v1`
 實作後以 FastAPI 自動生成的 OpenAPI（`/docs`）為準；本文件定義端點框架與慣例。
 
 ---
@@ -100,14 +100,27 @@ POST /candidates/search
 | GET | `/requisitions/{id}/matches` | 推薦名單；`?min_score=&status=` | A H M(自己) |
 | POST | `/requisitions/{id}/rematch` | 手動重新配對 | A H |
 
+### 5.1 面試評分揭露規則 `blind_review_enabled`
+
+職缺層級的布林欄位，決定該職缺的面試採盲評（`true`，預設）或 HR 與主管即時互看評分（`false`）。建立與修改走相同規則：
+
+- 只有 `hr` 能把值設成非預設；其他角色送出變更回 `403`。POST 與 PATCH 皆適用，建立時省略或重述預設值不算一次決策，因此送整份表單的 client 不受影響。
+- 該職缺一旦有任何面試紀錄正式提交，欄位即鎖定，再變更回 `409`，訊息為「已有面試提交紀錄，評分揭露規則不可變更」。唯讀的 `blind_review_locked` 供前端先行停用控制項。
+- 變更成功會寫入 `requisition.blind_review.update` 稽核紀錄（含變更前後值）。
+
+遮罩與釋出時機見 [13-結構化面試評分與盲評操作規格](13-結構化面試評分與盲評操作規格.md) §6。
+
 ## 6. 配對 Matches
 
 | Method | Path | 說明 | 權限 |
 |---|---|---|---|
+| GET | `/requisitions/{id}/candidates/{candidate_id}/match` | 單筆讀取該人才在此職缺的配對分數，回應與清單中的單一項目同形（含主管聯絡資訊遮罩）；面試卡片只需一個分數時使用，不必下載整份名單 | A H M(自己) |
 | POST | `/matches/{id}/feedback` | 主管回饋 `{status: "interview" \| "rejected_by_manager", reason?}` | M(自己職缺) |
 | POST | `/matches/{id}/status` | HR 更新進度（contacted / offered / hired…） | A H |
 | GET | `/requisitions/{id}/matching-criteria` | 讀取職缺媒合條件（`MatchingCriteria`，見 §6.2） | A H M(自己) |
 | PUT | `/requisitions/{id}/matching-criteria` | 更新媒合條件並即時重配對 | A H |
+
+單筆讀取沿用清單的權限判斷，不另寫一套：職缺不存在回 `404`、跨部門回 `403`，人才則套用與清單相同的可見範圍條件。凡是尚未計算配對、人才已軟刪除，或人才不在呼叫者可見範圍內，一律回 `404`——刻意不用 `403` 區分，以免回應反過來證實一組呼叫者無權查看的配對確實存在。`min_score`、`status` 等是清單的顯示篩選而非權限，故不套用；成立的保證是：此端點只會回傳同一位呼叫者用清單查詢也能看到的資料列。
 
 ### 6.1 推薦名單回應範例
 
@@ -142,7 +155,25 @@ POST /candidates/search
 
 新增 `required_skill_ratio`（0–1，預設 `1.0`）：`1.0` 表示須具備全部 required 技能；調低則命中比例達標即通過技能硬門檻，用於放行「只差一兩項」的強配對。地點硬門檻已放寬為「接受鄰近城市」，與地點軟分數一致。
 
-## 7. 報表 Reports
+## 7. 結構化面試 Interviews
+
+完整欄位、完成鎖定、修訂與雙方盲評契約見 [13-結構化面試評分與盲評操作規格](13-結構化面試評分與盲評操作規格.md)。下表只保留 API 導覽。
+
+| Method | Path | 說明 | 權限 |
+|---|---|---|---|
+| GET | `/applications/{id}/interview-question-plan?stage=hr\|manager` | 取得該應徵、階段的最新題組與版本 | A H M（部門範圍） |
+| POST | `/applications/{id}/interview-question-plan/generate?stage=...&force=false` | 初次產生或建立新題組版本 | H（HR 階段）／M（主管階段） |
+| POST | `/applications/{id}/interview-question-plan/questions/{index}/regenerate?stage=...` | 只重產指定題並建立新版本，其餘題與舊版保留 | H／M（各自階段） |
+| POST | `/applications/{id}/interview-question-suggestions` | 依職務證據與選定特質產生額外追問題建議 | A H M（部門範圍） |
+| GET | `/applications/{id}/interview-records` | 列出面試紀錄；盲評釋出前遮罩另一方評分結論 | A H M（部門範圍） |
+| GET | `/applications/{id}/interview-records/{record_id}` | 讀取單筆紀錄及提交／修訂中繼資料 | A H M（部門範圍） |
+| POST | `/applications/{id}/interview-records` | 建立草稿或直接正式提交 | H（HR 階段）／M（主管階段） |
+| PATCH | `/applications/{id}/interview-records/{record_id}` | 更新未完成紀錄；`completed` 一般修改回 `409` | H／M（各自階段） |
+| POST | `/applications/{id}/interview-records/{record_id}/reopen` | 以 `{ "reason": "..." }` 重開已完成紀錄 | H／M（各自階段） |
+
+正式提交為 `completed` 時：每題必須有 `rating=1..5` 或非空 `not_asked_reason`，且必填 `overall_rating`、`recommendation` 與非空 `summary`；違反回 `422`。IT 不屬招募角色，不能透過面試 API 讀取紀錄。
+
+## 8. 報表 Reports
 
 | Method | Path | 說明 | 權限 |
 |---|---|---|---|
@@ -150,9 +181,9 @@ POST /candidates/search
 | GET | `/reports/time-to-fill` | 各職缺開缺→補齊天數 | A H |
 | GET | `/reports/sources` | 來源成效（p104 / p1111 / 內推 的入庫數與錄取率） | A H |
 | GET | `/reports/talent-pool` | 人才庫組成（技能 Top N、年資/地區/學歷分佈、月增量） | A H |
-| GET | `/reports/matching-evaluation` | 媒合品質評估（見 §7.1）；`?requisition_id=`（省略＝全公司彙總） | A H M(本部門) |
+| GET | `/reports/matching-evaluation` | 媒合品質評估（見 §8.1）；`?requisition_id=`（省略＝全公司彙總） | A H M(本部門) |
 
-### 7.1 媒合評估報表 matching-evaluation
+### 8.1 媒合評估報表 matching-evaluation
 
 以 `match_results` 的人工標記結果為真值（`interview`／`offered`／`hired` 為正向，`rejected_by_manager`／`withdrawn` 為負向），量測排序與硬門檻是否可靠。回應欄位：
 
@@ -168,7 +199,7 @@ POST /candidates/search
 
 需累積約 30 筆標記結果，指標才足以支撐自動調權重；未達門檻時 `notes` 會提示樣本不足。權限：HR/admin 可查全公司，主管限本部門（`requisition_id` 省略時回傳其可視範圍彙總）。
 
-## 8. 通知 Notifications
+## 9. 通知 Notifications
 
 | Method | Path | 說明 |
 |---|---|---|
@@ -177,7 +208,7 @@ POST /candidates/search
 
 觸發事件：需求單送審/核准/退回、解析批次完成、待校對積壓 > N 件、新推薦人選入榜、主管回饋、保存期限將至。
 
-## 9. 後台 Admin
+## 10. 後台 Admin
 
 | Method | Path | 說明 | 權限 |
 |---|---|---|---|
