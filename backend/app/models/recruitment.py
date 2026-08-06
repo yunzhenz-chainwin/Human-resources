@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     ForeignKey,
@@ -11,11 +12,15 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    or_,
+    select,
+    true,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, column_property, mapped_column, relationship
 from sqlalchemy.types import JSON
 
 from app.db.base import BIGINT_PK, Base, TimestampMixin, UTCDateTime
+from app.models.interview import InterviewRecord
 
 
 class JobRequisition(TimestampMixin, Base):
@@ -54,6 +59,14 @@ class JobRequisition(TimestampMixin, Base):
     )
     return_reason: Mapped[str | None] = mapped_column(String(500))
     match_weights: Mapped[dict | None] = mapped_column(JSON)
+    # Blind review is the default: each interviewer's evaluation stays hidden from
+    # the other side until both stages are submitted. HR may switch it off for a
+    # single requisition, but only before scoring starts (see blind_review_locked).
+    # true() compiles to native 1 on SQLite; the quoted "true" spelling is the one
+    # e7b2c91d5f40 had to clean up, because any non-empty string reads back as True.
+    blind_review_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     published_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
@@ -199,3 +212,32 @@ class JobApplication(TimestampMixin, Base):
     manager_interview_updated_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime()
     )
+
+
+# Expressed against interview_records, which never imports this module, so the
+# InterviewRecord import above stays acyclic.
+#
+# True once any interview for this requisition has ever been submitted. Mapped as a
+# correlated subquery so every read of a requisition carries the lock state, including
+# the nested requisition inside application payloads, without extra plumbing.
+#
+# "Ever submitted" deliberately includes records that were completed and then
+# reopened: submitted_at is stamped on the first completion and never cleared. If a
+# reopen unlocked the flag, an interviewer could reopen, switch blind review off and
+# read the other side's evaluation, which is exactly what the lock prevents. The
+# status check keeps rows whose submitted_at predates that column covered as well.
+#
+# Declared after JobApplication so both mappers exist when the join is built.
+JobRequisition.blind_review_locked = column_property(
+    select(InterviewRecord.id)
+    .join(JobApplication, JobApplication.id == InterviewRecord.application_id)
+    .where(
+        JobApplication.requisition_id == JobRequisition.id,
+        or_(
+            InterviewRecord.status == "completed",
+            InterviewRecord.submitted_at.is_not(None),
+        ),
+    )
+    .exists()
+    .correlate_except(InterviewRecord, JobApplication)
+)

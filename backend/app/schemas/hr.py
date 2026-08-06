@@ -212,6 +212,11 @@ class RequisitionRead(BaseModel):
     salary_type: str | None
     headcount: int
     status: str
+    # Blind review policy for this requisition's two-stage interview. Read by anyone
+    # who may read the requisition; blind_review_locked is derived (never written)
+    # and turns true once any interview here has been submitted.
+    blind_review_enabled: bool
+    blind_review_locked: bool
     published_at: datetime | None
     created_at: datetime
 
@@ -273,6 +278,9 @@ class RequisitionUpdate(BaseModel):
     salary_type: str | None = None
     headcount: int | None = Field(default=None, ge=1)
     status: str | None = None
+    # Only HR may change this, and only before scoring starts; both rules are
+    # enforced by the route. None means "no decision in this request".
+    blind_review_enabled: bool | None = None
 
     @field_validator("status")
     @classmethod

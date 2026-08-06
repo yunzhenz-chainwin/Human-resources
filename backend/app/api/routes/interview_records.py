@@ -155,9 +155,17 @@ def _record_read(
     record: InterviewRecord,
     user: User,
     peer_evaluations_released: bool,
+    requisition: JobRequisition,
 ) -> InterviewRecordRead:
     result = InterviewRecordRead.model_validate(record)
-    evaluation_revealed = _owns_stage(user, record.stage) or peer_evaluations_released
+    # Blind review is decided per requisition before scoring starts. With it off,
+    # each side reads the other's evaluation immediately; the masked field list is
+    # unchanged for every requisition that keeps the default.
+    evaluation_revealed = (
+        _owns_stage(user, record.stage)
+        or peer_evaluations_released
+        or not requisition.blind_review_enabled
+    )
     private_notes_visible = user.role == "hr" and record.stage == "hr"
     updates: dict[str, object] = {
         "evaluation_revealed": evaluation_revealed,
@@ -733,11 +741,11 @@ def list_interview_records(
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
 ) -> list[InterviewRecordRead]:
-    _application_requisition(db, application_id, user)
+    _, requisition = _application_requisition(db, application_id, user)
     records = _application_records(db, application_id)
     evaluations_released = _peer_evaluations_released(records)
     return [
-        _record_read(record, user, evaluations_released)
+        _record_read(record, user, evaluations_released, requisition)
         for record in records
         if stage is None or record.stage == stage
     ]
@@ -819,7 +827,7 @@ def create_interview_record(
     db.commit()
     db.refresh(record)
     records = _application_records(db, application_id)
-    return _record_read(record, user, _peer_evaluations_released(records))
+    return _record_read(record, user, _peer_evaluations_released(records), requisition)
 
 
 @router.get(
@@ -832,10 +840,10 @@ def get_interview_record(
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_user),
 ) -> InterviewRecordRead:
-    _application_requisition(db, application_id, user)
+    _, requisition = _application_requisition(db, application_id, user)
     record = _record(db, application_id, record_id)
     records = _application_records(db, application_id)
-    return _record_read(record, user, _peer_evaluations_released(records))
+    return _record_read(record, user, _peer_evaluations_released(records), requisition)
 
 
 @router.patch(
@@ -915,7 +923,7 @@ def update_interview_record(
     db.commit()
     db.refresh(record)
     records = _application_records(db, application_id)
-    return _record_read(record, user, _peer_evaluations_released(records))
+    return _record_read(record, user, _peer_evaluations_released(records), requisition)
 
 
 @router.post(
@@ -964,4 +972,4 @@ def reopen_interview_record(
     db.commit()
     db.refresh(record)
     records = _application_records(db, application_id)
-    return _record_read(record, user, _peer_evaluations_released(records))
+    return _record_read(record, user, _peer_evaluations_released(records), requisition)

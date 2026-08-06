@@ -14,10 +14,25 @@ import pytest
 from sqlalchemy import select
 from test_application_interviews import _headers, application_client
 
-from app.models import InterviewRecord, JobApplication
+from app.models import InterviewRecord, JobApplication, User
 from app.models.security import AuditLog
 
 Stage = Literal["hr", "manager"]
+
+# Exactly what blind review withholds from the other side. Written out so any change
+# to the masking list has to be a deliberate edit here, not a silent regression.
+MASKED_RECORD_FIELDS = (
+    "summary",
+    "recommendation",
+    "overall_rating",
+    "overall_score",
+    "submitted_by_id",
+    "submitted_by_name",
+    "last_reopen_reason",
+)
+MASKED_QUESTION_FIELDS = ("rating", "not_asked_reason", "notes")
+
+_BLIND_REVIEW_LOCKED_DETAIL = "已有面試提交紀錄，評分揭露規則不可變更"
 
 
 def _completed_payload(
@@ -635,3 +650,294 @@ def test_completed_recommendation_never_changes_application_status_automatically
         record = db.get(InterviewRecord, created.json()["id"])
         assert record is not None
         assert record.recommendation == "offer"
+
+
+def test_blind_review_defaults_to_enabled_and_keeps_todays_masking(
+    application_client,
+) -> None:
+    """Regression guard: an untouched requisition behaves exactly as it did before."""
+
+    client, _, ids = application_client
+    hr_headers = _headers(client, "hr")
+    requisition_endpoint = f"/api/v1/requisitions/{ids['design_job']}"
+    before = client.get(requisition_endpoint, headers=hr_headers)
+    assert before.status_code == 200, before.text
+    assert before.json()["blind_review_enabled"] is True
+    assert before.json()["blind_review_locked"] is False
+
+    endpoint = f"/api/v1/applications/{ids['design_application']}/interview-records"
+    hr_payload = _completed_payload("hr")
+    hr_payload["overall_score"] = 82
+    hr_created = client.post(endpoint, headers=hr_headers, json=hr_payload)
+    assert hr_created.status_code == 201, hr_created.text
+
+    manager_headers = _headers(client, "design-manager")
+    masked = client.get(f"{endpoint}/{hr_created.json()['id']}", headers=manager_headers)
+    assert masked.status_code == 200, masked.text
+    assert masked.json()["evaluation_revealed"] is False
+    assert masked.json()["questions"][0]["rating"] is None
+    assert masked.json()["summary"] is None
+    assert masked.json()["recommendation"] is None
+    assert masked.json()["overall_rating"] is None
+    assert masked.json()["overall_score"] is None
+
+    listed = client.get(endpoint, headers=manager_headers)
+    assert listed.status_code == 200, listed.text
+    assert [item["evaluation_revealed"] for item in listed.json()] == [False]
+
+    # A submitted interview freezes the decision from here on.
+    after = client.get(requisition_endpoint, headers=hr_headers)
+    assert after.json()["blind_review_enabled"] is True
+    assert after.json()["blind_review_locked"] is True
+
+
+def test_disabled_blind_review_reveals_the_other_side_before_submission(
+    application_client,
+) -> None:
+    client, _, ids = application_client
+    hr_headers = _headers(client, "hr")
+    manager_headers = _headers(client, "design-manager")
+    switched = client.patch(
+        f"/api/v1/requisitions/{ids['design_job']}",
+        headers=hr_headers,
+        json={"blind_review_enabled": False},
+    )
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["blind_review_enabled"] is False
+    assert switched.json()["blind_review_locked"] is False
+
+    endpoint = f"/api/v1/applications/{ids['design_application']}/interview-records"
+    hr_payload = _completed_payload("hr")
+    hr_payload["overall_score"] = 91
+    hr_payload["private_notes"] = "HR 限閱薪資討論。"
+    hr_created = client.post(endpoint, headers=hr_headers, json=hr_payload)
+    assert hr_created.status_code == 201, hr_created.text
+
+    # The manager has submitted nothing at all and still reads the HR evaluation.
+    manager_view = client.get(
+        f"{endpoint}/{hr_created.json()['id']}", headers=manager_headers
+    ).json()
+    assert manager_view["evaluation_revealed"] is True
+    assert manager_view["questions"][0]["rating"] == 4
+    assert manager_view["questions"][0]["notes"] == "證據具體。"
+    assert manager_view["summary"] == hr_payload["summary"]
+    assert manager_view["recommendation"] == "advance"
+    assert manager_view["overall_rating"] == 4
+    assert manager_view["overall_score"] == 91
+    assert manager_view["submitted_by_name"] == "Application HR"
+    # HR-private notes are a separate rule and stay HR-only either way.
+    assert manager_view["private_notes"] is None
+    assert manager_view["private_notes_visible"] is False
+
+    manager_draft = _completed_payload("manager")
+    manager_draft["status"] = "in_progress"
+    manager_created = client.post(endpoint, headers=manager_headers, json=manager_draft)
+    assert manager_created.status_code == 201, manager_created.text
+    hr_view = client.get(
+        f"{endpoint}/{manager_created.json()['id']}", headers=hr_headers
+    ).json()
+    assert hr_view["evaluation_revealed"] is True
+    assert hr_view["questions"][0]["rating"] == 4
+    assert hr_view["summary"] == manager_draft["summary"]
+    assert hr_view["recommendation"] == "advance"
+
+    # The engineering requisition was never switched, so it still masks.
+    other_endpoint = (
+        f"/api/v1/applications/{ids['engineering_application']}/interview-records"
+    )
+    other_created = client.post(
+        other_endpoint, headers=hr_headers, json=_completed_payload("hr")
+    )
+    assert other_created.status_code == 201, other_created.text
+    other_view = client.get(
+        f"{other_endpoint}/{other_created.json()['id']}",
+        headers=_headers(client, "engineering-manager"),
+    ).json()
+    assert other_view["evaluation_revealed"] is False
+    assert other_view["summary"] is None
+
+
+def test_blind_review_rule_is_immutable_once_an_interview_is_submitted(
+    application_client,
+) -> None:
+    client, _, ids = application_client
+    hr_headers = _headers(client, "hr")
+    endpoint = f"/api/v1/applications/{ids['design_application']}/interview-records"
+    requisition_endpoint = f"/api/v1/requisitions/{ids['design_job']}"
+
+    created = client.post(endpoint, headers=hr_headers, json=_completed_payload("hr"))
+    assert created.status_code == 201, created.text
+    assert client.get(requisition_endpoint, headers=hr_headers).json()[
+        "blind_review_locked"
+    ]
+
+    blocked = client.patch(
+        requisition_endpoint,
+        headers=hr_headers,
+        json={"blind_review_enabled": False},
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"] == _BLIND_REVIEW_LOCKED_DETAIL
+
+    # Reopening the record must not reopen the decision, or the lock would be
+    # trivially bypassable: reopen, unmask, read the other side.
+    reopened = client.post(
+        f"{endpoint}/{created.json()['id']}/reopen",
+        headers=hr_headers,
+        json={"reason": "補正評分敘述，揭露規則仍不可變更"},
+    )
+    assert reopened.status_code == 200, reopened.text
+    assert client.get(requisition_endpoint, headers=hr_headers).json()[
+        "blind_review_locked"
+    ]
+    still_blocked = client.patch(
+        requisition_endpoint,
+        headers=hr_headers,
+        json={"blind_review_enabled": False},
+    )
+    assert still_blocked.status_code == 409, still_blocked.text
+    assert still_blocked.json()["detail"] == _BLIND_REVIEW_LOCKED_DETAIL
+
+    # Unrelated edits, and re-sending the unchanged rule, must keep working.
+    unchanged = client.patch(
+        requisition_endpoint,
+        headers=hr_headers,
+        json={"headcount": 2, "blind_review_enabled": True},
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["headcount"] == 2
+    assert unchanged.json()["blind_review_enabled"] is True
+
+    # A requisition with no submitted interview is still free to change.
+    engineering_endpoint = f"/api/v1/requisitions/{ids['engineering_job']}"
+    free = client.patch(
+        engineering_endpoint,
+        headers=hr_headers,
+        json={"blind_review_enabled": False},
+    )
+    assert free.status_code == 200, free.text
+    assert free.json()["blind_review_enabled"] is False
+
+
+def test_only_hr_may_change_the_blind_review_rule(application_client) -> None:
+    client, testing_session, ids = application_client
+    requisition_endpoint = f"/api/v1/requisitions/{ids['design_job']}"
+    hr_headers = _headers(client, "hr")
+
+    forbidden = client.patch(
+        requisition_endpoint,
+        headers=_headers(client, "admin"),
+        json={"blind_review_enabled": False},
+    )
+    assert forbidden.status_code == 403, forbidden.text
+    for username in ("design-manager", "engineering-manager", "it"):
+        assert (
+            client.patch(
+                requisition_endpoint,
+                headers=_headers(client, username),
+                json={"blind_review_enabled": False},
+            ).status_code
+            == 403
+        ), username
+    assert client.get(requisition_endpoint, headers=hr_headers).json()[
+        "blind_review_enabled"
+    ]
+
+    # An admin editing anything else, or restating the current rule, is untouched.
+    admin_edit = client.patch(
+        requisition_endpoint,
+        headers=_headers(client, "admin"),
+        json={"headcount": 3, "blind_review_enabled": True},
+    )
+    assert admin_edit.status_code == 200, admin_edit.text
+    assert admin_edit.json()["headcount"] == 3
+
+    switched = client.patch(
+        requisition_endpoint,
+        headers=hr_headers,
+        json={"blind_review_enabled": False},
+    )
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["blind_review_enabled"] is False
+
+    with testing_session() as db:
+        logs = list(
+            db.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "requisition.blind_review.update",
+                    AuditLog.resource_type == "job_requisition",
+                    AuditLog.resource_id == str(ids["design_job"]),
+                )
+            ).all()
+        )
+        hr_user_id = db.scalar(select(User.id).where(User.username == "hr"))
+    assert len(logs) == 1
+    assert logs[0].actor_user_id == hr_user_id
+    assert logs[0].created_at is not None
+    assert logs[0].details["blind_review_enabled"] == {"from": True, "to": False}
+
+
+def test_masked_field_list_is_unchanged_while_blind_review_is_on(
+    application_client,
+) -> None:
+    client, _, ids = application_client
+    hr_headers = _headers(client, "hr")
+    endpoint = f"/api/v1/applications/{ids['design_application']}/interview-records"
+    payload = _completed_payload(
+        "hr",
+        questions=[
+            {
+                "question": "請說明求職動機。",
+                "trait": "motivation",
+                "response": "候選人希望擴大產品影響力。",
+                "rating": 4,
+                "notes": "例子明確。",
+                "purpose": "確認動機與職務相符",
+                "follow_up": "請再說明可衡量的成果",
+                "source": "hr_standard",
+            },
+            {
+                "question": "備用追問題。",
+                "not_asked_reason": "前題已取得足夠證據",
+            },
+        ],
+    )
+    payload["overall_score"] = 88
+    payload["private_notes"] = "HR 限閱薪資討論。"
+    created = client.post(endpoint, headers=hr_headers, json=payload)
+    assert created.status_code == 201, created.text
+    owner_view = created.json()
+    assert owner_view["evaluation_revealed"] is True
+
+    masked = client.get(
+        f"{endpoint}/{created.json()['id']}",
+        headers=_headers(client, "design-manager"),
+    ).json()
+    assert masked["evaluation_revealed"] is False
+    for field in MASKED_RECORD_FIELDS:
+        assert masked[field] is None, field
+    for masked_question, owner_question in zip(
+        masked["questions"], owner_view["questions"], strict=True
+    ):
+        assert set(masked_question) == set(owner_question)
+        for field, value in owner_question.items():
+            if field in MASKED_QUESTION_FIELDS:
+                assert masked_question[field] is None, field
+            else:
+                assert masked_question[field] == value, field
+
+    # Nothing outside the documented list is withheld.
+    separately_ruled = {
+        "questions",
+        "private_notes",
+        "private_notes_visible",
+        "evaluation_revealed",
+    }
+    for field, value in owner_view.items():
+        if field in MASKED_RECORD_FIELDS or field in separately_ruled:
+            continue
+        assert masked[field] == value, field
+    assert masked["private_notes"] is None
+    assert masked["submitted_at"] == owner_view["submitted_at"]
+    assert masked["revision_number"] == owner_view["revision_number"]
+    assert masked["interviewer_name"] == owner_view["interviewer_name"]

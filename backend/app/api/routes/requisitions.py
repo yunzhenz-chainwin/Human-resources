@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
@@ -25,6 +25,7 @@ from app.schemas.matching import (
     JobComplianceResult,
 )
 from app.services.jd_compliance import JD_COMPLIANCE_RULES_VERSION, lint_job_text
+from app.services.security import write_audit
 
 router = APIRouter(prefix="/requisitions")
 
@@ -158,6 +159,7 @@ def get_requisition(
 def update_requisition(
     requisition_id: int,
     payload: RequisitionUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_recruiting_manager),
 ) -> JobRequisition:
@@ -166,6 +168,24 @@ def update_requisition(
         raise HTTPException(status_code=404, detail="職缺不存在")
     enforce_department_scope(user, requisition.department_id)
     updates = payload.model_dump(exclude_unset=True)
+    # The column is NOT NULL, so an explicit null carries no decision at all.
+    if updates.get("blind_review_enabled") is None:
+        updates.pop("blind_review_enabled", None)
+    # Only a real change is policed: clients that re-send the whole requisition must
+    # keep working, and re-stating the current rule decides nothing.
+    blind_review_change = (
+        "blind_review_enabled" in updates
+        and updates["blind_review_enabled"] != requisition.blind_review_enabled
+    )
+    if blind_review_change:
+        if user.role != "hr":
+            raise HTTPException(status_code=403, detail="僅人資可設定面試評分揭露規則")
+        if requisition.blind_review_locked:
+            raise HTTPException(
+                status_code=409,
+                detail="已有面試提交紀錄，評分揭露規則不可變更",
+            )
+    previous_blind_review = requisition.blind_review_enabled
     new_status = updates.get("status")
     if new_status is not None and new_status not in REQUISITION_STATUSES:
         raise HTTPException(status_code=422, detail="未知的需求單狀態")
@@ -185,6 +205,26 @@ def update_requisition(
         setattr(requisition, field, value)
     if transitioning:
         _apply_status_timestamps(requisition, new_status)
+    if blind_review_change:
+        # Who relaxed or restored blind review, and when, has to stay attributable:
+        # the audit log is this project's record of that everywhere else too.
+        write_audit(
+            db,
+            user,
+            "requisition.blind_review.update",
+            "job_requisition",
+            requisition.id,
+            requisition.department_id,
+            details={
+                "req_no": requisition.req_no,
+                "blind_review_enabled": {
+                    "from": previous_blind_review,
+                    "to": requisition.blind_review_enabled,
+                },
+            },
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
     db.commit()
     db.refresh(requisition)
     return requisition

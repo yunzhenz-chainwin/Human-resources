@@ -82,10 +82,15 @@ export type RequisitionDto = {
   salary_type: string | null
   headcount: number
   status: string
+  /** Blind review: hide each side's interview evaluation until both stages submit. */
+  blind_review_enabled: boolean
+  /** Derived and read-only: true once any interview here has been submitted, after which blind_review_enabled can no longer change. */
+  blind_review_locked: boolean
   published_at: string | null
   created_at: string
 }
-export type RequisitionWrite = Omit<RequisitionDto, 'id' | 'department_name' | 'requested_by' | 'published_at' | 'created_at'>
+// blind_review_enabled is optional on write and HR-only on the server; blind_review_locked is never written.
+export type RequisitionWrite = Omit<RequisitionDto, 'id' | 'department_name' | 'requested_by' | 'published_at' | 'created_at' | 'blind_review_enabled' | 'blind_review_locked'> & { blind_review_enabled?: boolean }
 export type DepartmentRequisitionWrite = {
   title: string
   employment_type: string
