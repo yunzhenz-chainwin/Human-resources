@@ -194,6 +194,20 @@ def semantic_shadow_response_schema() -> dict[str, Any]:
                     "required": ["experience", "target_requirement", "rationale"],
                 },
             },
+            # PENDING DECISION (raised 2026-08, not yet resolved): unlike
+            # interview questions, these two carry free model text that never
+            # passes the 就服法§5 / 性平法§7·§11 rule library in
+            # interview_question_compliance.py. Nothing screens a concern that
+            # reads "已婚，可能影響出差意願" or "年齡偏高".
+            #
+            # That is tolerable while they stay inside the shadow-analysis panel,
+            # which is explicitly a comparison experiment and does not re-rank
+            # anything. It stops being tolerable the moment they are surfaced in
+            # a hiring-decision view, because unvetted model text would then sit
+            # beside a hire/reject choice and become part of the record.
+            #
+            # So: run both through the compliance checker before any decision
+            # screen renders them, or decide deliberately not to and record why.
             "concerns": string_array,
             "insufficient_data": string_array,
             "interview_questions": {
