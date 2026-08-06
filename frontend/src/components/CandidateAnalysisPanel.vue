@@ -10,12 +10,37 @@ import {
   type RoleMatchAnalysis,
   type RoleMatchItem,
 } from '../services/candidateAnalysisApi'
-import { hrApi, type CandidateDto, type CandidateResumeSummaryDto, type RequisitionDto } from '../services/hrApi'
+import {
+  hrApi,
+  type ApplicationDto,
+  type CandidateDto,
+  type CandidateResumeSummaryDto,
+  type CompositeScoreComponent,
+  type CompositeScoreComponentDetailDto,
+  type CompositeScoreStageDetailDto,
+  type InterviewRecordDto,
+  type InterviewStage,
+  type RequisitionDto,
+} from '../services/hrApi'
+import { matchingReportsApi } from '../services/matchingReportsApi'
 
 type AnalysisRole = 'it' | 'hr' | 'admin' | 'manager'
 type PreviewTarget =
   | { kind: 'original'; id: number; filename: string }
   | { kind: 'deidentified'; id: number; filename: string }
+// `masked` is blind review hiding the other side; it is deliberately distinct from
+// `unscored` (nobody scored) and `unavailable` (no such score exists at all).
+type ScoreFigureState = 'scored' | 'masked' | 'pending' | 'unscored' | 'unavailable'
+type ScoreFigure = {
+  key: string
+  index: string
+  label: string
+  source: string
+  badge: string
+  value: number | null
+  state: ScoreFigureState
+  note: string
+}
 
 const props = withDefaults(defineProps<{
   candidate: Pick<CandidateDto, 'id' | 'code' | 'name'>
@@ -59,8 +84,16 @@ const previewUrl = ref('')
 const previewIsPdf = ref(false)
 const previewLoadingKey = ref('')
 const previewError = ref('')
+const scoreApplication = ref<ApplicationDto | null>(null)
+const scoreRecords = ref<InterviewRecordDto[]>([])
+const resumeMatchScore = ref<number | null>(null)
+const resumeMatchUnreadable = ref(false)
+const recordsUnreadable = ref(false)
+const scoresLoading = ref(false)
+const scoresError = ref('')
 
 let documentLoadSequence = 0
+let scoreLoadSequence = 0
 let resultExpiryTimer: number | null = null
 
 const canManageDocuments = computed(() => props.role === 'hr' || props.role === 'admin')
@@ -104,6 +137,25 @@ const statusLabels: Record<string, string> = {
   stale: '來源已更新',
 }
 
+const stageLabels: Record<InterviewStage, string> = { hr: 'HR', manager: '主管' }
+const compositeComponentOrder: CompositeScoreComponent[] = [
+  'resume', 'hr_questions', 'hr_overall', 'manager_questions', 'manager_overall',
+]
+const compositeComponentLabels: Record<CompositeScoreComponent, string> = {
+  resume: '① 履歷條件匹配',
+  hr_questions: '② HR 題目評分',
+  hr_overall: '③ HR 面試總分',
+  manager_questions: '④ 主管題目評分',
+  manager_overall: '⑤ 主管面試總分',
+}
+// Wording follows the backend's excluded_reason values; a component that was left
+// out must say why, otherwise the reweighting below it looks arbitrary.
+const compositeExclusionLabels: Record<NonNullable<CompositeScoreComponentDetailDto['excluded_reason']>, string> = {
+  no_match_result: '沒有履歷媒合結果，權重已分攤給其餘項目',
+  no_rated_questions: '沒有已評分題目（未詢問不計分），權重併入同一關的面試總分',
+  no_overall_score: '面試官未填寫面試總分，權重併入同一關的題目評分',
+}
+
 function compareDocumentRecency(left: DeidentifiedResumeDocument, right: DeidentifiedResumeDocument) {
   const leftTime = Date.parse(left.reviewed_at || left.created_at)
   const rightTime = Date.parse(right.reviewed_at || right.created_at)
@@ -136,6 +188,12 @@ function formatRatio(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—'
   const percentage = value >= 0 && value <= 1 ? value * 100 : value
   return `${Math.round(percentage * 10) / 10}%`
+}
+
+// All six stored scores share the 0-100 scale, so they share one unit here too.
+function formatPoints(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
+  return `${Math.round(value * 10) / 10} 分`
 }
 
 function confidenceLabel(value: RoleMatchItem['confidence']) {
@@ -206,6 +264,8 @@ function resetForCandidate() {
   previewLoadingKey.value = ''
   closePreview()
   clearAnalysisResults()
+  scoreLoadSequence += 1
+  resetScores()
 }
 
 async function loadDocuments() {
@@ -410,6 +470,249 @@ async function runRoleMatchAnalysis() {
   }
 }
 
+function validRating(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 5
+}
+
+// The backend stores overall_score as an integer 0-100; anything else is not a score.
+function validScore(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 100
+}
+
+function stageRecord(stage: InterviewStage) {
+  return scoreRecords.value.find(record => record.stage === stage) || null
+}
+
+function stageQuestionCounts(record: InterviewRecordDto) {
+  const questions = record.questions || []
+  return {
+    total: questions.length,
+    rated: questions.filter(question => validRating(question.rating)).length,
+    notAsked: questions.filter(question => Boolean(question.not_asked_reason)).length,
+  }
+}
+
+// Identical arithmetic to InterviewManagement.vue's stageQuestionScore and to the
+// backend's interview_scoring.question_score: rated ratings over (rated count x 5),
+// 未詢問 questions dropped from numerator and denominator alike, and null - never
+// zero - when nothing is rated. A third variant that rounded differently would make
+// the stored composite disagree with the stage scores rendered beside it.
+function stageQuestionScore(stage: InterviewStage): number | null {
+  const record = stageRecord(stage)
+  if (!record) return null
+  const rated = (record.questions || []).filter(question => validRating(question.rating))
+  if (!rated.length) return null
+  const total = rated.reduce((sum, question) => sum + Number(question.rating), 0)
+  return Math.round((total / (rated.length * 5)) * 1000) / 10
+}
+
+// Blind review masks the other side's evaluation until both stages submit, and the
+// masked fields arrive as null. A masked figure must therefore never be described as
+// "尚未評分", and must never hint at whether the hidden number was high or low.
+function interviewFigure(stage: InterviewStage, kind: 'questions' | 'overall'): Pick<ScoreFigure, 'value' | 'state' | 'note'> {
+  const record = stageRecord(stage)
+  const label = stageLabels[stage]
+  if (recordsUnreadable.value) return { value: null, state: 'unavailable', note: '無法讀取面試評分紀錄，請重新整理後再試。' }
+  if (!record) return { value: null, state: 'pending', note: `${label}尚未建立面試紀錄。` }
+  if (!record.evaluation_revealed) {
+    return { value: null, state: 'masked', note: '評分保護中：HR 與主管都提交後才會公開，此處不顯示任何分數線索。' }
+  }
+  const counts = stageQuestionCounts(record)
+  const value = kind === 'questions'
+    ? stageQuestionScore(stage)
+    : validScore(record.overall_score) ? Number(record.overall_score) : null
+  const draftSuffix = record.status === 'completed' ? '' : `（${label}尚未提交，為草稿評分）`
+  if (value === null) {
+    return kind === 'questions'
+      ? { value: null, state: 'unscored', note: `${label}這一關沒有已評分的題目（共 ${counts.total} 題，未詢問 ${counts.notAsked} 題不計分），資料不足。` }
+      : { value: null, state: 'unscored', note: `${label}尚未填寫面試總分。` }
+  }
+  return kind === 'questions'
+    ? { value, state: 'scored', note: `已評分 ${counts.rated}／${counts.total} 題${counts.notAsked ? ` · 未詢問 ${counts.notAsked} 題不計分` : ''}${draftSuffix}` }
+    : { value, state: 'scored', note: `由${label}面試官填寫的 0-100 總分${draftSuffix}` }
+}
+
+const canReadScores = computed(() => props.role === 'hr' || props.role === 'admin' || props.role === 'manager')
+// Interview scores belong to an application (candidate x requisition), so the section
+// only exists once this panel has a requisition in context.
+const contextRequisitionId = computed(() => props.defaultRequisitionId ?? selectedRequisitionId.value)
+const scoreRequisition = computed(() => (
+  scoreApplication.value?.requisition
+  || props.jobs.find(job => job.id === contextRequisitionId.value)
+  || null
+))
+const scoreRequisitionLabel = computed(() => (
+  scoreRequisition.value ? `${scoreRequisition.value.req_no} · ${scoreRequisition.value.title}` : '此職缺'
+))
+const compositeBreakdown = computed(() => scoreApplication.value?.composite_score_breakdown ?? null)
+const computedBreakdown = computed(() => (
+  compositeBreakdown.value?.status === 'computed' ? compositeBreakdown.value : null
+))
+const compositeScoreValue = computed(() => {
+  const stored = scoreApplication.value?.composite_score
+  if (typeof stored === 'number' && Number.isFinite(stored)) return stored
+  const fromBreakdown = computedBreakdown.value?.composite_score
+  return typeof fromBreakdown === 'number' && Number.isFinite(fromBreakdown) ? fromBreakdown : null
+})
+// The breakdown names the pending stages itself; falling back to the records keeps the
+// message honest on a deployment whose stored breakdown predates this field.
+const pendingStages = computed<InterviewStage[]>(() => {
+  const breakdown = compositeBreakdown.value
+  if (breakdown?.status === 'pending_stages' && Array.isArray(breakdown.pending_stages)) {
+    return breakdown.pending_stages.filter(stage => stage === 'hr' || stage === 'manager')
+  }
+  return (['hr', 'manager'] as InterviewStage[]).filter(stage => stageRecord(stage)?.status !== 'completed')
+})
+// The stored breakdown decides, because it is what the composite was actually built
+// from; the records are only consulted when no breakdown has been stored at all.
+const compositeState = computed<'computed' | 'pending' | 'insufficient' | 'unavailable'>(() => {
+  if (computedBreakdown.value) return compositeScoreValue.value === null ? 'insufficient' : 'computed'
+  if (compositeBreakdown.value?.status === 'pending_stages') return 'pending'
+  if (compositeScoreValue.value !== null) return 'computed'
+  return pendingStages.value.length && !recordsUnreadable.value ? 'pending' : 'unavailable'
+})
+const compositeStateNote = computed(() => {
+  if (compositeState.value === 'pending') {
+    const waiting = pendingStages.value.map(stage => stageLabels[stage]).join('與') || '雙方'
+    return `等待${waiting}提交面試評分。兩關都提交前不會產生綜合分，也不會顯示任何部分計算結果或對方的評分。`
+  }
+  if (compositeState.value === 'insufficient') return '兩關都已提交，但沒有任何一項分數可納入計算，資料不足。'
+  if (compositeState.value === 'unavailable') return '尚無綜合分的計算紀錄；兩關評分提交後由系統計算並保存。'
+  return ''
+})
+const compositeComponentRows = computed(() => {
+  const breakdown = computedBreakdown.value
+  if (!breakdown) return []
+  return compositeComponentOrder
+    .map(key => ({ key, label: compositeComponentLabels[key], detail: breakdown.components?.[key] || null }))
+    .filter((row): row is { key: CompositeScoreComponent; label: string; detail: CompositeScoreComponentDetailDto } => row.detail !== null)
+})
+const compositeStageRows = computed(() => {
+  const stages = computedBreakdown.value?.stages
+  if (!stages) return []
+  return (['hr', 'manager'] as InterviewStage[])
+    .map(stage => ({ stage, label: stageLabels[stage], detail: stages[stage] || null }))
+    .filter((row): row is { stage: InterviewStage; label: string; detail: CompositeScoreStageDetailDto } => row.detail !== null)
+})
+// Before a composite exists the breakdown carries no weights, but the requisition still
+// says whether this job overrides them, so the line stays truthful in both states.
+const compositeWeightSourceLabel = computed(() => (
+  computedBreakdown.value?.configured_weights || scoreRequisition.value?.composite_score_weights
+    ? '採用此職缺自訂的權重設定'
+    : '採用系統預設權重'
+))
+// Same phrasing the interview card uses, so the two screens never disagree about who
+// is still pending. It reports submission state only, never a score.
+const evaluationReleaseHint = computed(() => {
+  if (scoreRequisition.value?.blind_review_enabled === false) return '本職缺採即時共享評分'
+  const hrDone = stageRecord('hr')?.status === 'completed'
+  const managerDone = stageRecord('manager')?.status === 'completed'
+  if (hrDone && managerDone) return '雙方已提交 · 評分已公開'
+  if (hrDone) return 'HR 已提交 · 待主管提交後自動公開'
+  if (managerDone) return '主管已提交 · 待 HR 提交後自動公開'
+  return '雙方提交後自動公開評分'
+})
+const resumeFigure = computed<Pick<ScoreFigure, 'value' | 'state' | 'note'>>(() => {
+  const fallback = computedBreakdown.value?.components?.resume?.value
+  const value = resumeMatchScore.value !== null
+    ? resumeMatchScore.value
+    : typeof fallback === 'number' && Number.isFinite(fallback) ? fallback : null
+  if (value !== null) return { value, state: 'scored', note: '此職缺的履歷媒合結果（職位條件匹配度）。' }
+  if (resumeMatchUnreadable.value) return { value: null, state: 'unavailable', note: '無法讀取此職缺的媒合結果，請重新整理後再試。' }
+  return { value: null, state: 'unavailable', note: '這位人才在此職缺沒有媒合結果（例如由人才庫手動加入），綜合分會將這項權重分攤給其餘項目。' }
+})
+const scoreFigures = computed<ScoreFigure[]>(() => [
+  { key: 'resume', index: '①', label: '履歷條件匹配', source: '履歷媒合結果', badge: '', ...resumeFigure.value },
+  { key: 'hr-questions', index: '②', label: 'HR 題目評分', source: 'HR 面試逐題評分換算', badge: '', ...interviewFigure('hr', 'questions') },
+  { key: 'hr-overall', index: '③', label: 'HR 面試總分', source: 'HR 面試官填寫', badge: '', ...interviewFigure('hr', 'overall') },
+  { key: 'manager-questions', index: '④', label: '主管題目評分', source: '主管面試逐題評分換算', badge: '', ...interviewFigure('manager', 'questions') },
+  { key: 'manager-overall', index: '⑤', label: '主管面試總分', source: '主管面試官填寫', badge: '', ...interviewFigure('manager', 'overall') },
+  {
+    key: 'composite',
+    index: '⑥',
+    label: '綜合分',
+    source: '由前五項加權計算並保存',
+    badge: '參考值',
+    value: compositeState.value === 'computed' ? compositeScoreValue.value : null,
+    state: compositeState.value === 'computed' ? 'scored' : compositeState.value === 'pending' ? 'pending' : 'unavailable',
+    note: compositeState.value === 'computed' ? '僅供排序與討論參考，不代表錄用結論。' : compositeStateNote.value,
+  },
+])
+const showScoreSummary = computed(() => (
+  canReadScores.value
+  && contextRequisitionId.value !== null
+  && (scoresLoading.value || Boolean(scoreApplication.value) || Boolean(scoresError.value))
+))
+
+function figurePlaceholder(state: ScoreFigure['state']) {
+  if (state === 'masked') return '評分保護中'
+  if (state === 'pending') return '等待提交'
+  if (state === 'unscored') return '尚未評分'
+  return '資料不足'
+}
+
+function componentExclusionText(detail: CompositeScoreComponentDetailDto) {
+  return detail.excluded_reason ? compositeExclusionLabels[detail.excluded_reason] : '資料不足，未納入計算'
+}
+
+function stageDetailText(detail: CompositeScoreStageDetailDto) {
+  const parts = [`已評分 ${detail.rated_question_count}／${detail.question_count} 題`]
+  if (detail.not_asked_question_count) parts.push(`未詢問 ${detail.not_asked_question_count} 題`)
+  if (detail.submitted_at) parts.push(`提交於 ${formatDate(detail.submitted_at)}`)
+  if (detail.revision_number) parts.push(`第 ${detail.revision_number} 次提交`)
+  return parts.join(' · ')
+}
+
+function resetScores() {
+  scoreApplication.value = null
+  scoreRecords.value = []
+  resumeMatchScore.value = null
+  resumeMatchUnreadable.value = false
+  recordsUnreadable.value = false
+  scoresError.value = ''
+  scoresLoading.value = false
+}
+
+// The three screens that mount this panel only hold a candidate and a requisition id,
+// so the application - which carries composite_score - is resolved here rather than
+// passed in. Every fetch is read-only; nothing here can move an application's status.
+async function loadScores() {
+  const requisitionId = contextRequisitionId.value
+  const requestedCandidateId = props.candidate.id
+  const sequence = ++scoreLoadSequence
+  resetScores()
+  if (!canReadScores.value || requisitionId === null) return
+  scoresLoading.value = true
+  try {
+    const applications = (await hrApi.applications({ requisitionId })).data
+    if (sequence !== scoreLoadSequence) return
+    const application = applications.find(item => item.candidate_id === requestedCandidateId) || null
+    scoreApplication.value = application
+    if (!application) return
+    const [records, matches] = await Promise.allSettled([
+      hrApi.interviewRecords(application.id),
+      matchingReportsApi.matches(requisitionId, true),
+    ])
+    if (sequence !== scoreLoadSequence) return
+    if (records.status === 'fulfilled') {
+      scoreRecords.value = records.value.data
+    } else {
+      recordsUnreadable.value = true
+      scoresError.value = errorMessage(records.reason, '無法載入面試評分紀錄')
+    }
+    if (matches.status === 'fulfilled') {
+      const match = matches.value.items.find(item => item.candidate_id === requestedCandidateId)
+      resumeMatchScore.value = match && Number.isFinite(match.total_score) ? match.total_score : null
+    } else {
+      resumeMatchUnreadable.value = true
+    }
+  } catch (cause) {
+    if (sequence === scoreLoadSequence) scoresError.value = errorMessage(cause, '無法載入分數總覽')
+  } finally {
+    if (sequence === scoreLoadSequence) scoresLoading.value = false
+  }
+}
+
 function selectDefaultRequisition() {
   if (props.defaultRequisitionId !== null && analysisJobs.value.some(job => job.id === props.defaultRequisitionId)) {
     selectedRequisitionId.value = props.defaultRequisitionId
@@ -432,8 +735,11 @@ watch(() => props.resumes.map(resume => `${resume.id}:${resume.has_file}`).join(
 
 watch([() => props.defaultRequisitionId, () => props.jobs], selectDefaultRequisition)
 
+watch([() => props.candidate.id, contextRequisitionId], () => { void loadScores() }, { immediate: true })
+
 onBeforeUnmount(() => {
   documentLoadSequence += 1
+  scoreLoadSequence += 1
   closePreview()
   clearAnalysisResults()
 })
@@ -502,6 +808,40 @@ onBeforeUnmount(() => {
 
       <template v-else>
         <div class="analysis-ready-banner" data-testid="analysis-ready-banner"><span>✓</span><div><strong>去識別化檔案已核准</strong><p>{{ analysisReadyDocument.anonymous_ref }} v{{ analysisReadyDocument.version }} 已可分析，請直接選擇下方 A 或 B。</p></div><button type="button" class="secondary-action" @click="openPreview({ kind: 'deidentified', id: analysisReadyDocument.id, filename: `deidentified-resume-v${analysisReadyDocument.version}.pdf` })">再次預覽檔案</button></div>
+      </template>
+    </section>
+
+    <section v-if="showScoreSummary" class="analysis-section score-summary" aria-labelledby="candidate-score-summary-title" data-testid="candidate-score-summary">
+      <header class="section-heading">
+        <div><h4 id="candidate-score-summary-title">六項分數總覽</h4><p>{{ scoreRequisitionLabel }}：履歷匹配、兩關面試各自的題目評分與面試總分，再加上系統保存的綜合參考分。六項都是 0–100 分制；缺少的項目一律標示原因，不以 0 分計。</p></div>
+        <span class="ready-source">{{ evaluationReleaseHint }}</span>
+      </header>
+
+      <div v-if="scoresLoading && !scoreApplication" class="analysis-empty" data-testid="score-summary-loading"><span class="analysis-spinner" aria-hidden="true"></span><p>正在載入此職缺的分數…</p></div>
+      <div v-if="scoresError" class="analysis-message error" role="alert" data-testid="score-summary-error"><strong>分數未完整載入</strong><span>{{ scoresError }}</span></div>
+
+      <template v-if="scoreApplication">
+        <ul class="score-figure-grid" data-testid="score-figure-grid">
+          <li v-for="figure in scoreFigures" :key="figure.key" :data-state="figure.state" :data-testid="`score-figure-${figure.key}`">
+            <span class="figure-index" aria-hidden="true">{{ figure.index }}</span>
+            <span class="figure-copy"><strong>{{ figure.label }}<b v-if="figure.badge" class="figure-badge">{{ figure.badge }}</b></strong><small>{{ figure.source }}</small></span>
+            <b class="figure-value">{{ figure.value === null ? figurePlaceholder(figure.state) : formatPoints(figure.value) }}</b>
+            <small class="figure-note">{{ figure.note }}</small>
+          </li>
+        </ul>
+
+        <div class="composite-breakdown" data-testid="composite-breakdown">
+          <header><strong>綜合分的組成與權重</strong><small>{{ compositeWeightSourceLabel }}<template v-if="computedBreakdown"> · 計算於 {{ formatDate(computedBreakdown.computed_at) }}</template></small></header>
+          <p class="composite-reference-note"><strong>綜合分是參考值。</strong>它只用於排序與討論，不是錄用結論，也不會改變應徵狀態；是否錄用仍由 HR 與主管依面試證據判斷。</p>
+          <p v-if="compositeState !== 'computed'" class="composite-pending" data-testid="composite-pending">{{ compositeStateNote }}</p>
+          <ul v-if="compositeComponentRows.length" class="component-list" data-testid="composite-component-list">
+            <li v-for="row in compositeComponentRows" :key="row.key" :data-included="row.detail.included">
+              <span class="component-copy"><b>{{ row.label }}</b><small>設定權重 {{ formatRatio(row.detail.weight) }} · 實際計入 {{ formatRatio(row.detail.applied_weight) }}</small><small v-if="!row.detail.included" class="component-miss">{{ componentExclusionText(row.detail) }}</small><small v-else-if="row.detail.applied_weight > row.detail.weight" class="component-hit">已承接同一關另一項的權重</small></span>
+              <strong>{{ row.detail.included ? formatPoints(row.detail.value) : '未納入' }}</strong>
+            </li>
+          </ul>
+          <dl v-if="compositeStageRows.length" class="detail-list"><div v-for="row in compositeStageRows" :key="row.stage"><dt>{{ row.label }} 這一關</dt><dd>{{ stageDetailText(row.detail) }}</dd></div></dl>
+        </div>
       </template>
     </section>
 
@@ -718,5 +1058,9 @@ onBeforeUnmount(() => {
 .privacy-note,.result-heading span,.result-heading small,.score-summary small,.metric-lines small,.component-list li,.bullet-list,.result-disclaimer{font-size:12px}
 .score-summary strong{font-size:18px}.metric-lines strong{font-size:14px}.result-detail h6{font-size:13px}
 .preview-dialog>header small,.preview-dialog>footer span{font-size:11px}.unsupported-preview p{font-size:12px}
+/* Six stored scores side by side, below the A／B chooser and above the file-version details. */
+.score-summary{order:3;gap:12px;padding-top:15px;border-top:1px solid #e2ece9}.score-figure-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0;padding:0;list-style:none}.score-figure-grid>li{display:grid;grid-template-columns:26px minmax(0,1fr) auto;align-items:center;gap:8px;padding:10px 11px;border:1px solid #dce8e4;border-radius:10px;background:#fbfdfc}.score-figure-grid>li[data-state="scored"]{border-color:#bfded2;background:#f4faf8}.score-figure-grid>li[data-state="masked"]{border-color:#d3dee4;background:#f4f8fa}.score-figure-grid>li[data-state="pending"]{border-color:#e6d5ae;background:#fffaf0}.figure-index{width:26px;height:26px;display:grid;place-items:center;border-radius:50%;background:#edf3f1;color:#4d6862;font-size:12px;font-weight:800}.figure-copy{min-width:0}.figure-copy strong,.figure-copy small{display:block}.figure-copy strong{color:#174e47;font-size:13px}.figure-copy small{margin-top:2px;color:#758782;font-size:11px}.figure-badge{margin-left:6px;padding:2px 6px;border-radius:99px;background:#e6f1ee;color:#256a60;font-size:10px;font-weight:800;vertical-align:middle}.figure-value{color:#12695c;font-size:17px;font-weight:800;text-align:right;white-space:nowrap}.score-figure-grid>li:not([data-state="scored"]) .figure-value{color:#7b6a48;font-size:12px}.figure-note{grid-column:2/4;margin-top:2px;color:#6d7f7a;font-size:11px;line-height:1.5}
+.composite-breakdown{display:grid;gap:8px;padding:12px 13px;border:1px solid #d8e5e0;border-radius:10px;background:#f7fbfa}.composite-breakdown>header strong{display:block;color:#215c54;font-size:13px}.composite-breakdown>header small{display:block;margin-top:2px;color:#758782;font-size:11px}.composite-reference-note{margin:0;padding:8px 10px;border-left:3px solid #d6a746;background:#fff9ed;color:#796039;font-size:12px;line-height:1.55}.composite-pending{margin:0;padding:9px 11px;border-radius:7px;background:#fff4e2;color:#7d5f30;font-size:12px;line-height:1.55}.composite-breakdown .component-list{margin:0}.composite-breakdown .component-list li[data-included="false"]{background:#f6f4ef;color:#6f6552}.composite-breakdown .detail-list{margin:0}
+@media(max-width:760px){.score-figure-grid{grid-template-columns:1fr}}
 @media(max-width:760px){.candidate-analysis-panel{padding:12px}.panel-heading,.section-heading,.result-heading{align-items:stretch;flex-direction:column}.refresh-button{align-self:flex-start}.analysis-steps{grid-template-columns:1fr}.analysis-steps li{min-height:54px}.analysis-ready-banner{align-items:flex-start;flex-wrap:wrap}.analysis-ready-banner button{width:100%}.next-action-buttons{align-items:stretch;flex-direction:column}.next-action-buttons button{width:100%}.current-document-summary{align-items:flex-start;flex-direction:column}.analysis-mode-grid{grid-template-columns:1fr}.accordion-toggle,.result-toggle{grid-template-columns:28px minmax(0,1fr) auto}.row-status,.gate-status{grid-column:2/3;justify-self:start}.chevron{grid-column:3;grid-row:1/3}.score-summary{grid-column:3;grid-row:1}.result-toggle .chevron{grid-row:2}.accordion-detail{padding-left:13px}.role-match-control{grid-template-columns:1fr}.role-match-control .analysis-submit{width:100%}.metric-lines{flex-direction:column}.preview-backdrop{padding:0}.preview-dialog{width:100%;height:100vh;border-radius:0}.preview-dialog>footer span{display:none}}
 </style>
