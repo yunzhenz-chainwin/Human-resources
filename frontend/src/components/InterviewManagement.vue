@@ -18,6 +18,7 @@ import {
   type InterviewStageDto,
   type RequisitionDto,
 } from '../services/hrApi'
+import { matchingReportsApi } from '../services/matchingReportsApi'
 import { authSession } from '../services/auth'
 import { formatApiDateTime, parseApiDateTime } from '../utils/dateTime'
 
@@ -94,6 +95,11 @@ type PendingDiscard =
   | { type: 'open'; applicationId: number }
 const pendingDiscard = ref<PendingDiscard | null>(null)
 const recordFormBaseline = ref('')
+// Resume match score for the expanded card. The composite breakdown carries it
+// too, but only once both stages are submitted, and it is worth seeing before
+// that. Keyed by requisition because that is what the matching API returns.
+const matchScoreByApplication = ref<Record<number, number | null>>({})
+const matchScoreLoading = ref(false)
 const recordForm = reactive<InterviewRecordWrite>({
   stage: 'hr',
   question_plan_id: null,
@@ -952,6 +958,39 @@ function interviewConsensus(applicationId: number): InterviewConsensus {
   return { state: 'aligned', label: '雙方共識一致', detail: '兩關的評分與錄用建議方向相同。', combined }
 }
 
+const compositeComponentLabels: Record<string, string> = {
+  resume: '履歷匹配', hr_questions: 'HR 題目', hr_overall: 'HR 總結',
+  manager_questions: '主管題目', manager_overall: '主管總結',
+}
+const compositeExclusionLabels: Record<string, string> = {
+  no_match_result: '無媒合紀錄', no_rated_questions: '無已評分題目', no_overall_score: '未填總結分數',
+}
+
+// Why a stage has no score, stated rather than left blank: not started, still
+// being filled in, or withheld until both sides submit.
+function stageScoreReason(applicationId: number, stage: InterviewStage) {
+  const record = currentPlanRecord(applicationId, stage)
+  if (!record) return '尚未開始評分'
+  if (record.evaluation_revealed === false) return '評分保護中 · 雙方提交後公開'
+  if (record.status !== 'completed') return '評分填寫中，尚未提交'
+  return '此關未留下可計算的分數'
+}
+
+function compositeBreakdown(application: ApplicationDto) {
+  const breakdown = application.composite_score_breakdown
+  return breakdown && breakdown.status === 'computed' ? breakdown : null
+}
+
+function compositeNote(application: ApplicationDto) {
+  const breakdown = application.composite_score_breakdown
+  if (!breakdown) return '尚無綜合分紀錄；兩關都提交後才會計算'
+  if (breakdown.status === 'pending_stages') {
+    const waiting = breakdown.pending_stages.map(stage => stage === 'hr' ? 'HR' : '主管').join('、')
+    return `等待${waiting}提交；未齊前不顯示任何部分計算結果`
+  }
+  return '僅供排序與討論參考，不代表錄用結論，也不會改變應徵狀態'
+}
+
 // Requisition-level opt-out of blind review, decided before scoring starts. The
 // backend field is being added separately; a missing value must read as "blind
 // review on" so the protection never loosens by accident.
@@ -1257,9 +1296,30 @@ async function openApplicationCard(application: ApplicationDto) {
   expandedApplicationId.value = application.id
   resetRecordEditor()
   interviewRecords.value = []
+  void loadMatchScore(application)
   await loadCardInterviewData([application])
   await loadInterviewRecords(application.id)
   await bindStageEditor(application, inlineStage(application.id))
+}
+
+// Failure here must never block scoring, so it resolves to null rather than
+// surfacing an error: a missing resume score is a real state (candidates added
+// by hand never went through matching) and is labelled as such.
+async function loadMatchScore(application: ApplicationDto) {
+  if (application.id in matchScoreByApplication.value) return
+  matchScoreLoading.value = true
+  try {
+    const matches = (await matchingReportsApi.matches(application.requisition_id, true)).items
+    const hit = matches.find(item => item.candidate_id === application.candidate_id)
+    matchScoreByApplication.value = {
+      ...matchScoreByApplication.value,
+      [application.id]: hit ? Number(hit.total_score) : null,
+    }
+  } catch {
+    matchScoreByApplication.value = { ...matchScoreByApplication.value, [application.id]: null }
+  } finally {
+    matchScoreLoading.value = false
+  }
 }
 
 function collapseApplicationCard() {
@@ -1862,6 +1922,22 @@ onMounted(load)
               <strong>{{ interviewConsensus(application.id).combined }}</strong>
               <small>面試綜合分 · 參考值</small>
             </div>
+            <details class="score-overview">
+              <summary>六項分數總覽</summary>
+              <div>
+                <p class="score-overview-note">六項都是 0–100 分制。缺少的項目一律標示原因，不以 0 分計 —— 0 分是「表現不佳」的真實評價，與「沒有資料」不同。</p>
+                <ol>
+                  <li><b>① 履歷匹配</b><strong>{{ matchScoreByApplication[application.id] ?? '—' }}</strong><small>{{ matchScoreByApplication[application.id] === null ? '此人才未經媒合計算（例如由 HR 手動建立）' : matchScoreByApplication[application.id] === undefined ? '載入中…' : '履歷與職缺條件的符合度' }}</small></li>
+                  <li v-for="stage in interviewStages" :key="`q-${stage.key}`"><b>{{ stage.key === 'hr' ? '②' : '④' }} {{ stage.owner }} 題目</b><strong>{{ stageQuestionScore(application.id, stage.key) ?? '—' }}</strong><small>{{ stageQuestionScore(application.id, stage.key) === null ? stageScoreReason(application.id, stage.key) : `${stageRatedCount(application.id, stage.key)} 題已評分，未詢問不計入` }}</small></li>
+                  <li v-for="stage in interviewStages" :key="`o-${stage.key}`"><b>{{ stage.key === 'hr' ? '③' : '⑤' }} {{ stage.owner }} 總結</b><strong>{{ validScore(currentPlanRecord(application.id, stage.key)?.overall_score) ? currentPlanRecord(application.id, stage.key)?.overall_score : '—' }}</strong><small>{{ validScore(currentPlanRecord(application.id, stage.key)?.overall_score) ? '面試官依整體表現填寫' : stageScoreReason(application.id, stage.key) }}</small></li>
+                  <li class="composite"><b>⑥ 綜合參考分</b><strong>{{ application.composite_score ?? '—' }}</strong><small>{{ compositeNote(application) }}</small></li>
+                </ol>
+                <div v-if="compositeBreakdown(application)" class="score-weights">
+                  <b>權重明細</b>
+                  <span v-for="(detail, key) in compositeBreakdown(application)!.components" :key="key">{{ compositeComponentLabels[key] }}：設定 {{ Math.round(detail.weight * 100) }}%<template v-if="detail.applied_weight !== detail.weight"> · 實際計入 {{ Math.round(detail.applied_weight * 100) }}%</template><template v-if="detail.excluded_reason"> · 已排除（{{ compositeExclusionLabels[detail.excluded_reason] || detail.excluded_reason }}）</template></span>
+                </div>
+              </div>
+            </details>
             <div class="consensus-sides">
               <span v-for="stage in interviewStages" :key="stage.key">
                 <b>{{ stage.owner }}</b>
@@ -2190,6 +2266,17 @@ onMounted(load)
 .consensus-verdict span{margin-top:3px;color:#6b7e79;font-size:var(--fs-xs);line-height:1.55}
 .consensus-score{flex:0 0 auto;display:grid;justify-items:center;padding:6px 13px;border-radius:9px;background:#fff}
 .consensus-score strong{color:#1f6b60;font-size:var(--fs-lg)}.consensus-score small{color:#93a09c;font-size:var(--fs-xs)}
+.score-overview{flex-basis:100%;order:9}
+.score-overview>summary{list-style:none;cursor:pointer;color:#2f7166;font-size:var(--fs-xs);font-weight:700}.score-overview>summary::-webkit-details-marker{display:none}.score-overview>summary:before{content:'＋';margin-right:5px}.score-overview[open]>summary:before{content:'－'}
+.score-overview>div{margin-top:9px;padding:11px 12px;border:1px solid #dbe7e3;border-radius:9px;background:#fff}
+.score-overview-note{margin:0 0 9px;color:#93a09c;font-size:var(--fs-xs);line-height:1.55}
+.score-overview ol{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0;padding:0;list-style:none}
+.score-overview li{display:grid;gap:2px;padding:9px 10px;border:1px solid #e8eeec;border-radius:8px}
+.score-overview li.composite{grid-column:1/-1;border-color:#bcded4;background:#f7fcfa}
+.score-overview b{color:#2f7065;font-size:var(--fs-xs)}.score-overview strong{color:#1f6b60;font-size:var(--fs-lg)}.score-overview small{color:#8b9995;font-size:var(--fs-xs);line-height:1.5}
+.score-weights{display:grid;gap:3px;margin-top:9px;padding-top:9px;border-top:1px solid #e8eeec}.score-weights b{color:#2f7065;font-size:var(--fs-xs)}.score-weights span{color:#8b9995;font-size:var(--fs-xs)}
+@media(max-width:900px){.score-overview ol{grid-template-columns:1fr 1fr}}
+@media(max-width:680px){.score-overview ol{grid-template-columns:1fr}}
 .consensus-sides{flex:0 0 auto;display:grid;gap:3px}.consensus-sides span{color:#5f746f;font-size:var(--fs-xs)}.consensus-sides b{margin-right:6px;color:#2f7065}.consensus-sides em{color:#93a09c;font-style:normal}
 @media(max-width:680px){.consensus-strip{align-items:stretch;flex-direction:column}.consensus-score{justify-items:start}}
 .card-stage-body{display:grid;gap:12px}
