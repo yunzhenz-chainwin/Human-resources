@@ -1091,6 +1091,11 @@ const cardStageKey = computed(() => (
 const cardStagePlan = computed(() => plansByApplicationStage.value[cardStageKey.value] || null)
 const cardStageGenerating = computed(() => Boolean(questionPlanGenerating.value[cardStageKey.value]))
 const cardStageQuestionError = computed(() => cardQuestionErrors.value[cardStageKey.value] || '')
+// One compliance verdict for the whole list instead of a chip on every question;
+// a question that fails still carries its own full warning.
+const cardStageComplianceWarnings = computed(() => cardStageQuestions.value.filter(question => (
+  question.question.trim() && questionCompliance(question).status === 'warning'
+)).length)
 // Four separate banners could stack on top of the questions. Show only the one
 // that matters most right now.
 const cardStageAlert = computed<{ tone: 'error' | 'warn'; title: string; text: string } | null>(() => {
@@ -1785,22 +1790,24 @@ onMounted(load)
           <div v-if="inlineStage(application.id) === stage.key" class="card-stage-body">
             <div class="stage-grid">
               <section class="interview-stage" :class="{ unscheduled: !stageData(application, stage.key).interview_at }" :data-testid="`interview-stage-${application.id}-${stage.key}`">
-                <header><div><small>{{ stage.owner }} OWNED</small><h3>{{ stage.title }}</h3></div><span>{{ resultLabels[stageData(application, stage.key).interview_result || 'pending'] }}</span></header>
-                <div class="stage-content">
-                  <small>面試日期與時間</small>
+                <div class="stage-line">
                   <strong>{{ formatDate(stageData(application, stage.key).interview_at) }}</strong>
-                  <small>{{ stage.notesLabel }}</small>
-                  <p>{{ stageData(application, stage.key).interview_notes || '尚未填寫共享備註。' }}</p>
-                  <template v-if="latestStageRecord(application.id, stage.key)">
-                    <small>結構化面試紀錄 · {{ structuredRecordStatus(application.id, stage.key) }}</small>
-                    <p :class="{ 'structured-record-locked': structuredRecordLocked(application.id, stage.key) }">{{ structuredRecordSummaryForStage(application.id, stage.key) }}</p>
-                  </template>
-                  <small v-if="stageData(application, stage.key).updated_at">最後更新：{{ formatDate(stageData(application, stage.key).updated_at) }}</small>
-                </div>
-                <footer>
-                  <span v-if="!canEditStage(stage.key)">僅供檢視，由{{ stage.owner }}維護</span>
+                  <span class="stage-result">{{ resultLabels[stageData(application, stage.key).interview_result || 'pending'] }}</span>
+                  <details class="stage-note">
+                    <summary>備註與紀錄</summary>
+                    <div>
+                      <small>{{ stage.notesLabel }}</small>
+                      <p>{{ stageData(application, stage.key).interview_notes || '尚未填寫共享備註。' }}</p>
+                      <template v-if="latestStageRecord(application.id, stage.key)">
+                        <small>結構化面試紀錄 · {{ structuredRecordStatus(application.id, stage.key) }}</small>
+                        <p :class="{ 'structured-record-locked': structuredRecordLocked(application.id, stage.key) }">{{ structuredRecordSummaryForStage(application.id, stage.key) }}</p>
+                      </template>
+                      <small v-if="stageData(application, stage.key).updated_at">最後更新：{{ formatDate(stageData(application, stage.key).updated_at) }}</small>
+                    </div>
+                  </details>
+                  <span v-if="!canEditStage(stage.key)" class="stage-readonly">僅供檢視</span>
                   <button v-else class="button secondary" type="button" :data-testid="`interview-edit-${application.id}-${stage.key}`" @click="openEditor(application, stage.key)">{{ stageData(application, stage.key).interview_at ? '編輯排程' : '安排並註記' }}</button>
-                </footer>
+                </div>
 
                 <form v-if="editingApplicationId === application.id && editingStage === stage.key" class="interview-editor" :data-testid="`interview-form-${application.id}-${stage.key}`" @submit.prevent="saveInterview(application)">
                   <header><div><small>INTERVIEW DETAILS</small><h3>{{ application.candidate.name }}｜{{ stage.title }}</h3></div><button type="button" :disabled="saving" aria-label="關閉面試編輯" @click="closeEditor">×</button></header>
@@ -1820,7 +1827,7 @@ onMounted(load)
 
             <form class="record-editor" data-testid="interview-record-form" @submit.prevent>
               <header>
-                <div><small>{{ editingRecord ? `RECORD #${editingRecord.id}${editingRecord.revision_number > 0 ? ` · REVISION #${editingRecord.revision_number}` : ' · 尚未正式提交'}` : 'NEW INTERVIEW RECORD' }}</small><h3>面試題目與評分</h3><p>{{ recordCanEdit ? '題目、回答與 1–5 分評分都在這一頁完成；按下「儲存草稿」或「提交評分」才會寫入資料庫。' : '這一關目前為唯讀，仍可查看題目與已共享的內容。' }}</p></div>
+                <h3>面試題目與評分</h3>
                 <div class="record-answer-progress"><strong>{{ recordEvaluatedCount }}/{{ recordQuestionTotal }}</strong><span>已評分</span></div>
               </header>
 
@@ -1854,14 +1861,15 @@ onMounted(load)
 
                 <section class="question-progress" :data-testid="`interview-question-progress-${application.id}`">
                   <div class="question-plan-meta">
-                    <span :data-stage="stage.key">{{ stage.key === 'hr' ? 'HR 五題' : '主管五題' }}</span>
+                    <b v-if="cardStageQuestions.length && !cardStageComplianceWarnings" class="compliance-chip">合規檢查通過</b>
+                    <b v-else-if="cardStageComplianceWarnings" class="compliance-chip warn">{{ cardStageComplianceWarnings }} 題疑似違法</b>
                     <button v-if="canGenerateQuestionStage(stage.key) && !cardStagePlan?.questions.length" type="button" class="button generation-button" :disabled="cardStageGenerating" :data-testid="`question-plan-generate-${application.id}-${stage.key}`" @click="generateCardQuestionPlan(application, stage.key)">{{ cardStageGenerating ? '產生中…' : '使用 Gemini 產生 5 題' }}</button>
                     <b class="evaluation-release-chip" :class="{ unlocked: peerEvaluationsReleased(application.id) }">{{ evaluationReleaseHint(application.id) }}</b>
                     <small v-if="cardStageEditable && editorEvaluationVisible" class="meta-progress">已評 {{ recordRatedCount }} · 略過 {{ recordSkippedCount }} · 共 {{ recordQuestionTotal }} 題</small>
                     <details class="record-meta-summary">
                       <summary>紀錄資訊</summary>
                       <div>
-                        <span v-if="cardStagePlan?.version"><b>題目版本</b>v{{ cardStagePlan.version }} · {{ formatDate(cardStagePlan.generated_at || null) }}</span>
+                        <span v-if="cardStagePlan?.version"><b>題目版本</b> v{{ cardStagePlan.version }} · {{ formatDate(cardStagePlan.generated_at || null) }}</span>
                         <span v-else-if="currentPlanRecord(application.id, stage.key)"><b>紀錄更新</b>{{ formatDate(currentPlanRecord(application.id, stage.key)?.updated_at || null) }}</span>
                         <span v-else><b>題目版本</b>尚未開始填答</span>
                         <span v-if="cardStagePlan"><b>產生方式</b>{{ generationModeLabel(cardStagePlan) }}<template v-if="tokenSummary(cardStagePlan)"> · {{ tokenSummary(cardStagePlan) }}</template></span>
@@ -1886,7 +1894,6 @@ onMounted(load)
                             <label v-if="cardStageEditable && questionTextIsEditable(question, index)" class="record-question-text-label">問題內容<textarea :id="questionTextId(index)" v-model="question.question" class="record-question-text-input" rows="2" maxlength="500" placeholder="輸入面試問題" required @input="clearQuestionValidation(index)"></textarea></label>
                             <strong v-else>{{ question.question }}</strong>
                             <div class="record-question-tools">
-                              <b v-if="question.question.trim() && questionCompliance(question).status === 'ok'" class="compliance-chip" title="未偵測到違法／歧視性內容（就服法§5 / 性平法§7·§11）">合法</b>
                               <button v-if="canGenerateQuestionStage(stage.key) && cardStagePlan?.questions[index]" type="button" class="question-regenerate-button" :disabled="cardStageGenerating" :aria-label="`重新產生第 ${index + 1} 題`" :data-testid="`question-regenerate-${application.id}-${stage.key}-${index}`" @click="regenerateCardQuestion(application, stage.key, index)">{{ questionRegenerating[questionRegenerationKey(application.id, stage.key, index)] ? '重新產生中…' : '重新產生此題' }}</button>
                               <details v-if="cardStageEditable" class="question-more">
                                 <summary :aria-label="`第 ${index + 1} 題的其他操作`">⋯</summary>
@@ -1933,7 +1940,6 @@ onMounted(load)
                     <div v-else class="question-preview-error">{{ cardStageQuestionError || cardInterviewErrors[application.id] || '尚未產生五題，請由這一階段的面試官按上方按鈕。' }}</div>
 
                     <div v-if="cardStageEditable" class="question-list-actions">
-                      <span>需要加問時可自訂題目；系統題目請用「重新產生此題」更新。</span>
                       <button id="interview-record-add-question" class="button secondary" type="button" @click="addBlankQuestion">＋ 自訂問題</button>
                     </div>
 
@@ -2087,9 +2093,16 @@ onMounted(load)
 
 .stage-grid{display:grid;grid-template-columns:1fr;gap:9px}
 .interview-stage{min-width:0;border:1px solid #cde5dc;border-radius:10px;background:#f0f9f5;overflow:hidden}.interview-stage.unscheduled{border-style:dashed;background:#fafcfb}
-.interview-stage>header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:11px 13px;border-bottom:1px solid #dce9e5}.interview-stage>header small{display:block;color:#b37c20;font-size:var(--fs-xs);font-weight:800;letter-spacing:.8px}.interview-stage>header h3{margin:3px 0 0;font-size:var(--fs-md)}.interview-stage>header>span{padding:4px 8px;border-radius:99px;background:#fff;color:#28675d;font-size:var(--fs-xs);white-space:nowrap}
-.stage-content{display:grid;gap:3px;padding:11px 13px}.stage-content small{margin-top:4px;color:var(--muted);font-size:var(--fs-xs)}.stage-content strong{color:#245f56;font-size:var(--fs-md)}.stage-content p{margin:2px 0 0;color:#5f746f;font-size:var(--fs-sm);line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}.stage-content p.structured-record-locked{padding:7px 9px;border:1px dashed #dfc994;border-radius:6px;background:#fffaf0;color:#876323}
-.interview-stage>footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:9px 12px;border-top:1px solid #dce9e5;background:rgba(255,255,255,.5)}.interview-stage>footer>span{margin-right:auto;color:var(--muted);font-size:var(--fs-xs)}
+/* 排程在面試當下只需要一行：時間、結果、備註入口、編輯。 */
+.stage-line{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:10px 13px}
+.stage-line>strong{color:#245f56;font-size:var(--fs-md)}
+.stage-result{padding:4px 9px;border-radius:99px;background:#fff;color:#28675d;font-size:var(--fs-xs);white-space:nowrap}
+.stage-readonly{color:var(--muted);font-size:var(--fs-xs)}
+.stage-line>.button{margin-left:auto}
+.stage-note{position:relative;flex:0 0 auto}
+.stage-note>summary{list-style:none;cursor:pointer;color:#3a7067;font-size:var(--fs-xs);font-weight:700}.stage-note>summary::-webkit-details-marker{display:none}.stage-note>summary:before{content:'＋';margin-right:4px}.stage-note[open]>summary:before{content:'－'}
+.stage-note>div{position:absolute;z-index:5;top:100%;left:0;min-width:320px;max-width:min(560px,80vw);display:grid;gap:3px;margin-top:6px;padding:11px 13px;border:1px solid #dbe7e3;border-radius:9px;background:#fff;box-shadow:0 8px 22px rgba(24,74,65,.13)}
+.stage-note small{margin-top:4px;color:var(--muted);font-size:var(--fs-xs)}.stage-note p{margin:2px 0 0;color:#5f746f;font-size:var(--fs-sm);line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}.stage-note p.structured-record-locked{padding:7px 9px;border:1px dashed #dfc994;border-radius:6px;background:#fffaf0;color:#876323}
 .peer-stage-note{border:1px dashed #cfe0db;border-radius:9px;background:#fafcfb}.peer-stage-note>summary{list-style:none;cursor:pointer;padding:10px 13px;color:#4f6b65;font-size:var(--fs-sm)}.peer-stage-note>summary::-webkit-details-marker{display:none}.peer-stage-note>summary:before{content:'＋';margin-right:7px;color:#27766b;font-weight:800}.peer-stage-note[open]>summary:before{content:'－'}.peer-stage-note>div{padding:0 13px 11px}.peer-stage-note small{display:block;color:var(--muted);font-size:var(--fs-xs)}.peer-stage-note p{margin:4px 0 0;color:#5f746f;font-size:var(--fs-sm);line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
 .interview-editor{margin:0;border:1px solid #bcdcd2;border-width:1px 0 0;background:#fbfdfc;overflow:hidden}
 .interview-editor>header{display:flex;align-items:flex-start;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #dce9e5}.interview-editor>header small{color:#b37c20;font-size:var(--fs-xs);font-weight:800;letter-spacing:1px}.interview-editor>header h3{margin:3px 0 0;font-size:var(--fs-md)}.interview-editor>header button{border:0;background:transparent;color:#61736f;font-size:19px}
@@ -2098,8 +2111,8 @@ onMounted(load)
 
 /* 題目與評分：五題只渲染一次，可編輯時就是表單本身，唯讀時為純文字。 */
 .record-editor{border:1px solid #d8e5e1;border-radius:12px;background:#fff;box-shadow:0 5px 18px rgba(24,74,65,.05)}
-.record-editor>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid #e0e9e6}.record-editor>header>div:first-child{min-width:0;flex:1}.record-editor>header small{color:#ad761f;font-size:var(--fs-xs);font-weight:800;letter-spacing:1px}.record-editor>header h3{margin:3px 0;font-size:var(--fs-lg)}.record-editor>header p{margin:0;color:#70817d;font-size:var(--fs-sm);line-height:1.55}
-.record-answer-progress{flex:0 0 auto;display:grid;justify-items:center;min-width:84px;padding:9px 13px;border-radius:9px;background:#eaf6f2;color:#236b60}.record-answer-progress strong{font-size:21px}.record-answer-progress span{font-size:var(--fs-xs)}
+.record-editor>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 16px;border-bottom:1px solid #e0e9e6}.record-editor>header h3{margin:0;min-width:0;flex:1;font-size:var(--fs-md)}
+.record-answer-progress{flex:0 0 auto;display:flex;align-items:baseline;gap:5px;padding:5px 11px;border-radius:99px;background:#eaf6f2;color:#236b60}.record-answer-progress strong{font-size:var(--fs-md)}.record-answer-progress span{font-size:var(--fs-xs)}
 .record-editor fieldset{margin:0;padding:0;border:0}
 /* 唯讀說明放在表單最上方，重新開啟的入口就在旁邊。 */
 .record-readonly-notice{display:flex;align-items:center;gap:11px;margin:13px 16px 0;padding:12px 13px;border:1px solid #d8c7a2;border-radius:10px;background:#fff8ea;color:#6f5726}.record-readonly-notice>span{font-size:18px}.record-readonly-notice>div{flex:1;min-width:0}.record-readonly-notice strong{display:block;font-size:var(--fs-md)}.record-readonly-notice p{margin:4px 0 0;font-size:var(--fs-sm);line-height:1.6}.record-readonly-notice .button{flex:0 0 auto}
@@ -2128,7 +2141,8 @@ onMounted(load)
 .rating-scale-guide{margin-left:auto}.rating-scale-guide>summary{list-style:none;cursor:pointer;color:#2f7166;font-size:var(--fs-xs);font-weight:700}.rating-scale-guide>summary::-webkit-details-marker{display:none}.rating-scale-guide>summary:before{content:'＋';margin-right:5px}.rating-scale-guide[open]>summary:before{content:'－'}
 .rating-scale-guide ol{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:9px 0 0;padding:0;list-style:none}.rating-scale-guide li{display:flex;align-items:center;gap:8px;padding:8px 9px;border:1px solid #dce9e5;border-radius:7px;background:#fff;color:#506c65;font-size:var(--fs-sm)}.rating-scale-guide li b{width:27px;height:27px;display:grid;place-items:center;flex:0 0 auto;border-radius:50%;background:#dff1eb;color:#1e6b60;font-size:var(--fs-sm)}
 .rating-scale-guide[open]{flex-basis:100%}
-.compliance-chip{flex:0 0 auto;padding:4px 9px;border-radius:99px;background:#e3f4eb;color:#237052;font-size:var(--fs-xs);font-weight:700;cursor:help}
+.compliance-chip{flex:0 0 auto;padding:4px 9px;border-radius:99px;background:#e3f4eb;color:#237052;font-size:var(--fs-xs);font-weight:700}.compliance-chip.warn{background:#fbe0de;color:#a2352e}
+.question-list-actions{justify-content:flex-end}
 .exceptional-status-note{display:flex;align-items:center;gap:9px;margin:12px 0 0;padding:10px 12px;border:1px solid #e6d2ad;border-radius:8px;background:#fff8e9;color:#755b2a}.exceptional-status-note strong{font-size:var(--fs-md)}.exceptional-status-note span{font-size:var(--fs-sm)}
 
 /* `.question-preview-list` 已無樣式，僅保留給 e2e 既有選擇器使用。 */
