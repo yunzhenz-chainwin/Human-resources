@@ -643,6 +643,17 @@ const showScoreSummary = computed(() => (
   && contextRequisitionId.value !== null
   && (scoresLoading.value || Boolean(scoreApplication.value) || Boolean(scoresError.value))
 ))
+// Scores are per candidate-per-requisition, so without a job in context there is
+// nothing to show. Rendering nothing at all reads as "this feature is missing",
+// so say what is needed instead of disappearing silently.
+const scoreSummaryHint = computed(() => {
+  if (!canReadScores.value) return ''
+  if (contextRequisitionId.value === null) return '尚未選擇職缺。六項分數是「這位人才 × 這個職缺」的結果，請先於上方選擇要比對的職缺。'
+  if (!scoresLoading.value && !scoreApplication.value && !scoresError.value) {
+    return '這位人才尚未應徵此職缺，因此沒有面試與綜合分數。請改選其他職缺，或先於招募流程建立應徵紀錄。'
+  }
+  return ''
+})
 
 function figurePlaceholder(state: ScoreFigure['state']) {
   if (state === 'masked') return '評分保護中'
@@ -809,6 +820,11 @@ onBeforeUnmount(() => {
       <template v-else>
         <div class="analysis-ready-banner" data-testid="analysis-ready-banner"><span>✓</span><div><strong>去識別化檔案已核准</strong><p>{{ analysisReadyDocument.anonymous_ref }} v{{ analysisReadyDocument.version }} 已可分析，請直接選擇下方 A 或 B。</p></div><button type="button" class="secondary-action" @click="openPreview({ kind: 'deidentified', id: analysisReadyDocument.id, filename: `deidentified-resume-v${analysisReadyDocument.version}.pdf` })">再次預覽檔案</button></div>
       </template>
+    </section>
+
+    <section v-if="scoreSummaryHint" class="analysis-section" data-testid="candidate-score-summary-hint">
+      <header class="section-heading"><div><h4>六項分數總覽</h4><p>履歷匹配、兩關面試各自的題目評分與面試總分，加上系統保存的綜合參考分。</p></div></header>
+      <div class="analysis-empty"><strong>目前無法顯示分數</strong><p>{{ scoreSummaryHint }}</p></div>
     </section>
 
     <section v-if="showScoreSummary" class="analysis-section score-summary" aria-labelledby="candidate-score-summary-title" data-testid="candidate-score-summary">
