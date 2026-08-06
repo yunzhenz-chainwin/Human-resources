@@ -1091,6 +1091,23 @@ const cardStageKey = computed(() => (
 const cardStagePlan = computed(() => plansByApplicationStage.value[cardStageKey.value] || null)
 const cardStageGenerating = computed(() => Boolean(questionPlanGenerating.value[cardStageKey.value]))
 const cardStageQuestionError = computed(() => cardQuestionErrors.value[cardStageKey.value] || '')
+// Four separate banners could stack on top of the questions. Show only the one
+// that matters most right now.
+const cardStageAlert = computed<{ tone: 'error' | 'warn'; title: string; text: string } | null>(() => {
+  if (cardStageQuestionError.value) {
+    return { tone: 'error', title: '無法更新題目', text: `${cardStageQuestionError.value}；目前題目仍保留。` }
+  }
+  const plan = cardStagePlan.value
+  if (plan?.generation_warning) return { tone: 'warn', title: 'Gemini 生成提醒', text: plan.generation_warning }
+  if (plan?.questions.length && plan.context_matches === false) {
+    return { tone: 'warn', title: '履歷或職缺已更新', text: '現有題目仍可查看；請針對需要更新的題目逐題重新產生。' }
+  }
+  const application = workspaceApplication.value
+  if (application && !editingRecord.value && hasOlderPlanRecord(application.id, cardStage.value)) {
+    return { tone: 'warn', title: '尚未建立新版填答', text: '目前顯示新版題目；舊版問答仍保留在下方「面試紀錄歷程」中。' }
+  }
+  return null
+})
 const cardStageEditable = computed(() => (
   workspaceApplication.value ? cardQuestionsAreEditable(workspaceApplication.value.id, cardStage.value) : false
 ))
@@ -1822,20 +1839,12 @@ onMounted(load)
                 <div><button class="button secondary" type="button" :disabled="recordReopening" @click="cancelReopenPrompt">取消</button><button class="button primary" type="button" :disabled="recordReopening || !reopenReason.trim()" @click="reopenRecord">{{ recordReopening ? '重新開啟中…' : '確認重新開啟' }}</button></div>
               </section>
 
-              <div v-if="editingRecord && (editingRecord.revision_number > 0 || editingRecord.submitted_at || editingRecord.question_plan_version)" class="record-audit-strip">
-                <span><b>題目版本</b>{{ editingRecord.question_plan_version ? `v${editingRecord.question_plan_version}` : '自訂題目' }}</span>
-                <span><b>紀錄修訂</b>{{ editingRecord.revision_number > 0 ? `#${editingRecord.revision_number}` : '尚未提交（#0）' }}</span>
-                <span v-if="editingRecord.submitted_at"><b>最近提交</b>{{ editingRecord.submitted_by_name || '原面試官' }} · {{ formatDate(editingRecord.submitted_at) }}</span>
-                <span v-else><b>最近提交</b>尚未提交</span>
-              </div>
-              <div v-if="editingRecord?.last_reopen_reason" class="record-reopen-history"><strong>最近重新開啟原因</strong><p>{{ editingRecord.last_reopen_reason }}</p></div>
               <div v-if="editingRecord && !editorEvaluationVisible" class="evaluation-lock-notice"><span>🔒</span><div><strong>{{ evaluationWaitingFor(application.id) ? `目前等待${evaluationWaitingFor(application.id)}提交，之後評分會自動互相公開` : '雙方各自評分中，提交後會自動互相公開' }}</strong><p>問答內容現在就已共享；單題評分、面試官觀察、總結與錄用建議會在 HR 與主管都按下「提交評分」後自動顯示，不需要任何人核准。先各自評分再一起討論，是為了避免先看到對方分數造成判斷偏移。</p></div></div>
 
               <fieldset :disabled="recordSaving || recordReopening">
                 <details v-if="recordEditorOpen" class="record-basic-details">
                   <summary><div><strong>面試基本資料</strong><span>{{ stage.title }} · {{ recordModeLabels[recordForm.mode] }} · {{ recordStatusLabels[recordForm.status] }}</span></div><em>查看／修改</em></summary>
                   <div class="record-meta-grid">
-                    <label>面試階段<select v-model="recordForm.stage" disabled><option value="hr">HR 初談</option><option value="manager">主管複試</option></select></label>
                     <label>面試日期與時間 *<input v-model="recordForm.interviewed_at" type="datetime-local" :disabled="!recordCanEdit" required></label>
                     <label>面試方式<select v-model="recordForm.mode" :disabled="!recordCanEdit"><option v-for="(label, value) in recordModeLabels" :key="value" :value="value">{{ label }}</option></select></label>
                     <label>紀錄狀態<select v-model="recordForm.status" :disabled="!recordCanEdit" aria-describedby="record-status-help"><option value="in_progress">填寫中</option><option value="cancelled">已取消</option><option value="no_show">未到場</option><option v-if="recordForm.status === 'planned'" value="planned" disabled>已規劃</option><option v-if="recordForm.status === 'completed'" value="completed" disabled>已提交評分</option></select><small id="record-status-help">正常流程請用下方「儲存草稿」或「提交評分」；此處僅保留取消／未到場。</small></label>
@@ -1848,25 +1857,25 @@ onMounted(load)
                     <span :data-stage="stage.key">{{ stage.key === 'hr' ? 'HR 五題' : '主管五題' }}</span>
                     <button v-if="canGenerateQuestionStage(stage.key) && !cardStagePlan?.questions.length" type="button" class="button generation-button" :disabled="cardStageGenerating" :data-testid="`question-plan-generate-${application.id}-${stage.key}`" @click="generateCardQuestionPlan(application, stage.key)">{{ cardStageGenerating ? '產生中…' : '使用 Gemini 產生 5 題' }}</button>
                     <b class="evaluation-release-chip" :class="{ unlocked: peerEvaluationsReleased(application.id) }">{{ evaluationReleaseHint(application.id) }}</b>
-                    <small v-if="cardStagePlan?.version">題目版本 v{{ cardStagePlan.version }} · {{ formatDate(cardStagePlan.generated_at || null) }}</small>
-                    <small v-else-if="currentPlanRecord(application.id, stage.key)">紀錄更新：{{ formatDate(currentPlanRecord(application.id, stage.key)?.updated_at || null) }}</small>
-                    <small v-else>尚未開始填答</small>
+                    <small v-if="cardStageEditable && editorEvaluationVisible" class="meta-progress">已評 {{ recordRatedCount }} · 略過 {{ recordSkippedCount }} · 共 {{ recordQuestionTotal }} 題</small>
+                    <details class="record-meta-summary">
+                      <summary>紀錄資訊</summary>
+                      <div>
+                        <span v-if="cardStagePlan?.version"><b>題目版本</b>v{{ cardStagePlan.version }} · {{ formatDate(cardStagePlan.generated_at || null) }}</span>
+                        <span v-else-if="currentPlanRecord(application.id, stage.key)"><b>紀錄更新</b>{{ formatDate(currentPlanRecord(application.id, stage.key)?.updated_at || null) }}</span>
+                        <span v-else><b>題目版本</b>尚未開始填答</span>
+                        <span v-if="cardStagePlan"><b>產生方式</b>{{ generationModeLabel(cardStagePlan) }}<template v-if="tokenSummary(cardStagePlan)"> · {{ tokenSummary(cardStagePlan) }}</template></span>
+                        <span v-if="editingRecord"><b>紀錄修訂</b>{{ editingRecord.revision_number > 0 ? `#${editingRecord.revision_number}` : '尚未提交（#0）' }}</span>
+                        <span v-if="editingRecord?.submitted_at"><b>最近提交</b>{{ editingRecord.submitted_by_name || '原面試官' }} · {{ formatDate(editingRecord.submitted_at) }}</span>
+                        <span v-if="editingRecord?.last_reopen_reason"><b>重新開啟原因</b>{{ editingRecord.last_reopen_reason }}</span>
+                      </div>
+                    </details>
+                    <details v-if="cardStageEditable && editorEvaluationVisible" class="rating-scale-guide"><summary>1–5 分量表</summary><ol><li v-for="scale in ratingScale" :key="scale.value"><b>{{ scale.value }}</b><span>{{ scale.label }}</span></li></ol></details>
                   </div>
-                  <details v-if="cardStagePlan" class="question-plan-details">
-                    <summary>查看產生資訊</summary>
-                    <span>{{ generationModeLabel(cardStagePlan) }}<template v-if="tokenSummary(cardStagePlan)"> · {{ tokenSummary(cardStagePlan) }}</template></span>
-                  </details>
-                  <div v-if="cardStagePlan?.generation_warning" class="question-generation-warning" role="alert"><strong>⚠ Gemini 生成提醒</strong><span>{{ cardStagePlan.generation_warning }}</span></div>
-                  <div v-if="cardStageQuestionError" class="question-generation-error" role="alert"><strong>無法更新題目</strong><span>{{ cardStageQuestionError }}；目前題目仍保留。</span></div>
-                  <div v-if="cardStagePlan?.questions.length && cardStagePlan.context_matches === false" class="question-context-warning" role="status">履歷或職缺內容已更新，現有題目仍可查看；請針對需要更新的題目逐題重新產生。</div>
-                  <div v-if="hasOlderPlanRecord(application.id, stage.key) && !editingRecord" class="question-context-warning" role="status">目前顯示新版題目，尚未建立填答紀錄；舊版問答仍保留在下方「面試紀錄歷程」中。</div>
+                  <div v-if="cardStageAlert" class="question-alert" :class="cardStageAlert.tone" :role="cardStageAlert.tone === 'error' ? 'alert' : 'status'"><strong>{{ cardStageAlert.title }}</strong><span>{{ cardStageAlert.text }}</span></div>
 
                   <div v-if="cardDataLoading[application.id] && !cardStageQuestions.length" class="question-progress-loading"><span class="spinner"></span>正在準備 5 題…</div>
                   <template v-else>
-                    <div v-if="cardStageEditable && editorEvaluationVisible" class="rating-progress-bar" aria-live="polite">
-                      <span><b>{{ recordRatedCount }}</b>已評</span><span><b>{{ recordSkippedCount }}</b>略過</span><span><b>{{ recordQuestionTotal }}</b>總題數</span>
-                      <details class="rating-scale-guide"><summary>1–5 分量表說明</summary><ol><li v-for="scale in ratingScale" :key="scale.value"><b>{{ scale.value }}</b><span>{{ scale.label }}</span></li></ol></details>
-                    </div>
                     <div v-if="recordHasExceptionalStatus && recordCanEdit" class="exceptional-status-note" role="note"><strong>{{ recordForm.status === 'cancelled' ? '本次面試已取消' : '候選人未到場' }}</strong><span>可直接儲存此狀態，不強制填寫逐題與整體評分。</span></div>
 
                     <ol v-if="cardStageQuestions.length" class="record-question-list question-preview-list">
@@ -1878,9 +1887,14 @@ onMounted(load)
                             <strong v-else>{{ question.question }}</strong>
                             <div class="record-question-tools">
                               <b v-if="question.question.trim() && questionCompliance(question).status === 'ok'" class="compliance-chip" title="未偵測到違法／歧視性內容（就服法§5 / 性平法§7·§11）">合法</b>
-                              <button v-if="cardStageEditable && !questionTextIsEditable(question, index)" type="button" class="question-inline-button" :aria-label="`修改第 ${index + 1} 題文字`" @click="editQuestionText(index)">✎ 修改文字</button>
                               <button v-if="canGenerateQuestionStage(stage.key) && cardStagePlan?.questions[index]" type="button" class="question-regenerate-button" :disabled="cardStageGenerating" :aria-label="`重新產生第 ${index + 1} 題`" :data-testid="`question-regenerate-${application.id}-${stage.key}-${index}`" @click="regenerateCardQuestion(application, stage.key, index)">{{ questionRegenerating[questionRegenerationKey(application.id, stage.key, index)] ? '重新產生中…' : '重新產生此題' }}</button>
-                              <button v-if="cardStageEditable" type="button" class="question-remove-button" :aria-label="`移除第 ${index + 1} 題`" @click="removeRecordQuestion(index)">×</button>
+                              <details v-if="cardStageEditable" class="question-more">
+                                <summary :aria-label="`第 ${index + 1} 題的其他操作`">⋯</summary>
+                                <div>
+                                  <button v-if="!questionTextIsEditable(question, index)" type="button" @click="editQuestionText(index)">修改題目文字</button>
+                                  <button type="button" class="danger" @click="removeRecordQuestion(index)">移除這一題</button>
+                                </div>
+                              </details>
                             </div>
                           </div>
                         </header>
@@ -2089,8 +2103,6 @@ onMounted(load)
 .record-editor fieldset{margin:0;padding:0;border:0}
 /* 唯讀說明放在表單最上方，重新開啟的入口就在旁邊。 */
 .record-readonly-notice{display:flex;align-items:center;gap:11px;margin:13px 16px 0;padding:12px 13px;border:1px solid #d8c7a2;border-radius:10px;background:#fff8ea;color:#6f5726}.record-readonly-notice>span{font-size:18px}.record-readonly-notice>div{flex:1;min-width:0}.record-readonly-notice strong{display:block;font-size:var(--fs-md)}.record-readonly-notice p{margin:4px 0 0;font-size:var(--fs-sm);line-height:1.6}.record-readonly-notice .button{flex:0 0 auto}
-.record-audit-strip{display:flex;flex-wrap:wrap;gap:9px;margin:12px 16px 0;padding:10px 12px;border-radius:9px;background:#f4f8f7}.record-audit-strip span{display:flex;align-items:center;gap:5px;padding:5px 9px;border-radius:99px;background:#fff;color:#4f6d66;font-size:var(--fs-xs)}.record-audit-strip b{color:#286d62}
-.record-reopen-history{display:flex;align-items:flex-start;gap:10px;margin:11px 16px 0;padding:10px 12px;border:1px solid #e2d4a7;border-radius:8px;background:#fff9e9;color:#735b28}.record-reopen-history strong{flex:0 0 auto;font-size:var(--fs-sm)}.record-reopen-history p{margin:0;font-size:var(--fs-sm);line-height:1.55}
 .evaluation-lock-notice{display:flex;align-items:flex-start;gap:10px;margin:12px 16px 0;padding:11px 12px;border:1px solid #ead7ad;border-radius:9px;background:#fff9eb;color:#765722}.evaluation-lock-notice>span{font-size:16px}.evaluation-lock-notice strong{display:block;font-size:var(--fs-md)}.evaluation-lock-notice p{margin:4px 0 0;font-size:var(--fs-sm);line-height:1.6}
 .record-basic-details{margin:13px 16px 0;border:1px solid #dce7e3;border-radius:9px;background:#fbfdfc}.record-basic-details>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer;padding:12px 14px}.record-basic-details>summary::-webkit-details-marker{display:none}.record-basic-details>summary:before{content:'＋';margin-right:7px;color:#27766b;font-weight:800}.record-basic-details[open]>summary:before{content:'－'}.record-basic-details>summary strong,.record-basic-details>summary span{display:block}.record-basic-details>summary strong{color:#315d55;font-size:var(--fs-md)}.record-basic-details>summary span{margin-top:3px;color:#748681;font-size:var(--fs-sm)}.record-basic-details>summary em{color:#287469;font-size:var(--fs-sm);font-style:normal;font-weight:700}.record-basic-details[open]>summary{border-bottom:1px solid #e1e9e6}
 .record-meta-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:13px 14px}.record-meta-grid label{display:grid;gap:5px;color:#536e68;font-size:var(--fs-sm)}.record-meta-grid label>small{color:#778984;font-size:var(--fs-xs);line-height:1.45}.record-meta-grid input,.record-meta-grid select{width:100%;padding:10px;border:1px solid #d5e2de;border-radius:7px;background:#fff;color:#284a44;font:inherit;font-size:var(--fs-md)}
@@ -2099,12 +2111,20 @@ onMounted(load)
 .question-plan-meta{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:0 0 10px;border-bottom:1px solid #e6eeeb}.question-plan-meta>span{padding:5px 9px;border-radius:99px;background:#e7f3ef;color:#216d61;font-size:var(--fs-sm);font-weight:700}.question-plan-meta>span[data-stage="manager"]{background:#fff3d8;color:#8a621a}.question-plan-meta>small{margin-left:auto;color:#798984;font-size:var(--fs-sm)}
 .generation-button{min-height:38px;padding:8px 13px;font-size:var(--fs-sm);white-space:nowrap}
 .evaluation-release-chip{padding:5px 9px;border-radius:99px;background:#fff0df;color:#93601c;font-size:var(--fs-xs);font-weight:700}.evaluation-release-chip.unlocked{background:#e1f3e9;color:#257052}
-.question-plan-details{margin:10px 0 0;border:1px solid #e0e9e6;border-radius:8px;background:#fafcfb}.question-plan-details>summary{cursor:pointer;padding:8px 10px;color:#3a7067;font-size:var(--fs-sm);font-weight:700}.question-plan-details>span{display:block;padding:0 10px 9px;color:#647b75;font-size:var(--fs-sm);line-height:1.55}
-.question-generation-warning,.question-generation-error,.question-context-warning{display:flex;align-items:flex-start;gap:8px;margin:10px 0 0;padding:10px 11px;border:1px solid;border-radius:8px;font-size:var(--fs-sm);line-height:1.6}.question-generation-warning strong,.question-generation-error strong{white-space:nowrap}
-.question-generation-warning{border-color:#e7c98c;background:#fff8e8;color:#785a20}.question-generation-error{border-color:#e5b9b5;background:#fff1f0;color:#8c403b}.question-context-warning{border-color:#d8c28d;background:#fffaf0;color:#765b25}
+.meta-progress{margin-left:0!important;color:#5f746f}
+.record-meta-summary,.question-more{position:relative}
+.record-meta-summary>summary,.question-more>summary{list-style:none;cursor:pointer;color:#3a7067;font-size:var(--fs-xs);font-weight:700}.record-meta-summary>summary::-webkit-details-marker,.question-more>summary::-webkit-details-marker{display:none}
+.record-meta-summary>summary:before{content:'＋';margin-right:4px}.record-meta-summary[open]>summary:before{content:'－'}
+.record-meta-summary>div{position:absolute;z-index:5;top:100%;left:0;min-width:280px;display:grid;gap:5px;margin-top:6px;padding:10px 12px;border:1px solid #dbe7e3;border-radius:9px;background:#fff;box-shadow:0 8px 22px rgba(24,74,65,.13)}
+.record-meta-summary span{color:#5f746f;font-size:var(--fs-xs);line-height:1.55}.record-meta-summary b{margin-right:6px;color:#2f7065}
+/* 四種提醒合併為一條，一次只顯示最重要的。 */
+.question-alert{display:flex;align-items:flex-start;gap:8px;margin:10px 0 0;padding:10px 11px;border:1px solid;border-radius:8px;font-size:var(--fs-sm);line-height:1.6}.question-alert strong{white-space:nowrap}
+.question-alert.warn{border-color:#e7c98c;background:#fff8e8;color:#785a20}.question-alert.error{border-color:#e5b9b5;background:#fff1f0;color:#8c403b}
+.question-more>summary{padding:4px 9px;border:1px solid #cfe0db;border-radius:8px;color:#4d6b64;font-size:var(--fs-md);line-height:1}
+.question-more>div{position:absolute;z-index:5;top:100%;right:0;display:grid;gap:4px;min-width:150px;margin-top:6px;padding:6px;border:1px solid #dbe7e3;border-radius:9px;background:#fff;box-shadow:0 8px 22px rgba(24,74,65,.13)}
+.question-more button{padding:8px 10px;border:0;border-radius:6px;background:transparent;color:#3f5f59;font-size:var(--fs-sm);text-align:left;cursor:pointer}.question-more button:hover{background:#eef6f3}.question-more button.danger{color:#a05b54}.question-more button.danger:hover{background:#fdeceb}
 .question-progress-loading,.question-preview-error{display:flex;align-items:center;justify-content:center;gap:8px;min-height:90px;padding:20px;color:#748681;font-size:var(--fs-sm)}.question-preview-error{color:#96524c}
 
-.rating-progress-bar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0 0;padding:9px 12px;border:1px solid #d8e8e3;border-radius:9px;background:#f4faf8}.rating-progress-bar>span{padding:4px 10px;border-radius:99px;background:#fff;color:#6d807a;font-size:var(--fs-xs)}.rating-progress-bar>span b{margin-right:4px;color:#1f7165;font-size:var(--fs-md)}
 .rating-scale-guide{margin-left:auto}.rating-scale-guide>summary{list-style:none;cursor:pointer;color:#2f7166;font-size:var(--fs-xs);font-weight:700}.rating-scale-guide>summary::-webkit-details-marker{display:none}.rating-scale-guide>summary:before{content:'＋';margin-right:5px}.rating-scale-guide[open]>summary:before{content:'－'}
 .rating-scale-guide ol{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:9px 0 0;padding:0;list-style:none}.rating-scale-guide li{display:flex;align-items:center;gap:8px;padding:8px 9px;border:1px solid #dce9e5;border-radius:7px;background:#fff;color:#506c65;font-size:var(--fs-sm)}.rating-scale-guide li b{width:27px;height:27px;display:grid;place-items:center;flex:0 0 auto;border-radius:50%;background:#dff1eb;color:#1e6b60;font-size:var(--fs-sm)}
 .rating-scale-guide[open]{flex-basis:100%}
@@ -2124,11 +2144,7 @@ onMounted(load)
 .record-question-text-label{min-width:0;flex:1;display:grid;gap:5px;color:#536e68;font-size:var(--fs-sm)}
 .record-question-text-input{width:100%;min-height:58px;max-height:110px;box-sizing:border-box;padding:10px 11px;border:1px solid #c9ddd7;border-radius:8px;background:#fff;color:#284a44;font:inherit;font-size:var(--fs-md);font-weight:650;line-height:1.55;resize:vertical}
 .record-question-tools{display:flex;flex:0 0 auto;align-items:center;gap:7px}
-.question-inline-button,.question-regenerate-button{min-height:34px;padding:6px 10px;border:1px solid #78b8aa;border-radius:8px;background:#f2faf7;color:#1f7165;font-size:var(--fs-sm);font-weight:800;white-space:nowrap;cursor:pointer}
-.question-inline-button{border-color:#cfe0db;color:#4d6b64}
-.question-inline-button:hover,.question-regenerate-button:hover:not(:disabled){border-color:#287f72;background:#e5f5f0}
 .question-regenerate-button:disabled{cursor:not-allowed;opacity:.55}
-.question-remove-button{width:30px;height:30px;flex:0 0 auto;border:0;border-radius:8px;background:transparent;color:#a05b54;font-size:18px;cursor:pointer}
 .record-question-context{display:block;padding:0;border-bottom:1px solid #e2ebe8;background:#f5f9f7}.record-question-context>summary{list-style:none;cursor:pointer;padding:9px 13px;color:#3b7168;font-size:var(--fs-sm);font-weight:700}.record-question-context>summary::-webkit-details-marker{display:none}.record-question-context>summary:before{content:'＋';margin-right:7px}.record-question-context[open]>summary:before{content:'－'}.record-question-context>div{display:grid;gap:6px;padding:0 13px 11px}.record-question-context small{color:#617771;font-size:var(--fs-sm);line-height:1.55}.record-question-context b{margin-right:7px;color:#2f7065}
 /* 回答紀錄是面試當下的主要產出，給它最大的視覺權重。 */
 .record-quick-answer{grid-column:1;padding:13px 0 14px 13px}.record-quick-answer label{display:grid;gap:7px}
@@ -2211,7 +2227,7 @@ onMounted(load)
 
 @media(max-width:1260px){.record-question-card{display:block}.record-quick-answer{padding:13px}.question-evaluation-direct,.question-evaluation-readonly,.evaluation-lock-inline{margin:0 13px 13px}}
 @media(max-width:1120px){.interview-filters{align-items:stretch;flex-wrap:wrap}.interview-filters>div{flex-basis:100%}.interview-filters label{flex:1}.interview-filters select{width:100%}.rating-segments{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:980px){.rating-scale-guide>header{align-items:flex-start;flex-direction:column}.rating-progress{width:100%;grid-template-columns:repeat(3,1fr)}.rating-scale-guide ol{grid-template-columns:repeat(3,1fr)}.record-reopen-panel{grid-template-columns:1fr}.record-reopen-panel>div:last-child{justify-content:flex-end}}
+@media(max-width:980px){.rating-scale-guide ol{grid-template-columns:repeat(3,1fr)}.record-reopen-panel{grid-template-columns:1fr}.record-reopen-panel>div:last-child{justify-content:flex-end}}
 @media(max-width:900px){.sharing-policy-details{grid-template-columns:1fr}.application-details{grid-template-columns:1fr 1fr}.record-meta-grid{grid-template-columns:1fr 1fr}.record-conclusion{grid-template-columns:1fr}}
 @media(max-width:820px){.interview-row-toggle{grid-template-columns:minmax(0,1fr) 32px;gap:10px;padding:13px}.interview-row-progress{grid-column:1;grid-row:2;justify-items:start;grid-template-columns:auto 1fr}.interview-row-progress .application-status{grid-row:auto}.interview-row-toggle .row-chevron{grid-column:2;grid-row:1/3}.interview-card-detail{padding-inline:12px}}
 @media(max-width:680px){
@@ -2224,11 +2240,9 @@ onMounted(load)
 .record-discard-confirm>div:last-child,.interview-editor>footer>div,.record-editor>footer>div{display:grid;grid-template-columns:1fr;width:100%}
 .record-discard-confirm .button,.interview-editor>footer .button,.record-editor>footer .button,.question-list-actions .button,.record-history-actions .button{width:100%}
 .record-readonly-notice{align-items:stretch;flex-direction:column;margin-inline:10px}.record-readonly-notice .button{width:100%}
-.record-audit-strip{display:grid;margin-inline:10px}.record-basic-details,.record-conclusion-section,.hr-private-notes{margin-inline:10px}
 .question-progress{padding-inline:10px}
-.rating-progress{grid-template-columns:repeat(3,1fr)}.rating-scale-guide ol{grid-template-columns:1fr}
 .rating-segments{grid-template-columns:repeat(2,minmax(0,1fr))}.rating-segments label{min-height:60px}
-.record-question-card>header{grid-template-columns:30px minmax(0,1fr);padding:11px}.record-question-heading{align-items:stretch;flex-direction:column;gap:9px}.record-question-tools{flex-wrap:wrap}.question-inline-button,.question-regenerate-button{flex:1}
+.record-question-card>header{grid-template-columns:30px minmax(0,1fr);padding:11px}.record-question-heading{align-items:stretch;flex-direction:column;gap:9px}.record-question-tools{flex-wrap:wrap}.question-regenerate-button{flex:1}
 .suggested-question{flex-direction:column}.suggested-question>.button{width:100%}
 }
 </style>
