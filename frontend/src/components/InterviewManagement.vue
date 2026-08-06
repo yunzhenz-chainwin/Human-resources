@@ -888,6 +888,23 @@ function peerEvaluationsReleased(applicationId: number) {
   return hrRecord?.status === 'completed' && managerRecord?.status === 'completed'
 }
 
+// Per-question score on the same 0-100 scale as the interviewer's own total.
+// Questions marked 未詢問 are excluded from the denominator as well as the
+// numerator: a question that was never put to the candidate must not be scored
+// against them.
+function stageQuestionScore(applicationId: number, stage: InterviewStage): number | null {
+  const record = currentPlanRecord(applicationId, stage)
+  if (!record) return null
+  const rated = record.questions.filter(question => validRating(question.rating))
+  if (!rated.length) return null
+  const total = rated.reduce((sum, question) => sum + Number(question.rating), 0)
+  return Math.round((total / (rated.length * 5)) * 1000) / 10
+}
+
+function stageRatedCount(applicationId: number, stage: InterviewStage) {
+  return (currentPlanRecord(applicationId, stage)?.questions || []).filter(question => validRating(question.rating)).length
+}
+
 // Two interviewers scoring 95 and 60 average to the same 77.5 as two scoring 78
 // and 77, but they are opposite situations. The combined figure is only ever
 // shown next to a verdict on whether the two sides actually agree.
@@ -1848,7 +1865,7 @@ onMounted(load)
             <div class="consensus-sides">
               <span v-for="stage in interviewStages" :key="stage.key">
                 <b>{{ stage.owner }}</b>
-                <template v-if="currentPlanRecord(application.id, stage.key)?.status === 'completed'">{{ validScore(currentPlanRecord(application.id, stage.key)?.overall_score) ? `${currentPlanRecord(application.id, stage.key)?.overall_score} 分` : '未填總分' }}<template v-if="currentPlanRecord(application.id, stage.key)?.recommendation"> · {{ recommendationLabels[currentPlanRecord(application.id, stage.key)!.recommendation!] }}</template></template>
+                <template v-if="currentPlanRecord(application.id, stage.key)?.status === 'completed'">題目 {{ stageQuestionScore(application.id, stage.key) ?? '—' }}<em v-if="stageRatedCount(application.id, stage.key)">（{{ stageRatedCount(application.id, stage.key) }} 題）</em> · 總結 {{ validScore(currentPlanRecord(application.id, stage.key)?.overall_score) ? currentPlanRecord(application.id, stage.key)?.overall_score : '—' }}<template v-if="currentPlanRecord(application.id, stage.key)?.recommendation"> · {{ recommendationLabels[currentPlanRecord(application.id, stage.key)!.recommendation!] }}</template></template>
                 <template v-else>{{ stageSubmissionLabel(application.id, stage.key) }}</template>
               </span>
             </div>
@@ -2173,7 +2190,7 @@ onMounted(load)
 .consensus-verdict span{margin-top:3px;color:#6b7e79;font-size:var(--fs-xs);line-height:1.55}
 .consensus-score{flex:0 0 auto;display:grid;justify-items:center;padding:6px 13px;border-radius:9px;background:#fff}
 .consensus-score strong{color:#1f6b60;font-size:var(--fs-lg)}.consensus-score small{color:#93a09c;font-size:var(--fs-xs)}
-.consensus-sides{flex:0 0 auto;display:grid;gap:3px}.consensus-sides span{color:#5f746f;font-size:var(--fs-xs)}.consensus-sides b{margin-right:6px;color:#2f7065}
+.consensus-sides{flex:0 0 auto;display:grid;gap:3px}.consensus-sides span{color:#5f746f;font-size:var(--fs-xs)}.consensus-sides b{margin-right:6px;color:#2f7065}.consensus-sides em{color:#93a09c;font-style:normal}
 @media(max-width:680px){.consensus-strip{align-items:stretch;flex-direction:column}.consensus-score{justify-items:start}}
 .card-stage-body{display:grid;gap:12px}
 
