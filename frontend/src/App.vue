@@ -20,6 +20,8 @@ import {
   type CandidateDto,
   type CandidateResumeSummaryDto,
   type CandidateWrite,
+  type CompositeScoreComponent,
+  type CompositeScoreWeights,
   type ParsedResume,
   type RequisitionDto,
   type RequisitionWrite,
@@ -183,6 +185,36 @@ const jobForm = reactive({
 // rule only becomes editable on a later edit — the control stays visible but disabled meanwhile.
 const blindReviewLocked = computed(() => !!editingJob.value?.blind_review_locked)
 const blindReviewEditable = computed(() => !!editingJob.value && authState.user?.role === 'hr' && !blindReviewLocked.value)
+
+// Weights behind the interview card's ⑥ 綜合參考分, in the order that card numbers them.
+// Held apart from jobForm because openJob replaces jobForm wholesale with Object.assign,
+// which would flatten a nested reactive object into a plain one.
+const compositeWeightKeys = ['resume', 'hr_questions', 'hr_overall', 'manager_questions', 'manager_overall'] as const
+const compositeWeightLabels: Record<CompositeScoreComponent, string> = {
+  resume: '① 履歷匹配', hr_questions: '② HR 題目', hr_overall: '③ HR 總結',
+  manager_questions: '④ 主管題目', manager_overall: '⑤ 主管總結',
+}
+// Mirrors DEFAULT_COMPOSITE_WEIGHTS in services/interview_scoring.py. Only ever shown for a
+// requisition that has not configured its own; the server stays the authority on what is stored.
+const defaultCompositeWeights: Record<CompositeScoreComponent, number> = {
+  resume: 20, hr_questions: 15, hr_overall: 25, manager_questions: 15, manager_overall: 25,
+}
+const compositeWeightForm = reactive<Record<CompositeScoreComponent, number>>({ ...defaultCompositeWeights })
+// Same shape as blind review above: HR-only on the server, and RequisitionCreate carries no
+// weights, so a new requisition starts on the built-in split and only a later edit can change it.
+const compositeWeightsEditable = computed(() => !!editingJob.value && authState.user?.role === 'hr')
+const compositeWeightTotal = computed(() =>
+  compositeWeightKeys.reduce((total, key) => total + (Number(compositeWeightForm[key]) || 0), 0))
+const compositeWeightInvalid = computed(() => compositeWeightTotal.value <= 0)
+
+// Reads the resolved weights (already rescaled to sum 1 by the server) back into whole
+// percentage points, so the form shows the same split the interview card prints.
+function setCompositeWeightForm(resolved?: Required<CompositeScoreWeights> | null) {
+  for (const key of compositeWeightKeys) {
+    const value = resolved?.[key]
+    compositeWeightForm[key] = typeof value === 'number' ? Math.round(value * 100) : defaultCompositeWeights[key]
+  }
+}
 
 // Anti-discrimination JD lint (就服法 §5 / 中高齡就業促進法 / 性別平等工作法).
 // Advisory only: warnings are surfaced in the form but never block saving.
@@ -1195,11 +1227,17 @@ function openJob(job?: RequisitionDto) {
   } : { req_no: `R${new Date().getFullYear()}-${String(jobs.value.length + 1).padStart(4, '0')}`, title: '', department_id: null,
     employment_type: 'full_time', work_city: '台北市', jd: '', summary: '', skillsText: '', salary_min: null,
     salary_max: null, salary_type: 'monthly', headcount: 1, status: 'draft', blind_review_enabled: true })
+  setCompositeWeightForm(job?.composite_score_weights_resolved)
   dialog.value = 'job'
 }
 
 async function saveJob() {
   if (!jobForm.title.trim() || !jobForm.jd.trim()) return showError('職缺名稱與職務說明為必填')
+  // An all-zero split carries no decision, and the server would silently fall back to the
+  // built-in weights — refuse it here instead, where the number the user typed is still on screen.
+  if (compositeWeightsEditable.value && compositeWeightTotal.value <= 0) {
+    return showError('綜合參考分權重至少一項必須大於 0')
+  }
   saving.value = true
   error.value = ''
   try {
@@ -1212,6 +1250,10 @@ async function saveJob() {
     // Sent only when the control was actually editable, so a manager's routine edit can never
     // trip the HR-only 403 on a stale copy. A 409 (locked meanwhile) surfaces via showError below.
     if (blindReviewEditable.value) payload.blind_review_enabled = jobForm.blind_review_enabled
+    // Same guard as blind review: sent only when the control was editable, so a manager's
+    // routine edit never trips the HR-only 403. Restating the current split decides nothing
+    // server-side, so re-saving an untouched form is a no-op rather than a needless recompute.
+    if (compositeWeightsEditable.value) payload.composite_score_weights = { ...compositeWeightForm }
     await hrApi.saveRequisition(payload, editingJob.value?.id)
     jobs.value = (await hrApi.requisitions()).data
     dialog.value = null
@@ -1723,7 +1765,7 @@ onBeforeUnmount(closeResumeFilePreview)
         <label>姓名 *<input v-model="candidateForm.name" required></label><label>Email<input v-model="candidateForm.email" type="email"></label><label>電話<input v-model="candidateForm.phone"></label><label>地區<input v-model="candidateForm.city"></label><label>目前職稱<input v-model="candidateForm.current_title"></label><label>總年資<input v-model.number="candidateForm.total_years" type="number" min="0" step="0.5"></label><label>來源<select v-model="candidateForm.source"><option value="manual">手動建立</option><option value="p104">104</option><option value="p1111">1111</option><option value="generic">一般履歷</option><option value="direct">自製履歷</option></select></label><label>狀態<select v-model="candidateForm.status"><option v-for="(label,key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select></label>
       </div>
       <div v-else-if="dialog === 'activity'" class="form-grid"><label>紀錄類型<select v-model="activityForm.type" data-testid="activity-type"><option v-if="authState.user.role === 'manager'">主管留言</option><template v-else><option>HR 留言</option><option>電話聯繫</option><option>Email</option><option>面談</option><option>其他</option></template></select></label><label v-if="authState.user.role !== 'manager'">後續狀態<select v-model="activityForm.next_status"><option v-for="(label,key) in candidateStatusLabels" :key="key" :value="key">{{ label }}</option></select></label><label class="wide">{{ authState.user.role === 'manager' ? '給 HR 的主管留言' : '給部門主管的 HR 留言／活動紀錄' }} *<textarea v-model="activityForm.content" data-testid="activity-content" rows="6" required :placeholder="authState.user.role === 'manager' ? '記錄主管觀察、建議或需要 HR 協助的事項…' : '記錄聯繫結果、建議與希望部門主管留意的事項…'"></textarea></label></div>
-      <div v-else class="form-grid"><label>職缺編號 *<input v-model="jobForm.req_no" required :disabled="!!editingJob"></label><label>職缺名稱 *<input v-model="jobForm.title" required></label><label>部門 ID<input v-model.number="jobForm.department_id" type="number" min="1"></label><label>工作地點<input v-model="jobForm.work_city"></label><label>聘僱類型<select v-model="jobForm.employment_type"><option value="full_time">正職</option><option value="contract">約聘</option><option value="part_time">兼職</option></select></label><label>需求人數<input v-model.number="jobForm.headcount" type="number" min="1"></label><label>月薪下限<input v-model.number="jobForm.salary_min" type="number" min="0"></label><label>月薪上限<input v-model.number="jobForm.salary_max" type="number" min="0"></label><label class="wide">技能（逗號分隔）<input v-model="jobForm.skillsText"></label><label class="wide">職缺摘要<textarea v-model="jobForm.summary" rows="2"></textarea></label><label class="wide">職務說明 *<textarea v-model="jobForm.jd" rows="7" required></textarea></label><label>流程狀態<select v-model="jobForm.status"><option v-for="(label,key) in jobStatusLabels" :key="key" :value="key">{{ label }}</option></select></label><label class="wide"><input v-model="jobForm.blind_review_enabled" class="inline-check" type="checkbox" data-testid="job-blind-review-disclosure" :true-value="false" :false-value="true" :disabled="!blindReviewEditable">面試評分揭露規則：開放 HR 與主管即時互看彼此評分<small>不勾選（預設）為盲評：雙方先各自評分，等 HR 與主管都提交後才互相公開評分、觀察紀錄、面談總結與錄取建議，避免先看到對方分數影響判斷。勾選後 HR 與主管即時互看彼此評分。</small><small v-if="blindReviewLocked" class="assignment-warning" data-testid="job-blind-review-note">已有面試提交紀錄，設定不可再變更。</small><small v-else-if="!editingJob" data-testid="job-blind-review-note">新職缺一律先採盲評，建立後可由人資調整。</small><small v-else-if="!blindReviewEditable" class="assignment-warning" data-testid="job-blind-review-note">僅人資可變更此設定，目前為唯讀。</small></label></div>
+      <div v-else class="form-grid"><label>職缺編號 *<input v-model="jobForm.req_no" required :disabled="!!editingJob"></label><label>職缺名稱 *<input v-model="jobForm.title" required></label><label>部門 ID<input v-model.number="jobForm.department_id" type="number" min="1"></label><label>工作地點<input v-model="jobForm.work_city"></label><label>聘僱類型<select v-model="jobForm.employment_type"><option value="full_time">正職</option><option value="contract">約聘</option><option value="part_time">兼職</option></select></label><label>需求人數<input v-model.number="jobForm.headcount" type="number" min="1"></label><label>月薪下限<input v-model.number="jobForm.salary_min" type="number" min="0"></label><label>月薪上限<input v-model.number="jobForm.salary_max" type="number" min="0"></label><label class="wide">技能（逗號分隔）<input v-model="jobForm.skillsText"></label><label class="wide">職缺摘要<textarea v-model="jobForm.summary" rows="2"></textarea></label><label class="wide">職務說明 *<textarea v-model="jobForm.jd" rows="7" required></textarea></label><label>流程狀態<select v-model="jobForm.status"><option v-for="(label,key) in jobStatusLabels" :key="key" :value="key">{{ label }}</option></select></label><label class="wide"><input v-model="jobForm.blind_review_enabled" class="inline-check" type="checkbox" data-testid="job-blind-review-disclosure" :true-value="false" :false-value="true" :disabled="!blindReviewEditable">面試評分揭露規則：開放 HR 與主管即時互看彼此評分<small>不勾選（預設）為盲評：雙方先各自評分，等 HR 與主管都提交後才互相公開評分、觀察紀錄、面談總結與錄取建議，避免先看到對方分數影響判斷。勾選後 HR 與主管即時互看彼此評分。</small><small v-if="blindReviewLocked" class="assignment-warning" data-testid="job-blind-review-note">已有面試提交紀錄，設定不可再變更。</small><small v-else-if="!editingJob" data-testid="job-blind-review-note">新職缺一律先採盲評，建立後可由人資調整。</small><small v-else-if="!blindReviewEditable" class="assignment-warning" data-testid="job-blind-review-note">僅人資可變更此設定，目前為唯讀。</small></label><div class="wide composite-weight-field" data-testid="job-composite-weights"><b>綜合參考分權重</b><small>面試卡片「六項分數總覽」第 ⑥ 項的加權來源。數值代表相對重要程度，總和不必剛好 100，儲存時會依比例正規化。</small><div class="composite-weight-grid"><label v-for="key in compositeWeightKeys" :key="key"><span>{{ compositeWeightLabels[key] }}</span><input v-model.number="compositeWeightForm[key]" :data-testid="`job-composite-weight-${key}`" type="number" min="0" max="100" step="1" :disabled="!compositeWeightsEditable"></label></div><small :class="{ 'assignment-warning': compositeWeightInvalid }" data-testid="job-composite-weight-total">目前合計 {{ compositeWeightTotal }}<template v-if="compositeWeightInvalid">（至少一項必須大於 0）</template></small><small v-if="!editingJob" data-testid="job-composite-weight-note">新職缺一律先採預設權重 20／15／25／15／25，建立後可由人資調整。</small><small v-else-if="!compositeWeightsEditable" class="assignment-warning" data-testid="job-composite-weight-note">僅人資可變更此設定，目前為唯讀。</small><small v-else data-testid="job-composite-weight-note">儲存後，此職缺已算出的綜合參考分會立即以新權重重算。</small></div></div>
       <div v-if="dialog === 'job' && jobComplianceFindings.length" class="jd-compliance-alert" role="alert" data-testid="jd-compliance-alert">
         <div class="jd-compliance-head"><span aria-hidden="true">⚠</span><div><strong>可能涉及就業歧視用語（{{ jobComplianceFindings.length }} 項）</strong><small>依就業服務法第 5 條、中高齡就業促進法、性別平等工作法，職缺不得限制受保護特徵。以下為系統偵測提示，仍需人工／法務判斷，警示不會阻擋儲存。</small></div></div>
         <ul class="jd-compliance-list"><li v-for="(finding, index) in jobComplianceFindings" :key="index"><span class="jd-compliance-tag">{{ jobComplianceLabel(finding.category) }}</span><span class="jd-compliance-matched">「{{ finding.matched }}」</span><small class="jd-compliance-where">（{{ finding.field === 'title' ? '職缺名稱' : finding.field === 'summary' ? '職缺摘要' : '職務說明' }}）</small><p>{{ finding.suggestion }}</p></li></ul>
@@ -1749,6 +1791,10 @@ onBeforeUnmount(closeResumeFilePreview)
 .manager-job-target{display:grid;gap:6px;margin:14px 16px 12px;padding:13px;border:1px solid #cfe2dc;border-radius:10px;background:#f8fbfa;color:#496c66;font-size:9px;font-weight:700}.manager-job-target select{width:100%;height:40px;border:1px solid #c9dcd7;border-radius:8px;background:#fff;padding:0 11px;color:#274f49;font-size:10px}.manager-job-target small{color:#7f918d;font-weight:400}.manager-job-target .target-warning{color:#a25e38}.dropzone:disabled{cursor:not-allowed;opacity:.62}.resume-target-summary{margin:14px 17px 0;padding:12px 14px;border:1px solid #c9e4da;border-radius:9px;background:#eef8f4;color:#285f56}.resume-target-summary small,.resume-target-summary strong{display:block}.resume-target-summary small{font-size:8px;color:#6e877f}.resume-target-summary strong{margin-top:3px;font-size:11px}.resume-target-summary p{margin:5px 0 0;font-size:8px;color:#668078}
 .shared-activity-hint{margin:-5px 0 14px;color:#70827e;font-size:9px;line-height:1.6}.shared-timeline article{padding:12px 12px 12px 23px;border:1px solid #e0ebe7;border-radius:9px;background:#fbfdfc}.shared-timeline article[data-author-role="hr"]{border-left:3px solid #19917e}.shared-timeline article[data-author-role="manager"]{border-left:3px solid #d59b32}.timeline-author{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}.timeline-author strong{color:#174f48;font-size:10px}.timeline-author span{padding:3px 6px;border-radius:99px;background:#edf5f2;color:#56706a;font-size:7px}.shared-timeline article>small{display:block;color:#80908c}.shared-timeline article>p{white-space:pre-wrap;overflow-wrap:anywhere}
 .candidate-assignment-list{display:flex;flex-wrap:wrap;gap:6px;padding:10px 12px;border:1px solid #d8e7e2;border-radius:9px;background:#f8fbfa}.candidate-assignment-list>small{flex-basis:100%;color:#6e827d}.candidate-assignment-list>span{padding:5px 8px;border-radius:99px;background:#e6f2ee;color:#27675e;font-size:8px}.form-grid label>small{display:block;margin-top:5px;color:#788b86;font-size:8px;line-height:1.45}.form-grid label>.assignment-warning{color:#a45445;font-weight:700}.form-grid label>.inline-check{display:inline-block;width:auto;height:auto;margin:0 6px 0 0;padding:0;vertical-align:-1px}.form-grid label>.inline-check:disabled{cursor:not-allowed;opacity:.55}
+/* Composite-score weights: a bordered sub-panel inside the job form, same treatment as
+   .candidate-assignment-list, with the five inputs on one row that wraps on narrow cards. */
+.composite-weight-field{padding:10px 12px;border:1px solid #d8e7e2;border-radius:9px;background:#f8fbfa}.composite-weight-field>b{display:block;color:#27675e;font-size:10px;font-weight:800}.composite-weight-field>small{display:block;margin-top:5px;color:#788b86;font-size:8px;line-height:1.45}.composite-weight-field>.assignment-warning{color:#a45445;font-weight:700}
+.composite-weight-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:8px}.composite-weight-grid label{display:flex;flex-direction:column;gap:4px}.composite-weight-grid span{color:#4a5f5a;font-size:8px;font-weight:700}.composite-weight-grid input:disabled{cursor:not-allowed;opacity:.55}
 /* Same .error-alert treatment as the page banner, re-flowed for the modal card and the drawer column. */
 .dialog-alert{flex:0 0 auto;margin:14px 16px 4px}.dialog-alert>p{overflow-wrap:anywhere}
 .jd-compliance-alert{margin:14px 16px 4px;padding:13px 15px;border:1px solid #e4c579;border-radius:11px;background:#fff8e8;color:#6e561f}.jd-compliance-head{display:flex;align-items:flex-start;gap:11px}.jd-compliance-head>span{flex:0 0 auto;width:26px;height:26px;display:grid;place-items:center;border-radius:7px;background:#e6a532;color:#fff;font-size:14px;font-weight:900}.jd-compliance-head strong{display:block;color:#6a4d13;font-size:12px}.jd-compliance-head small{display:block;margin-top:4px;color:#8a7233;font-size:9px;line-height:1.6}.jd-compliance-list{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:9px}.jd-compliance-list>li{padding:9px 11px;border:1px solid #ecd6a0;border-radius:9px;background:#fffdf6}.jd-compliance-tag{display:inline-block;padding:3px 7px;border-radius:99px;background:#e6a532;color:#fff;font-size:8px;font-weight:800;vertical-align:middle}.jd-compliance-matched{margin-left:6px;color:#a2381f;font-size:10px;font-weight:800}.jd-compliance-where{margin-left:4px;color:#94805a;font-size:8px}.jd-compliance-list p{margin:6px 0 0;color:#5f6f4e;font-size:9px;line-height:1.6}

@@ -24,7 +24,10 @@ from app.schemas.matching import (
     JobComplianceLintRequest,
     JobComplianceResult,
 )
-from app.services.interview_scoring import resolve_composite_weights
+from app.services.interview_scoring import (
+    recompute_requisition_composite_scores,
+    resolve_composite_weights,
+)
 from app.services.jd_compliance import JD_COMPLIANCE_RULES_VERSION, lint_job_text
 from app.services.security import write_audit
 
@@ -242,8 +245,8 @@ def update_requisition(
     # the normalised weights rather than the raw dict: re-sending the whole
     # requisition, or restating the same split written differently (20/15/25/15/25
     # and 40/30/50/30/50 weigh identically), decides nothing and must not 403.
-    # Unlike blind review this has no lock -- a stored composite keeps the weights
-    # its breakdown records, so reweighting never rewrites a past decision.
+    # Unlike blind review this has no lock: a real change re-derives the composites
+    # already stored here (see below), so the setting stays editable at any time.
     previous_weights = requisition.composite_score_weights
     previous_resolved_weights = requisition.composite_score_weights_resolved
     composite_weights_change = "composite_score_weights" in updates and (
@@ -295,8 +298,17 @@ def update_requisition(
             user_agent=request.headers.get("user-agent"),
         )
     if composite_weights_change:
-        # Reweighting changes how every future candidate on this requisition ranks,
-        # so who changed it and to what has to stay attributable, same as above.
+        # Reweighting changes how every candidate on this requisition ranks, so who
+        # changed it and to what has to stay attributable, same as above.
+        #
+        # It also re-derives the composites already stored here, rather than leaving
+        # them on the weights they were first computed with. HR asked for the number
+        # on screen to follow the setting, and a list where some candidates carry the
+        # old split and some the new one cannot be ranked at all. What the composites
+        # were before the change is not lost -- recomputed_applications below records
+        # every one that moved, which keeps the old snapshot auditable without
+        # freezing it into the ranking.
+        recomputed_applications = recompute_requisition_composite_scores(db, requisition)
         write_audit(
             db,
             user,
@@ -314,6 +326,7 @@ def update_requisition(
                     "from": previous_resolved_weights,
                     "to": requisition.composite_score_weights_resolved,
                 },
+                "recomputed_applications": recomputed_applications,
             },
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),

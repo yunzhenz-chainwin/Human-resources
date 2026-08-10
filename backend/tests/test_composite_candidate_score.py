@@ -13,7 +13,7 @@ review has released the scores it is built from.
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from test_application_interviews import _headers, application_client
 
 from app.models import JobApplication, JobRequisition, MatchResult, User
@@ -719,3 +719,144 @@ def test_composite_weights_reject_unknown_keys_and_negative_values(
             json={"composite_score_weights": invalid},
         )
         assert response.status_code == 422, (invalid, response.text)
+
+
+def test_reweighting_recomputes_the_composites_already_stored(application_client) -> None:
+    """A stored composite follows the weights, without waiting for a resubmission.
+
+    A composite is only ever read against the other candidates on the same
+    requisition, so leaving the stored ones on the previous split would rank one
+    list on two scales. What each composite was before the change stays recoverable
+    from the audit entry rather than frozen into the ranking.
+    """
+
+    client, testing_session, ids = application_client
+    application_id = ids["design_application"]
+    endpoint = f"/api/v1/applications/{application_id}/interview-records"
+    hr_headers = _headers(client, "hr")
+    _seed_match_result(testing_session, ids["design_job"], ids["bob"], "80.00")
+
+    assert (
+        client.post(
+            endpoint,
+            headers=hr_headers,
+            json=_completed("hr", ratings=[4, 5, 3], not_asked=1, overall_score=90),
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            endpoint,
+            headers=_headers(client, "design-manager"),
+            json=_completed("manager", ratings=[2, 4], not_asked=1, overall_score=70),
+        ).status_code
+        == 201
+    )
+    # 80*.20 + 80*.15 + 90*.25 + 60*.15 + 70*.25, on the built-in split.
+    assert _application(client, hr_headers, application_id)["composite_score"] == 77.0
+
+    weights = {
+        "resume": 0,
+        "hr_questions": 0,
+        "hr_overall": 50,
+        "manager_questions": 0,
+        "manager_overall": 50,
+    }
+    reweighted = client.patch(
+        f"/api/v1/requisitions/{ids['design_job']}",
+        headers=hr_headers,
+        json={"composite_score_weights": weights},
+    )
+    assert reweighted.status_code == 200, reweighted.text
+
+    # Nothing was resubmitted in between: the stored number moved with the setting.
+    body = _application(client, hr_headers, application_id)
+    assert body["composite_score"] == 80.0
+    breakdown = body["composite_score_breakdown"]
+    assert breakdown["configured_weights"] == weights
+    assert breakdown["components"]["resume"]["applied_weight"] == 0.0
+    assert breakdown["components"]["hr_overall"]["applied_weight"] == 0.5
+
+    with testing_session() as db:
+        log = db.scalars(
+            select(AuditLog)
+            .where(
+                AuditLog.action == "requisition.composite_score_weights.update",
+                AuditLog.resource_type == "job_requisition",
+                AuditLog.resource_id == str(ids["design_job"]),
+            )
+            .order_by(AuditLog.id.desc())
+        ).first()
+        assert log is not None
+        details = log.details
+    assert {"application_id": application_id, "from": 77.0, "to": 80.0} in details[
+        "recomputed_applications"
+    ]
+
+
+def test_restating_the_same_weights_recomputes_nothing(application_client) -> None:
+    """Only a real change recomputes: re-saving an untouched form must be a no-op.
+
+    The job form sends the weights on every HR save, so "no change" has to stay
+    free of side effects -- otherwise every unrelated edit would silently rewrite
+    the composites and fill the audit log with entries that decided nothing.
+    """
+
+    client, testing_session, ids = application_client
+    application_id = ids["design_application"]
+    endpoint = f"/api/v1/applications/{application_id}/interview-records"
+    hr_headers = _headers(client, "hr")
+    _seed_match_result(testing_session, ids["design_job"], ids["bob"], "80.00")
+
+    assert (
+        client.post(
+            endpoint,
+            headers=hr_headers,
+            json=_completed("hr", ratings=[4, 5, 3], not_asked=1, overall_score=90),
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            endpoint,
+            headers=_headers(client, "design-manager"),
+            json=_completed("manager", ratings=[2, 4], not_asked=1, overall_score=70),
+        ).status_code
+        == 201
+    )
+
+    # The built-in split as the form sends it back, then the same split scaled up:
+    # resolve_composite_weights normalises both to what the requisition already uses,
+    # so neither is a change.
+    restatements = (
+        dict(DEFAULT_COMPOSITE_WEIGHTS),
+        {
+            "resume": 40,
+            "hr_questions": 30,
+            "hr_overall": 50,
+            "manager_questions": 30,
+            "manager_overall": 50,
+        },
+    )
+    for restated in restatements:
+        unchanged = client.patch(
+            f"/api/v1/requisitions/{ids['design_job']}",
+            headers=hr_headers,
+            json={"composite_score_weights": restated},
+        )
+        assert unchanged.status_code == 200, unchanged.text
+        assert unchanged.json()["composite_score_weights"] is None
+
+    assert _application(client, hr_headers, application_id)["composite_score"] == 77.0
+    with testing_session() as db:
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(
+                    AuditLog.action == "requisition.composite_score_weights.update",
+                    AuditLog.resource_id == str(ids["design_job"]),
+                )
+            )
+            == 0
+        )

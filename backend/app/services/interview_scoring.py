@@ -338,3 +338,49 @@ def recompute_application_composite_score(
     application.composite_score = None if score is None else Decimal(repr(score))
     application.composite_score_breakdown = breakdown
     return score, breakdown
+
+
+def recompute_requisition_composite_scores(
+    db: Session,
+    requisition: JobRequisition,
+) -> list[dict[str, Any]]:
+    """Re-derive every stored composite on one requisition under its current weights.
+
+    Called when the requisition's weights change. A composite is only ever read
+    against the other candidates on the same requisition, and that comparison holds
+    only while everyone is scored the same way -- leaving the stored numbers on the
+    old weights would rank one list on two scales, which ranks it on neither.
+
+    The previous numbers are not lost. The caller writes them into the audit entry
+    for the reweighting, which is where "what this looked like when the decision was
+    made" lives for every other setting here too.
+
+    Applications whose two stages are not both submitted simply re-derive to None
+    and stay pending, exactly as they do on a stage submission.
+
+    Returns one entry per application whose composite actually moved, so the caller
+    can record the before/after; an unchanged composite is left out rather than
+    padding the audit with no-ops.
+    """
+
+    applications = list(
+        db.scalars(
+            select(JobApplication)
+            .where(JobApplication.requisition_id == requisition.id)
+            .order_by(JobApplication.id)
+        ).all()
+    )
+    changes: list[dict[str, Any]] = []
+    for application in applications:
+        previous = application.composite_score
+        previous_score = None if previous is None else float(previous)
+        score, _ = recompute_application_composite_score(db, application, requisition)
+        if previous_score != score:
+            changes.append(
+                {
+                    "application_id": application.id,
+                    "from": previous_score,
+                    "to": score,
+                }
+            )
+    return changes
