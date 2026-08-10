@@ -18,7 +18,22 @@ $principal = New-ScheduledTaskPrincipal `
     -UserId "SYSTEM" `
     -LogonType ServiceAccount `
     -RunLevel Highest
-$trigger = New-ScheduledTaskTrigger -AtStartup
+# Two triggers. Boot covers a restarted machine; the repeating one is a watchdog, and it
+# is there because restart-on-failure below was not enough. On 2026-08-05 all three
+# services ended at once on a host that stayed up, and Task Scheduler does not count a
+# task host terminated from outside as a failure -- so nothing restarted, the only
+# remaining trigger was the next boot, and the machine had not been rebooted since April.
+# The services stayed down for five days.
+#
+# A fire that finds its service healthy costs one HTTP request: run-service.ps1 probes the
+# port first and exits, and MultipleInstances = IgnoreNew keeps a fire from stacking on top
+# of a start that is still in progress. Five minutes bounds how long an outage can go
+# unattended without making the check itself noticeable.
+$bootTrigger = New-ScheduledTaskTrigger -AtStartup
+$watchdogTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -RestartCount 100 `
@@ -45,7 +60,7 @@ foreach ($task in $tasks) {
         Register-ScheduledTask `
             -TaskName $task.Name `
             -Action $action `
-            -Trigger $trigger `
+            -Trigger @($bootTrigger, $watchdogTrigger) `
             -Principal $principal `
             -Settings $settings `
             -Description "Keep the TalentHub $($task.Service) service available after Windows restarts." `

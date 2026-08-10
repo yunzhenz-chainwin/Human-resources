@@ -62,7 +62,7 @@ same inbound allow rule through Group Policy:
 - Profiles: the server's active profile (currently Public), or all profiles
 - Direction/action: inbound/allow
 
-## Automatic restart after Windows reboot
+## Automatic restart after a crash or reboot
 
 The current hidden development processes do not survive a reboot and are not
 automatically restarted after a crash. Install three startup tasks from an
@@ -79,9 +79,20 @@ next Windows startup. To transition immediately with a brief controlled outage:
 .\deploy\windows-lan\install-autostart.ps1 -StartNow
 ```
 
-The tasks run as `SYSTEM`, start at boot, and retry up to 100 times at one-minute
-intervals if a process exits. Logs are stored under
-`deploy/windows-lan/logs/`. Remove the tasks without deleting application data:
+The tasks run as `SYSTEM` and carry two triggers: Windows startup, and a watchdog
+that repeats every five minutes. A watchdog fire probes the service's port and
+exits as soon as it answers, so a healthy check costs one HTTP request and the
+timer is safe to leave armed while the services are being run by `start-dev.ps1`
+or were started by hand after an incident.
+
+The watchdog is what actually covers an unplanned stop. Task Scheduler's
+retry-on-failure setting is still configured (100 retries a minute apart) but it
+only fires when the task itself fails, not when the task host is terminated from
+outside. On 2026-08-05 all three services ended that way on a host that stayed
+up: nothing retried, the only remaining trigger was the next boot, the machine
+had not been rebooted since April, and the site served HTTP 500 for five days
+before anyone traced it back. Logs are stored under `deploy/windows-lan/logs/`.
+Remove the tasks without deleting application data:
 
 ```powershell
 .\deploy\windows-lan\uninstall-autostart.ps1 -StopServices
