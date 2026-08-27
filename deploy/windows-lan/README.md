@@ -1,16 +1,26 @@
 # TalentHub Windows LAN deployment
 
-## Live status (2026-07-15)
+## Live status (2026-08-27)
 
-- Database migration: `c83f2a6d4e70` (two-stage interviews), integrity check passed.
+- Database migration head: `a9e3d51c7b82` (bounded question-plan provenance);
+  the backend task runs `alembic upgrade head` on every start, so new
+  migrations apply at the next service restart.
+- Runtime posture: `APP_ENV=production` in `backend/.env` — FastAPI docs pages
+  disabled, demo/seed data refused, and resume-upload malware scanning
+  fail-closed (`RESUME_SCANNER=clamav`, `RESUME_SCAN_POLICY=fail`).
+- ClamAV 1.5.4 (portable install at `C:\Users\Administrator\clamav`; override
+  the path with `CLAMAV_HOME`) serves clamd on loopback `3310`. Definitions
+  refresh best-effort on every service start; EICAR detection verified live.
 - Windows Firewall rule `TalentHub-LAN-Web`: effective for TCP `5173,5174`
-  from `10.201.7.0/24`; API `8010` remains loopback-only.
-- Startup tasks `TalentHub-LAN-Backend`, `TalentHub-LAN-HR`, and
-  `TalentHub-LAN-Career`: installed under `SYSTEM` and running.
-- Localhost, computer-name, LAN-IP, frontend API proxy, and both web portals:
-  verified HTTP 200 after the final restart.
-- Pre-migration backup:
-  `backend/talenthub-dev.before-two-stage-20260715-101742.db`.
+  from `10.201.7.0/24`; API `8010` and clamd `3310` remain loopback-only.
+- Startup tasks under `SYSTEM`: `TalentHub-LAN-ClamAV`, `TalentHub-LAN-Backend`,
+  `TalentHub-LAN-HR`, `TalentHub-LAN-Career` (registered by this repo's
+  `install-autostart.ps1`), plus a separately registered `TalentHub-LAN-Deid`
+  for the standalone de-identification web tool. That tool binds
+  `0.0.0.0:8765`, which the firewall rule above deliberately does not open;
+  publish the port only if LAN access to it is actually intended.
+- Backend health, docs-disabled behaviour, and both web portals verified after
+  the 2026-08-27 restart.
 
 One test from a manager's actual workstation is still required to confirm that
 company DNS, proxy, VLAN, VPN, and endpoint security permit the connection.
@@ -65,8 +75,8 @@ same inbound allow rule through Group Policy:
 ## Automatic restart after a crash or reboot
 
 The current hidden development processes do not survive a reboot and are not
-automatically restarted after a crash. Install three startup tasks from an
-elevated PowerShell:
+automatically restarted after a crash. Install the four startup tasks (ClamAV
+first, then backend and the two frontends) from an elevated PowerShell:
 
 ```powershell
 .\deploy\windows-lan\install-autostart.ps1
