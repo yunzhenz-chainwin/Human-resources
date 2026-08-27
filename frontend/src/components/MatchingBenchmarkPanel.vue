@@ -92,25 +92,40 @@ async function loadSuites() {
   }
 }
 
+// Rapid suite switches race: only the most recent load may write shared state,
+// or a slower earlier response would display one suite's cases under another
+// suite's title.
+let suiteRequestSequence = 0
+
 async function loadSuite() {
   if (!selectedSuiteKey.value) return
+  const requestId = ++suiteRequestSequence
+  const suiteKey = selectedSuiteKey.value
   error.value = ''
   notice.value = ''
-  const suite = suites.value.find(item => item.key === selectedSuiteKey.value)
-  if (suite?.status === 'revealed') {
-    report.value = await matchingBenchmarkApi.report(selectedSuiteKey.value)
-    cases.value = []
-    return
+  try {
+    const suite = suites.value.find(item => item.key === suiteKey)
+    if (suite?.status === 'revealed') {
+      const revealedReport = await matchingBenchmarkApi.report(suiteKey)
+      if (requestId !== suiteRequestSequence) return
+      report.value = revealedReport
+      cases.value = []
+      return
+    }
+    const payload = await matchingBenchmarkApi.cases(suiteKey)
+    if (requestId !== suiteRequestSequence) return
+    cases.value = payload.cases
+    // The previous suite's job filter cannot apply to this suite's cases; keep
+    // the default of focusing the first job instead of filtering to nothing.
+    selectedJobKey.value = payload.cases.length ? payload.cases[0].job_key : 'all'
+    report.value = null
+    initializeDrafts(payload.cases)
+    const index = suites.value.findIndex(item => item.key === payload.suite.key)
+    if (index >= 0) suites.value[index] = payload.suite
+  } catch (cause) {
+    if (requestId !== suiteRequestSequence) return
+    error.value = cause instanceof Error ? cause.message : '無法讀取媒合基準案例'
   }
-  const payload = await matchingBenchmarkApi.cases(selectedSuiteKey.value)
-  cases.value = payload.cases
-  if (selectedJobKey.value === 'all' && payload.cases.length) {
-    selectedJobKey.value = payload.cases[0].job_key
-  }
-  report.value = null
-  initializeDrafts(payload.cases)
-  const index = suites.value.findIndex(item => item.key === payload.suite.key)
-  if (index >= 0) suites.value[index] = payload.suite
 }
 
 async function save(item: BlindBenchmarkCase) {
