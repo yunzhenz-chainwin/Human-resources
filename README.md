@@ -134,7 +134,9 @@ python -m pip install -e "backend[dev]"
 Set-Location backend
 $env:DATABASE_URL = "sqlite:///./talenthub-dev.db"
 python -m alembic upgrade head
-python -m uvicorn app.main:app --reload --port 8000
+# run_backend.py 會在 8010 埠啟動並處理 OCR 工具的 PATH；兩個前端的
+# dev proxy 預設就指向 http://127.0.0.1:8010。
+python run_backend.py
 ```
 
 ```powershell
@@ -151,8 +153,9 @@ npm ci
 npm run dev
 ```
 
-預設開發 port：HR 後台 `5173`、公開網站 `5174`、API `8000`。若 API port
-已被其他程式使用，可設定 `VITE_API_PROXY_TARGET` 後再啟動公開網站。
+預設開發 port：HR 後台 `5173`、公開網站 `5174`、API `8010`（Docker 部署時
+容器內為 `8000`）。若 API port 已被其他程式使用，可設定
+`VITE_API_PROXY_TARGET` 後再啟動前端。
 
 驗證指令：
 

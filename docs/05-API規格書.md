@@ -110,6 +110,16 @@ POST /candidates/search
 
 遮罩與釋出時機見 [13-結構化面試評分與盲評操作規格](13-結構化面試評分與盲評操作規格.md) §6。
 
+### 5.2 綜合參考分權重 `composite_score_weights`
+
+職缺層級的選填 JSON 欄位，決定五個分數（`resume` 履歷匹配、`hr_questions`、`hr_overall`、`manager_questions`、`manager_overall`）如何加權成應徵的綜合參考分。`NULL` 代表內建 20/15/25/15/25；部分覆寫只影響指名的鍵。比較與呈現一律使用正規化成總和 1 的 `composite_score_weights_resolved`：以相同比例的另一種寫法重述（如 40/30/50/30/50）不算一次變更。
+
+- 只有 `hr` 能送出真實變更（PATCH `/requisitions/{id}`）；其他角色回 `403`。未知鍵或負值回 `422`；全零總和視同未設定，伺服器退回內建權重。
+- 真實變更會立即以新權重重算該職缺**所有**已儲存的綜合分——同一份名單不能一半用舊權重、一半用新權重排序——並寫入 `requisition.composite_score_weights.update` 稽核紀錄，內含前後權重與每筆移動的綜合分（`recomputed_applications`）。
+- 綜合分存於應徵：`GET /applications` 回應含 `composite_score`（兩位小數，雙方皆提交後才有值）與 `composite_score_breakdown`（各分量取值、實際套用權重、缺項原因；未齊時 `status="pending_stages"`）。重新配對（rematch）改寫履歷配對分數時，會在同一交易重算綜合分。
+
+計算規則（缺項權重折算、單階段內折算、四捨五入、與盲評釋出的關係）見 [13-結構化面試評分與盲評操作規格](13-結構化面試評分與盲評操作規格.md)。
+
 ## 6. 配對 Matches
 
 | Method | Path | 說明 | 權限 |
