@@ -64,8 +64,9 @@ class JobRequisition(TimestampMixin, Base):
     # NULL means "use the defaults"; a partial dict overrides only the keys it
     # names. Normalised on read by services.interview_scoring.resolve_composite_weights,
     # exactly like match_weights above. Only HR may change it (see the requisitions
-    # route), and a stored composite keeps the weights it was computed with, which
-    # the breakdown records, so a later reweighting never rewrites past decisions.
+    # route), and a reweighting re-derives every composite stored on the requisition
+    # so the whole list stays ranked on one scale; the audit entry for the change
+    # records what each composite was before, which is where the old snapshot lives.
     composite_score_weights: Mapped[dict | None] = mapped_column(JSON)
     # Blind review is the default: each interviewer's evaluation stays hidden from
     # the other side until both stages are submitted. HR may switch it off for a

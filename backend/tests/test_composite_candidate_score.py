@@ -10,7 +10,7 @@ review has released the scores it is built from.
 # Ruff treats pytest's intentional imported-fixture export and shadowing as unused.
 # ruff: noqa: F401, F811
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 import pytest
 from sqlalchemy import func, select
@@ -792,6 +792,70 @@ def test_reweighting_recomputes_the_composites_already_stored(application_client
     assert {"application_id": application_id, "from": 77.0, "to": 80.0} in details[
         "recomputed_applications"
     ]
+
+
+def test_rematch_recomputes_the_composites_already_stored(application_client) -> None:
+    """A rematch rewrites every stored resume match score, and each stored
+    composite embeds the one it was computed with. It must re-derive them in the
+    same pass, or the requisition's composite ranking mixes pre- and post-rematch
+    scales -- the same invariant the reweighting test above pins, approached from
+    the matching side."""
+
+    client, testing_session, ids = application_client
+    application_id = ids["design_application"]
+    endpoint = f"/api/v1/applications/{application_id}/interview-records"
+    hr_headers = _headers(client, "hr")
+    _seed_match_result(testing_session, ids["design_job"], ids["bob"], "80.00")
+
+    assert (
+        client.post(
+            endpoint,
+            headers=hr_headers,
+            json=_completed("hr", ratings=[4, 5, 3], not_asked=1, overall_score=90),
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            endpoint,
+            headers=_headers(client, "design-manager"),
+            json=_completed("manager", ratings=[2, 4], not_asked=1, overall_score=70),
+        ).status_code
+        == 201
+    )
+    # 80*.20 + 80*.15 + 90*.25 + 60*.15 + 70*.25, on the built-in split.
+    assert _application(client, hr_headers, application_id)["composite_score"] == 77.0
+
+    rematched = client.post(
+        f"/api/v1/requisitions/{ids['design_job']}/rematch", headers=hr_headers
+    )
+    assert rematched.status_code == 200, rematched.text
+
+    with testing_session() as db:
+        rematched_resume = db.scalar(
+            select(MatchResult.total_score).where(
+                MatchResult.requisition_id == ids["design_job"],
+                MatchResult.candidate_id == ids["bob"],
+            )
+        )
+    assert rematched_resume is not None
+    resume_score = float(rematched_resume)
+    # The seeded 80.00 was a fixture value no scoring run produced; the rematch
+    # replaced it with the score derived from the stored candidate data.
+    assert resume_score != 80.0
+
+    expected = float(
+        (
+            Decimal(repr(resume_score)) * Decimal("0.20")
+            + Decimal("80") * Decimal("0.15")
+            + Decimal("90") * Decimal("0.25")
+            + Decimal("60") * Decimal("0.15")
+            + Decimal("70") * Decimal("0.25")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
+    body = _application(client, hr_headers, application_id)
+    assert body["composite_score"] == expected
+    assert body["composite_score_breakdown"]["components"]["resume"]["value"] == resume_score
 
 
 def test_restating_the_same_weights_recomputes_nothing(application_client) -> None:

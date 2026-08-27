@@ -346,7 +346,8 @@ def recompute_requisition_composite_scores(
 ) -> list[dict[str, Any]]:
     """Re-derive every stored composite on one requisition under its current weights.
 
-    Called when the requisition's weights change. A composite is only ever read
+    Called when the requisition's weights change and after a rematch rewrites the
+    stored resume match scores. A composite is only ever read
     against the other candidates on the same requisition, and that comparison holds
     only while everyone is scored the same way -- leaving the stored numbers on the
     old weights would rank one list on two scales, which ranks it on neither.

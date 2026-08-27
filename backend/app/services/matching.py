@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import Candidate, JobRequisition, MatchResult
+from app.services.interview_scoring import recompute_requisition_composite_scores
 
 DEFAULT_WEIGHTS = {
     "skill": 0.40,
@@ -686,6 +687,12 @@ def rematch_requisition(db: Session, requisition: JobRequisition) -> list[MatchR
     )
     for rank, (_, _, result) in enumerate(eligible, start=1):
         result.rank = rank
+    # Every total_score above may just have moved, and each stored composite embeds
+    # the resume score it was computed with. Re-derive them inside the same commit,
+    # or the requisition's composite ranking mixes pre- and post-rematch scales --
+    # the situation recompute_requisition_composite_scores exists to prevent.
+    db.flush()
+    recompute_requisition_composite_scores(db, requisition)
     db.commit()
     return [
         item[2]
