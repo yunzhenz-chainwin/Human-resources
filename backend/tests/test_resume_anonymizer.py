@@ -188,3 +188,64 @@ def test_local_ocr_cleans_raw_resume_when_poppler_fails(
         resume_anonymizer._local_ocr_pdf(b"private resume", 1)
 
     assert not expected_pdf.exists()
+
+
+def test_anonymize_covers_backend_identifier_classes() -> None:
+    """The standalone tool must redact the same classes as the in-app pipeline
+    (backend deidentification): landlines, URLs and exact dates previously
+    passed straight through into "de-identified" output."""
+
+    source = (
+        "姓名：王小明\n"
+        "出生日期：1992/03/15\n"
+        "行動電話：0912-345-678\n"
+        "市話：02-23456789 或 886-2-23456789\n"
+        "個人網站 https://example.com/profile 與 www.linkedin.com/in/xiaoming\n"
+        "任職期間 2020/03 - 2023/05，總年資 8 年\n"
+    )
+    result, summary = resume_anonymizer.anonymize(source)
+    for leaked in (
+        "王小明",
+        "0912",
+        "23456789",
+        "https://",
+        "www.linkedin",
+        "1992/03/15",
+        "2020/03",
+        "2023/05",
+    ):
+        assert leaked not in result
+    for marker in ("[NAME]", "[PHONE]", "[URL]", "[DATE]"):
+        assert marker in result
+    assert "8 年" in result
+    assert summary.replacements["landline"] == 2
+    assert summary.replacements["url"] == 2
+    assert summary.replacements["exact_date"] >= 3
+
+
+def test_birth_label_line_is_redacted_even_without_a_parsable_date() -> None:
+    result, summary = resume_anonymizer.anonymize("生日 民國81年3月15日\n專長：Python\n")
+    assert "民國81年3月15日" not in result
+    assert "[DATE]" in result
+    assert "Python" in result
+    assert summary.replacements["birth_label"] == 1
+
+
+def test_multipart_parser_replaces_the_removed_cgi_module() -> None:
+    boundary = "e2e-boundary-123"
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="text"\r\n\r\n'
+        "純文字欄位內容\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="resume.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+        "檔案內容 0912-345-678\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    fields, files = resume_anonymizer._parse_multipart(
+        body, f"multipart/form-data; boundary={boundary}"
+    )
+    assert fields["text"] == "純文字欄位內容"
+    assert files["file"][0] == "resume.txt"
+    assert files["file"][1] == "檔案內容 0912-345-678".encode()

@@ -8,7 +8,6 @@ used from the command line or as a small local web page (``--web``).
 from __future__ import annotations
 
 import argparse
-import cgi
 import html
 import io
 import json
@@ -22,6 +21,8 @@ import tempfile
 import time
 from datetime import datetime
 from dataclasses import asdict, dataclass
+from email import policy
+from email.parser import BytesParser
 from statistics import mean
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -80,7 +81,26 @@ class Summary:
 PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("email", re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I), "[EMAIL]"),
     ("phone", re.compile(r"(?<!\d)(?:\+?886[-\s]?|0)9\d{2}[-\s]?\d{3}[-\s]?\d{3}(?!\d)"), "[PHONE]"),
+    # The landline, URL and exact-date rules mirror LANDLINE_RE / URL_RE /
+    # DATE_RE in backend/app/services/deidentification.py, so the standalone
+    # tool redacts the same identifier classes as the in-app pipeline.
+    (
+        "landline",
+        re.compile(r"(?<!\d)(?:\+?886[-\s]?(?:2|[3-8]\d?)|0(?:2|[3-8]\d?))[-\s]?\d{6,8}(?!\d)"),
+        "[PHONE]",
+    ),
     ("taiwan_id", re.compile(r"(?<![A-Z0-9])[A-Z][12]\d{8}(?![A-Z0-9])", re.I), "[ID]"),
+    ("url", re.compile(r"(?i)(?:https?://|www\.)[^\s<>'\"]+"), "[URL]"),
+    # Exact dates identify people (birth dates, precise employment periods);
+    # a redacted resume keeps only coarse durations such as bare years.
+    (
+        "exact_date",
+        re.compile(
+            r"(?<!\d)(?:(?:19|20)\d{2}|1\d{2})[./-](?:0?[1-9]|1[0-2])"
+            r"(?:[./-](?:0?[1-9]|[12]\d|3[01]))?(?!\d)"
+        ),
+        "[DATE]",
+    ),
 )
 
 
@@ -101,6 +121,11 @@ def anonymize(text: str) -> tuple[str, Summary]:
         r"(?im)^(\s*(?:地址|住址|居住地區|所在地|location|address)\s*(?:[:：]|\s+)\s*)[^\r\n]+"
     )
     result, counts["address_label"] = address_label.subn(r"\1[ADDRESS]", result)
+    birth_label = re.compile(
+        r"(?im)^(\s*(?:出生年月日|出生日期|出生|生日|birth(?:day|date)?|date of birth|dob)"
+        r"\s*(?:[:：]|\s+)\s*)[^\r\n]+"
+    )
+    result, counts["birth_label"] = birth_label.subn(r"\1[DATE]", result)
     # Common Taiwan address forms when no label is present.
     address = re.compile(
         r"(?<![\w\u4e00-\u9fff])(?:臺|台)[北中南東西]市[^\r\n,，]{2,40}(?:區|鄉|鎮|市)[^\r\n,，]{0,40}"
@@ -420,6 +445,34 @@ def main() -> int:
     return 0
 
 
+def _parse_multipart(raw: bytes, content_type: str) -> tuple[dict[str, str], dict[str, tuple[str, bytes]]]:
+    """Parse a multipart/form-data body into text fields and file uploads.
+
+    Replaces ``cgi.FieldStorage``: the ``cgi`` module is removed in Python 3.13,
+    and this tool must keep running on a plain system Python.
+    """
+    message = BytesParser(policy=policy.HTTP).parsebytes(
+        b"Content-Type: " + content_type.encode("latin-1", "replace") + b"\r\n"
+        b"MIME-Version: 1.0\r\n\r\n" + raw
+    )
+    fields: dict[str, str] = {}
+    files: dict[str, tuple[str, bytes]] = {}
+    if not message.is_multipart():
+        return fields, files
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not isinstance(name, str) or not name:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename:
+            if name not in files:
+                files[name] = (filename, payload)
+        elif name not in fields:
+            fields[name] = payload.decode("utf-8", errors="replace")
+    return fields, files
+
+
 class WebHandler(BaseHTTPRequestHandler):
     _results: dict[str, tuple[str, bytes]] = {}
     _ocr_sources: dict[str, tuple[str, bytes]] = {}
@@ -604,15 +657,14 @@ class WebHandler(BaseHTTPRequestHandler):
             original_name = ""
             original_suffix = ".txt"
             if content_type.startswith("multipart/form-data"):
-                form = cgi.FieldStorage(fp=io.BytesIO(raw), headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type})
-                source = form.getfirst("text", "")
-                upload = form["file"] if "file" in form else (form["pdf"] if "pdf" in form else None)
-                if upload is not None and getattr(upload, "filename", "") and getattr(upload, "file", None):
-                    original_name = upload.filename
+                fields, files = _parse_multipart(raw, content_type)
+                source = fields.get("text", "")
+                upload = files.get("file") or files.get("pdf")
+                if upload is not None and upload[0]:
+                    original_name, upload_data = upload
                     original_suffix = Path(original_name).suffix.casefold()
-                    upload_data = upload.file.read()
                     try:
-                        source = _extract_uploaded(upload.filename, upload_data)
+                        source = _extract_uploaded(original_name, upload_data)
                     except ScannedPDFError as exc:
                         ocr_token = secrets.token_urlsafe(18)
                         self._store_ocr_source(ocr_token, original_name, upload_data)
