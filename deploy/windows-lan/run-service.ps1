@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("backend", "hr", "career")]
+    [ValidateSet("backend", "hr", "career", "clamav")]
     [string]$Service
 )
 
@@ -20,15 +20,42 @@ $exitCode = 1
 # actually depend on, and it stays true whether the frontend is being served by the dev
 # server or by a `vite preview` of the build. The backend also has its body checked, so
 # an unrelated listener that grabbed 8010 cannot pass as TalentHub.
+# The ClamAV daemon lives outside the repo like the OCR tools do; override the
+# location with CLAMAV_HOME when it is somewhere else.
+$clamavHome = if ($env:CLAMAV_HOME) { $env:CLAMAV_HOME } else { "C:\Users\Administrator\clamav" }
+
 $healthProbes = @{
     backend = @{ Url = "http://127.0.0.1:8010/api/v1/health"; Expect = "talenthub-api" }
     hr      = @{ Url = "http://127.0.0.1:5173/"; Expect = "" }
     career  = @{ Url = "http://127.0.0.1:5174/"; Expect = "" }
+    # clamd speaks its own protocol, not HTTP: a PING on the TCP socket must
+    # come back PONG. The backend rejects uploads fail-closed while this is
+    # down, so the watchdog matters as much here as for the HTTP services.
+    clamav  = @{ TcpPing = 3310 }
 }
 
 function Test-ServiceHealthy {
     param([Parameter(Mandatory = $true)][hashtable]$Probe)
 
+    if ($Probe.TcpPing) {
+        $client = New-Object Net.Sockets.TcpClient
+        try {
+            $client.Connect("127.0.0.1", $Probe.TcpPing)
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 5000
+            $ping = [Text.Encoding]::ASCII.GetBytes("PING`n")
+            $stream.Write($ping, 0, $ping.Length)
+            $buffer = New-Object byte[] 16
+            $read = $stream.Read($buffer, 0, $buffer.Length)
+            return ([Text.Encoding]::ASCII.GetString($buffer, 0, $read).Trim() -eq "PONG")
+        }
+        catch {
+            return $false
+        }
+        finally {
+            $client.Close()
+        }
+    }
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri $Probe.Url -TimeoutSec 5
     }
@@ -118,6 +145,20 @@ try {
                 throw "Career frontend build failed with exit code $LASTEXITCODE."
             }
             & $npm exec -- vite preview --configLoader native --host 0.0.0.0 --port 5174 --strictPort
+            $exitCode = $LASTEXITCODE
+        }
+        "clamav" {
+            if (-not (Test-Path (Join-Path $clamavHome "clamd.exe"))) {
+                throw "clamd.exe not found under $clamavHome (set CLAMAV_HOME if it lives elsewhere)."
+            }
+            # Refresh definitions before (re)starting, best-effort: clamd can
+            # serve with the existing database when the mirror is unreachable,
+            # and a refresh failure must not keep resume uploads fail-closed.
+            & (Join-Path $clamavHome "freshclam.exe") --config-file=(Join-Path $clamavHome "freshclam.conf")
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "freshclam exited with $LASTEXITCODE; starting clamd with the existing database."
+            }
+            & (Join-Path $clamavHome "clamd.exe") --config-file=(Join-Path $clamavHome "clamd.conf")
             $exitCode = $LASTEXITCODE
         }
     }

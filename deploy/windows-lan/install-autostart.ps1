@@ -44,6 +44,9 @@ $settings = New-ScheduledTaskSettingsSet `
     -DontStopIfGoingOnBatteries
 
 $tasks = @(
+    # First on purpose: the backend rejects resume uploads fail-closed while the
+    # scanner is unreachable, so the daemon should be answering before the API.
+    @{ Name = "TalentHub-LAN-ClamAV"; Service = "clamav" },
     @{ Name = "TalentHub-LAN-Backend"; Service = "backend" },
     @{ Name = "TalentHub-LAN-HR"; Service = "hr" },
     @{ Name = "TalentHub-LAN-Career"; Service = "career" }
