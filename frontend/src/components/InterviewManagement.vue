@@ -108,7 +108,6 @@ const recordFormBaseline = ref('')
 // too, but only once both stages are submitted, and it is worth seeing before
 // that. Keyed by requisition because that is what the matching API returns.
 const matchScoreByApplication = ref<Record<number, number | null>>({})
-const matchScoreLoading = ref(false)
 const recordForm = reactive<InterviewRecordWrite>({
   stage: 'hr',
   question_plan_id: null,
@@ -523,8 +522,12 @@ function questionRegenerationKey(applicationId: number, stage: InterviewStage, q
 }
 
 function sortInterviewRecords(records: InterviewRecordDto[]) {
+  // Same order as the backend's application_interview_records: newest first,
+  // id as the tiebreak, so "latest record per stage" picks the same record on
+  // both sides.
   return [...records].sort((left, right) => (
     parseApiDateTime(right.interviewed_at).getTime() - parseApiDateTime(left.interviewed_at).getTime()
+    || right.id - left.id
   ))
 }
 
@@ -897,19 +900,25 @@ function structuredRecordSummaryForStage(applicationId: number, stage: Interview
   return record ? structuredRecordSummary(record) : ''
 }
 
+// Every scoring surface from here down follows the backend's authority rule:
+// the newest record per stage counts, whatever question-plan version it was
+// written against (services/interview_scoring.latest_records_by_stage). Only
+// the editor is plan-aware. Keying these off the current plan instead would
+// let a question regeneration flip the panel back to「等待雙方提交」while ⑥
+// still shows the composite computed from those very submissions.
 function peerEvaluationsReleased(applicationId: number) {
-  const hrRecord = currentPlanRecord(applicationId, 'hr')
-  const managerRecord = currentPlanRecord(applicationId, 'manager')
+  const hrRecord = latestStageRecord(applicationId, 'hr')
+  const managerRecord = latestStageRecord(applicationId, 'manager')
   return hrRecord?.status === 'completed' && managerRecord?.status === 'completed'
 }
 
 function stageQuestionScore(applicationId: number, stage: InterviewStage): number | null {
-  const record = currentPlanRecord(applicationId, stage)
+  const record = latestStageRecord(applicationId, stage)
   return record ? questionScore(record.questions) : null
 }
 
 function stageRatedCount(applicationId: number, stage: InterviewStage) {
-  return ratedQuestionCount(currentPlanRecord(applicationId, stage)?.questions || [])
+  return ratedQuestionCount(latestStageRecord(applicationId, stage)?.questions || [])
 }
 
 // Two interviewers scoring 95 and 60 average to the same 77.5 as two scoring 78
@@ -924,8 +933,8 @@ type InterviewConsensus = {
 }
 
 function interviewConsensus(applicationId: number): InterviewConsensus {
-  const hrRecord = currentPlanRecord(applicationId, 'hr')
-  const managerRecord = currentPlanRecord(applicationId, 'manager')
+  const hrRecord = latestStageRecord(applicationId, 'hr')
+  const managerRecord = latestStageRecord(applicationId, 'manager')
   const hrDone = hrRecord?.status === 'completed'
   const managerDone = managerRecord?.status === 'completed'
   if (!hrDone || !managerDone) {
@@ -968,7 +977,7 @@ const compositeExclusionLabels: Record<string, string> = {
 // Why a stage has no score, stated rather than left blank: not started, still
 // being filled in, or withheld until both sides submit.
 function stageScoreReason(applicationId: number, stage: InterviewStage) {
-  const record = currentPlanRecord(applicationId, stage)
+  const record = latestStageRecord(applicationId, stage)
   if (!record) return '尚未開始評分'
   if (record.evaluation_revealed === false) return '評分保護中 · 雙方提交後公開'
   if (record.status !== 'completed') return '評分填寫中，尚未提交'
@@ -1248,19 +1257,27 @@ function recordHistoryActionLabel(record: InterviewRecordDto) {
   return '唯讀'
 }
 
+let recordsRequestSequence = 0
+
 async function loadInterviewRecords(applicationId: number) {
+  const requestId = ++recordsRequestSequence
   recordsLoading.value = true
   workspaceError.value = ''
   try {
-    interviewRecords.value = sortInterviewRecords((await hrApi.interviewRecords(applicationId)).data)
+    const records = sortInterviewRecords((await hrApi.interviewRecords(applicationId)).data)
     recordsByApplication.value = {
       ...recordsByApplication.value,
-      [applicationId]: interviewRecords.value,
+      [applicationId]: records,
     }
+    // interviewRecords is the expanded card's history; a response that comes back
+    // after the recruiter switched cards must not fill it with the old candidate.
+    if (expandedApplicationId.value === applicationId) interviewRecords.value = records
   } catch (cause) {
-    workspaceError.value = cause instanceof Error ? cause.message : '無法載入面試過程紀錄'
+    if (expandedApplicationId.value === applicationId) {
+      workspaceError.value = cause instanceof Error ? cause.message : '無法載入面試過程紀錄'
+    }
   } finally {
-    recordsLoading.value = false
+    if (requestId === recordsRequestSequence) recordsLoading.value = false
   }
 }
 
@@ -1281,14 +1298,24 @@ function resetRecordEditor() {
 
 // Expanding a card is itself the "start scoring" action: the editor is prepared
 // locally and nothing is written until 儲存草稿 / 提交評分 is pressed.
+//
+// Each open (or collapse) starts a new epoch. The chain below awaits three
+// requests, and a chain that awoke in an older epoch must stop: on a slow
+// backend, candidate A's late responses would otherwise fill the record history
+// and editor of the card the recruiter has since opened for candidate B.
+let openCardEpoch = 0
+
 async function openApplicationCard(application: ApplicationDto) {
   pendingDiscard.value = null
+  const epoch = ++openCardEpoch
   expandedApplicationId.value = application.id
   resetRecordEditor()
   interviewRecords.value = []
   void loadMatchScore(application)
   await loadCardInterviewData([application])
+  if (epoch !== openCardEpoch) return
   await loadInterviewRecords(application.id)
+  if (epoch !== openCardEpoch) return
   await bindStageEditor(application, inlineStage(application.id))
 }
 
@@ -1297,7 +1324,6 @@ async function openApplicationCard(application: ApplicationDto) {
 // by hand never went through matching) and is labelled as such.
 async function loadMatchScore(application: ApplicationDto) {
   if (application.id in matchScoreByApplication.value) return
-  matchScoreLoading.value = true
   try {
     const match = await matchingReportsApi.candidateMatch(
       application.requisition_id,
@@ -1309,13 +1335,12 @@ async function loadMatchScore(application: ApplicationDto) {
     }
   } catch {
     matchScoreByApplication.value = { ...matchScoreByApplication.value, [application.id]: null }
-  } finally {
-    matchScoreLoading.value = false
   }
 }
 
 function collapseApplicationCard() {
   if (recordSaving.value || recordReopening.value) return
+  openCardEpoch += 1
   const applicationId = expandedApplicationId.value
   pendingDiscard.value = null
   expandedApplicationId.value = null
@@ -1348,10 +1373,14 @@ async function bindStageEditor(application: ApplicationDto, stage: InterviewStag
     if (canEditStage(stage) && record.status !== 'completed' && recordForm.questions.length < 5) {
       try {
         await ensureQuestionPlan(application, stage)
+        // The card or stage may have changed while the plan loaded; the editor
+        // now belongs to that newer context and must not be overwritten here.
+        if (expandedApplicationId.value !== application.id || inlineStage(application.id) !== stage) return
         recordForm.questions = mergeQuestionsToFive(recordForm.questions, planQuestions(application.id, stage))
         recordFormBaseline.value = recordFormSnapshot()
         recordNotice.value = '已補上系統建議題；儲存後才會寫入這筆紀錄'
       } catch (cause) {
+        if (expandedApplicationId.value !== application.id || inlineStage(application.id) !== stage) return
         workspaceError.value = cause instanceof Error ? cause.message : '無法載入系統面試題'
       }
     }
@@ -1420,8 +1449,9 @@ async function realignEditorWithPlan(application: ApplicationDto, stage: Intervi
 }
 
 async function newRecord(stage: InterviewStage = defaultRecordStage()) {
-  if (!workspaceApplication.value) return
-  const scheduledAt = stageData(workspaceApplication.value, stage).interview_at
+  const application = workspaceApplication.value
+  if (!application) return
+  const scheduledAt = stageData(application, stage).interview_at
   editingRecord.value = null
   recordEditorOpen.value = true
   reopenPromptOpen.value = false
@@ -1445,13 +1475,17 @@ async function newRecord(stage: InterviewStage = defaultRecordStage()) {
   workspaceError.value = ''
   recordFormBaseline.value = recordFormSnapshot()
   try {
-    const plan = await ensureQuestionPlan(workspaceApplication.value, stage)
+    const plan = await ensureQuestionPlan(application, stage)
+    // Guarding on the card as well as the stage: a late plan response must not
+    // stamp its plan id into a blank form the recruiter opened for another card.
+    if (workspaceApplication.value?.id !== application.id) return
     if (!editingRecord.value && recordForm.stage === stage) {
       recordForm.question_plan_id = plan.id ?? null
-      recordForm.questions = planQuestions(workspaceApplication.value.id, stage)
+      recordForm.questions = planQuestions(application.id, stage)
       recordFormBaseline.value = recordFormSnapshot()
     }
   } catch (cause) {
+    if (workspaceApplication.value?.id !== application.id || recordForm.stage !== stage) return
     workspaceError.value = cause instanceof Error ? cause.message : '無法載入系統面試題'
   }
 }
@@ -1492,6 +1526,15 @@ function removeRecordQuestion(index: number) {
   workspaceError.value = ''
   clearRecordValidation()
   recordForm.questions.splice(index, 1)
+  // questionTextEditing is keyed by row index; shift the entries behind the
+  // removed row so "editing this question's text" stays on the same question.
+  const shifted: Record<number, boolean> = {}
+  for (const [key, editing] of Object.entries(questionTextEditing.value)) {
+    const i = Number(key)
+    if (i === index) continue
+    shifted[i > index ? i - 1 : i] = editing
+  }
+  questionTextEditing.value = shifted
 }
 
 async function addSuggestedQuestion(question: InterviewQuestion, trait: string) {
@@ -1621,8 +1664,13 @@ async function saveRecord(intent: 'draft' | 'submit') {
     workspaceError.value = '請填寫正確的面試日期與時間'
     return
   }
-  if (recordForm.duration_minutes !== null && recordForm.duration_minutes !== undefined
-      && (recordForm.duration_minutes < 1 || recordForm.duration_minutes > 1440)) {
+  // v-model.number leaves '' when the field is emptied, and '' < 1 is true —
+  // an emptied optional field must read as "not provided", not as an error.
+  const durationMinutes = typeof recordForm.duration_minutes === 'number'
+    && !Number.isNaN(recordForm.duration_minutes)
+    ? recordForm.duration_minutes
+    : null
+  if (durationMinutes !== null && (durationMinutes < 1 || durationMinutes > 1440)) {
     workspaceError.value = '面試時長必須介於 1 到 1440 分鐘'
     return
   }
@@ -1636,6 +1684,22 @@ async function saveRecord(intent: 'draft' | 'submit') {
     return
   }
   if (intent === 'draft') clearRecordValidation()
+  // Rows without question text are dropped from the payload below, so a row the
+  // interviewer already answered or rated must not slip through that filter and
+  // silently lose its content on save.
+  const blankWithContent = recordForm.questions.findIndex(item => (
+    !item.question.trim()
+    && Boolean(
+      optionalText(item.response)
+      || optionalText(item.notes)
+      || optionalText(item.not_asked_reason)
+      || validRating(item.rating),
+    )
+  ))
+  if (blankWithContent >= 0) {
+    workspaceError.value = `第 ${blankWithContent + 1} 題已有作答或評分，但題目文字仍是空的；請補上題目文字，或先清除該題內容`
+    return
+  }
   const questions = recordForm.questions
     .filter(item => item.question.trim())
     .map(item => {
@@ -1663,7 +1727,7 @@ async function saveRecord(intent: 'draft' | 'submit') {
       stage: recordForm.stage,
       question_plan_id: recordForm.question_plan_id ?? null,
       interviewed_at: interviewedAt.toISOString(),
-      duration_minutes: recordForm.duration_minutes ? Number(recordForm.duration_minutes) : null,
+      duration_minutes: durationMinutes,
       mode: recordForm.mode,
       status: targetStatus,
       questions,
@@ -1866,7 +1930,7 @@ onMounted(load)
             <div class="interview-row-progress">
               <span class="application-status" :data-status="application.status">{{ applicationStatusLabels[application.status] || application.status }}</span>
               <strong>HR：{{ resultLabels[application.hr_interview.interview_result || 'pending'] }} · 主管：{{ resultLabels[application.manager_interview.interview_result || 'pending'] }}</strong>
-              <small>最近面試：{{ formatDate(nearestInterviewAt(application)) }} · {{ inlineStage(application.id) === 'hr' ? 'HR' : '主管' }}題目 {{ stageAnsweredCount(application.id, inlineStage(application.id)) }}/5</small>
+              <small>最近面試：{{ formatDate(nearestInterviewAt(application)) }} · {{ inlineStage(application.id) === 'hr' ? 'HR' : '主管' }}題目 {{ cardDataLoaded[application.id] ? `${stageAnsweredCount(application.id, inlineStage(application.id))}/5` : '—' }}</small>
             </div>
             <span class="row-chevron" aria-hidden="true">{{ expandedApplicationId === application.id ? '−' : '＋' }}</span>
           </button>
