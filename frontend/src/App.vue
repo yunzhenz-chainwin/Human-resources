@@ -200,19 +200,29 @@ const defaultCompositeWeights: Record<CompositeScoreComponent, number> = {
   resume: 20, hr_questions: 15, hr_overall: 25, manager_questions: 15, manager_overall: 25,
 }
 const compositeWeightForm = reactive<Record<CompositeScoreComponent, number>>({ ...defaultCompositeWeights })
+// What the form was seeded with, so saveJob can tell "HR changed the split" from "the form
+// merely round-tripped". The seeded values are whole percents rounded from the resolved
+// weights, so for a split that is not whole percents, re-sending them would NOT restate the
+// stored configuration — the server would read the rounding drift as a real change, overwrite
+// the configured weights and recompute every composite on the requisition.
+const compositeWeightBaseline: Record<CompositeScoreComponent, number> = { ...defaultCompositeWeights }
 // Same shape as blind review above: HR-only on the server, and RequisitionCreate carries no
 // weights, so a new requisition starts on the built-in split and only a later edit can change it.
 const compositeWeightsEditable = computed(() => !!editingJob.value && authState.user?.role === 'hr')
 const compositeWeightTotal = computed(() =>
   compositeWeightKeys.reduce((total, key) => total + (Number(compositeWeightForm[key]) || 0), 0))
 const compositeWeightInvalid = computed(() => compositeWeightTotal.value <= 0)
+const compositeWeightsTouched = computed(() =>
+  compositeWeightKeys.some(key => Number(compositeWeightForm[key]) !== compositeWeightBaseline[key]))
 
 // Reads the resolved weights (already rescaled to sum 1 by the server) back into whole
 // percentage points, so the form shows the same split the interview card prints.
 function setCompositeWeightForm(resolved?: Required<CompositeScoreWeights> | null) {
   for (const key of compositeWeightKeys) {
     const value = resolved?.[key]
-    compositeWeightForm[key] = typeof value === 'number' ? Math.round(value * 100) : defaultCompositeWeights[key]
+    const seeded = typeof value === 'number' ? Math.round(value * 100) : defaultCompositeWeights[key]
+    compositeWeightForm[key] = seeded
+    compositeWeightBaseline[key] = seeded
   }
 }
 
@@ -1250,10 +1260,14 @@ async function saveJob() {
     // Sent only when the control was actually editable, so a manager's routine edit can never
     // trip the HR-only 403 on a stale copy. A 409 (locked meanwhile) surfaces via showError below.
     if (blindReviewEditable.value) payload.blind_review_enabled = jobForm.blind_review_enabled
-    // Same guard as blind review: sent only when the control was editable, so a manager's
-    // routine edit never trips the HR-only 403. Restating the current split decides nothing
-    // server-side, so re-saving an untouched form is a no-op rather than a needless recompute.
-    if (compositeWeightsEditable.value) payload.composite_score_weights = { ...compositeWeightForm }
+    // Same guard as blind review, plus untouched-form protection: the form holds whole
+    // percents rounded from the resolved weights, which for a non-whole-percent split does
+    // not restate the stored configuration — the server would treat the rounding drift as a
+    // real change and rewrite the weights on an edit that never touched them. Only an actual
+    // edit of the split is a decision worth sending.
+    if (compositeWeightsEditable.value && compositeWeightsTouched.value) {
+      payload.composite_score_weights = { ...compositeWeightForm }
+    }
     await hrApi.saveRequisition(payload, editingJob.value?.id)
     jobs.value = (await hrApi.requisitions()).data
     dialog.value = null
