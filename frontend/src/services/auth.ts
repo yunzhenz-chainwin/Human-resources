@@ -31,12 +31,31 @@ const state = reactive({
 let refreshPromise: Promise<string> | null = null
 let logoutPromise: Promise<void> | null = null
 
+class ApiConnectionError extends Error {}
+
+class ApiRequestError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
+// A failure that says nothing about whether the session is still valid: the
+// backend was unreachable or answered 5xx. Only a definitive 4xx verdict from
+// the server may invalidate stored tokens.
+function isTransientApiError(error: unknown): boolean {
+  return error instanceof ApiConnectionError
+    || (error instanceof ApiRequestError && error.status >= 500)
+}
+
 async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response
   try {
     response = await fetch(`${API_BASE}${path}`, init)
   } catch {
-    throw new Error('無法連線至後端 API')
+    throw new ApiConnectionError('無法連線至後端 API')
   }
   if (!response.ok) {
     let detail = response.statusText || '請求失敗'
@@ -44,7 +63,7 @@ async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
       const body = await response.json() as { detail?: string }
       if (body.detail) detail = body.detail
     } catch { /* non-JSON error */ }
-    throw new Error(`${response.status}：${detail}`)
+    throw new ApiRequestError(`${response.status}：${detail}`, response.status)
   }
   return await response.json() as T
 }
@@ -92,7 +111,9 @@ async function refreshAccess(failedAccessToken?: string | null): Promise<string>
       storeTokens(tokens)
       return tokens.access_token
     } catch (error) {
-      clear()
+      // A wifi blip or backend restart during refresh must not force a
+      // re-login while the refresh token is still perfectly valid.
+      if (!isTransientApiError(error)) clear()
       throw error
     } finally {
       refreshPromise = null
@@ -115,8 +136,10 @@ async function initialize() {
       await refreshAccess()
       await loadCurrentUser()
     }
-  } catch {
-    clear()
+  } catch (error) {
+    // Same rule as refreshAccess: keep the stored session across a transient
+    // outage at page load; the next reload picks it up again.
+    if (!isTransientApiError(error)) clear()
   } finally {
     state.initialized = true
   }
