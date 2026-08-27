@@ -16,6 +16,9 @@ dependencies = [
   "clamd>=1.0.2,<2",
   "fastapi>=0.115,<1",
   "fpdf2>=2.8,<3",
+  # Runtime, not just tests: app.services.interview_questions imports it at module
+  # level for Gemini calls, and that module loads with the API router at startup.
+  "httpx>=0.28,<1",
   "Pillow>=10,<12",
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.7,<3",
@@ -29,7 +32,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.28,<1",
   "pytest>=8.3,<9",
   "ruff>=0.9,<1",
 ]
