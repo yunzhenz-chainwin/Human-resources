@@ -12,6 +12,30 @@ const departmentJobNameFor = (retry: number) => `E2E 部門雲端工程師 R${re
 // synthetic document for review; submitted form fields remain the source of truth.
 const minimalPdf = Buffer.from('%PDF-1.4\n% synthetic E2E resume - no personal data\n%%EOF\n')
 
+// A structurally valid one-page PDF (catalog, page tree, xref) with no text.
+// The de-identification validator opens the uploaded file with pypdf and counts
+// an unreadable file as an approval blocker, so minimalPdf is not enough there.
+// The marker keeps each generated document's bytes unique: ingestion and
+// validation both hash file content, and identical bytes would dedupe.
+function buildTinyPdf(marker: string): Buffer {
+  const objects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    `3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n% ${marker}\n`,
+  ]
+  let body = '%PDF-1.4\n'
+  const offsets: number[] = []
+  for (const object of objects) {
+    offsets.push(Buffer.byteLength(body))
+    body += object
+  }
+  const xrefOffset = Buffer.byteLength(body)
+  const pad = (value: number) => String(value).padStart(10, '0')
+  body += `xref\n0 4\n0000000000 65535 f \n${offsets.map(offset => `${pad(offset)} 00000 n \n`).join('')}`
+  body += `trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`
+  return Buffer.from(body)
+}
+
 async function openUnifiedInterviews(page: Page) {
   await page.getByTestId('nav-matching').click()
   const workspace = page.getByTestId('unified-talent-workspace')
@@ -142,12 +166,14 @@ test.describe.serial('public submission to HR review', () => {
     await jobDialog.getByRole('button', { name: '儲存至資料庫' }).click()
     expect((await jobCreated).status()).toBe(201)
     await expect(page.getByText('職缺已建立')).toBeVisible()
-    const createdJobCard = page.locator('.job-card').filter({ hasText: 'E2E 去識別化分析職缺' })
+    // The admin job view is a compact list (.job-list-row) whose approve button
+    // is labelled 核准 since the job-list redesign; .job-card no longer exists.
+    const createdJobRow = page.locator('.job-list-row').filter({ hasText: 'E2E 去識別化分析職缺' })
     const jobApproved = page.waitForResponse(response => (
       /\/api\/v1\/requisitions\/\d+\/approve$/.test(response.url())
       && response.request().method() === 'POST'
     ))
-    await createdJobCard.getByRole('button', { name: '核准職缺' }).click()
+    await createdJobRow.getByRole('button', { name: '核准' }).click()
     expect((await jobApproved).status()).toBe(200)
     await expect(page.getByText('職缺已核准並可供前台讀取')).toBeVisible()
 
@@ -169,15 +195,40 @@ test.describe.serial('public submission to HR review', () => {
     await expect(page.getByTestId('resume-upload-filename-0')).toHaveText('removable-e2e.pdf')
     await page.getByTestId('resume-upload-remove-0').click()
     await expect(page.getByTestId('resume-upload-progress')).toHaveCount(0)
-    await page.getByRole('button', { name: new RegExp(resumeName) }).click()
-    await expect(page.getByLabel('姓名 *')).toHaveValue(candidateName)
-    // A synthetic PDF has no verifiable platform signature, so HR must explicitly
-    // confirm the detected source before the record can enter the talent pool.
+    // The public career-site submission is ingested automatically (candidate and
+    // resume land in the talent pool on submit), so the parse queue only holds
+    // HR-side uploads. Walk the manual proofread flow with an admin upload.
+    const reviewResumeName = `admin-review-e2e-r${testInfo.retry}.pdf`
+    const reviewCandidateName = `E2E 校對入庫人才 R${testInfo.retry}`
+    // Distinct bytes on purpose: ingestion dedupes by content hash, so reusing
+    // minimalPdf would collide with the public submission uploaded in the
+    // previous test and this file would never reach the queue.
+    const reviewPdf = Buffer.from(
+      `%PDF-1.4
+% synthetic E2E admin review resume r${testInfo.retry} - no personal data
+%%EOF
+`,
+    )
+    await resumeUploadInput.setInputFiles({
+      name: reviewResumeName,
+      mimeType: 'application/pdf',
+      buffer: reviewPdf,
+    })
+    await expect(page.getByTestId('resume-upload-filename-0')).toHaveText(reviewResumeName)
+    await page.getByTestId('resume-upload-start').click()
+    const reviewQueueRow = page
+      .locator('#resume-queue-list')
+      .getByRole('button', { name: new RegExp(reviewResumeName) })
+    await reviewQueueRow.click()
+    // A synthetic PDF parses to no fields and no verifiable platform signature:
+    // HR proofreads the name and must explicitly confirm the detected source
+    // before the record can enter the talent pool.
+    await page.getByLabel('姓名 *').fill(reviewCandidateName)
     await page.getByRole('button', { name: '一般／自製履歷', exact: true }).click()
     await page.getByRole('button', { name: '確認並寫入人才庫' }).click()
     await expect(page.getByText(/已建立人才|已更新人才/)).toBeVisible()
     await expect(page.getByTestId('resume-confirmed-summary')).toContainText('本次已入庫 1 份')
-    await expect(page.getByRole('button', { name: new RegExp(resumeName) })).toHaveCount(0)
+    await expect(reviewQueueRow).toHaveCount(0)
 
     await page.getByRole('button', { name: '人才庫' }).click()
     await expect(page.getByRole('button', { name: new RegExp(candidateName) })).toBeVisible()
@@ -209,7 +260,7 @@ test.describe.serial('public submission to HR review', () => {
     await (await deidentificationChooser).setFiles({
       name: 'deidentified-e2e.pdf',
       mimeType: 'application/pdf',
-      buffer: minimalPdf,
+      buffer: buildTinyPdf(`deidentified-e2e-r${testInfo.retry}`),
     })
     const deidentificationResponse = await deidentificationSaved
     expect(deidentificationResponse.status()).toBe(201)
@@ -512,7 +563,7 @@ test.describe.serial('public submission to HR review', () => {
     expect(managerActivitySaved.status()).toBe(201)
 
     await page.getByTestId('nav-resumes').click()
-    await expect(page.getByRole('heading', { name: '新增履歷並指派職缺' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '送交履歷並指派職缺' })).toBeVisible()
     await openUnifiedInterviews(page)
     const managerApplicationCard = await expandInterviewApplication(page, application.id)
     await expect(managerApplicationCard).toContainText(interviewCandidateName)
@@ -621,7 +672,8 @@ test.describe.serial('public submission to HR review', () => {
     await page.getByLabel('密碼').fill('E2E-Admin-Password-123!')
     await page.getByRole('button', { name: '登入工作台' }).click()
     await page.getByRole('button', { name: '職缺管理' }).click()
-    await expect(page.getByRole('heading', { name: departmentJobName })).toBeVisible()
+    // The global job view is a compact list; titles render as row text, not headings.
+    await expect(page.locator('.job-list-row').filter({ hasText: departmentJobName })).toBeVisible()
   })
 
   test('HR can blind-rate the isolated small-sample matching benchmark', async ({ page }) => {
