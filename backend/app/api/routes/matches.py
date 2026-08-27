@@ -40,7 +40,7 @@ from app.services.matching import (
     resolve_weights,
     score_candidate,
 )
-from app.services.security import write_audit
+from app.services.security import client_ip, write_audit
 
 router = APIRouter()
 
@@ -505,7 +505,7 @@ def update_matching_weights(
             "previous": previous,
             "weights": normalized.model_dump(),
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
@@ -683,7 +683,7 @@ def manual_override_match(
             "note": result.manual_override_note,
             "target_stage": payload.target_stage,
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()

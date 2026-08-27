@@ -43,7 +43,7 @@ from app.schemas.hr import (
 from app.services.applications import normalize_email, normalize_phone
 from app.services.candidate_privacy import candidate_read_for_user
 from app.services.matching import canonical_skill
-from app.services.security import write_audit
+from app.services.security import client_ip, write_audit
 from app.services.storage import StorageProvider, get_storage_provider
 from app.services.talent_retention import candidate_retention_until
 
@@ -528,7 +528,7 @@ def create_activity(
             "activity_type": payload.type,
             "candidate_status_changed": bool(payload.next_status),
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()

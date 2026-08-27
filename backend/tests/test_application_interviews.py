@@ -1047,6 +1047,38 @@ def test_interview_ready_upgrades_to_interview_once_stage_data_exists(
         assert application.status == "interview"
 
 
+def test_mark_interview_ready_also_guards_on_structured_interview_records(
+    application_client,
+) -> None:
+    """Structured records never touch the legacy per-stage columns, so a
+    legacy-only guard would let this endpoint pull an application that is
+    already being interviewed back to "ready"."""
+
+    client, testing_session, ids = application_client
+    application_id = ids["design_application"]
+    hr_headers = _headers(client, "hr")
+
+    created = client.post(
+        f"/api/v1/applications/{application_id}/interview-records",
+        headers=hr_headers,
+        json={
+            "stage": "hr",
+            "interviewed_at": "2030-08-20T09:30:00+08:00",
+            "mode": "video",
+            "status": "in_progress",
+            "questions": [],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    conflict = client.post(
+        f"/api/v1/applications/{application_id}/mark-interview-ready",
+        headers=hr_headers,
+    )
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["detail"] == "Application already holds interview data"
+
+
 def test_mark_interview_ready_rejects_applications_past_the_pre_interview_stage(
     application_client,
 ) -> None:

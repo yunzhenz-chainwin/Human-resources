@@ -24,7 +24,7 @@ from app.schemas.hr import (
     RequisitionRead,
 )
 from app.services.candidate_privacy import candidate_read_for_user
-from app.services.security import write_audit
+from app.services.security import client_ip, write_audit
 
 router = APIRouter(prefix="/department")
 
@@ -96,7 +96,7 @@ def create_department_requisition(
             requisition.id,
             department.id,
             details={"req_no": req_no, "title": requisition.title},
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         db.commit()
@@ -135,7 +135,7 @@ def update_department_requisition(
             "title": requisition.title,
             "fields": sorted(data),
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
@@ -189,7 +189,7 @@ def delete_department_requisition(
             resource_id,
             department_id,
             details=audit_details,
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         db.commit()

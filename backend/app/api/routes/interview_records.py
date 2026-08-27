@@ -55,7 +55,7 @@ from app.services.interview_scoring import (
     both_stages_submitted,
     recompute_application_composite_score,
 )
-from app.services.security import write_audit
+from app.services.security import client_ip, write_audit
 
 router = APIRouter(prefix="/applications")
 
@@ -816,7 +816,7 @@ def create_interview_record(
             "status": record.status,
             **_evaluation_audit_details(record),
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
@@ -914,7 +914,7 @@ def update_interview_record(
             "status": {"from": previous_status, "to": record.status},
             **_evaluation_audit_details(record),
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
@@ -969,7 +969,7 @@ def reopen_interview_record(
             "reopen_reason": payload.reason[:500],
             **_evaluation_audit_details(record),
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()

@@ -11,7 +11,15 @@ from app.dependencies.auth import (
     require_recruiting_manager,
     require_recruiting_user,
 )
-from app.models import Candidate, Department, JobApplication, JobRequisition, ResumeFile, User
+from app.models import (
+    Candidate,
+    Department,
+    InterviewRecord,
+    JobApplication,
+    JobRequisition,
+    ResumeFile,
+    User,
+)
 from app.schemas.hr import (
     ApplicationAssignmentUpdate,
     ApplicationCreate,
@@ -22,7 +30,7 @@ from app.schemas.hr import (
     RequisitionRead,
 )
 from app.services.candidate_privacy import candidate_read_for_user
-from app.services.security import write_audit
+from app.services.security import client_ip, write_audit
 
 router = APIRouter(prefix="/applications")
 
@@ -337,7 +345,7 @@ def create_application(
                 "requisition_id": requisition.id,
                 "source": application.source,
             },
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         db.commit()
@@ -422,7 +430,7 @@ def update_application_assignment(
                 "resume_id": linked_resume.id if linked_resume is not None else None,
                 "resume_ids": reassigned_resume_ids,
             },
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         db.commit()
@@ -452,7 +460,20 @@ def mark_application_interview_ready(
     application, candidate, requisition = _application_row(db, application_id)
     if application.status == INTERVIEW_READY_STATUS:
         return _application_read(application, candidate, requisition, user)
-    if _stage_has_data(application, "hr") or _stage_has_data(application, "manager"):
+    # Structured interview records never touch the legacy per-stage columns, so
+    # the legacy check alone would let this endpoint move an application that is
+    # already being interviewed back to "ready" — the exact regression its own
+    # 409 exists to prevent.
+    structured_record_exists = db.scalar(
+        select(InterviewRecord.id)
+        .where(InterviewRecord.application_id == application.id)
+        .limit(1)
+    ) is not None
+    if (
+        structured_record_exists
+        or _stage_has_data(application, "hr")
+        or _stage_has_data(application, "manager")
+    ):
         raise HTTPException(
             status_code=409,
             detail="Application already holds interview data",
@@ -477,7 +498,7 @@ def mark_application_interview_ready(
             "requisition_id": application.requisition_id,
             "status": {"from": previous_status, "to": application.status},
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
@@ -537,7 +558,7 @@ def _update_interview_stage(
             },
             "notes_changed": "interview_notes" in updates,
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()

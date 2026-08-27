@@ -497,7 +497,10 @@ def score_requisition(
             hit_ratio = len(required_hits) / len(role.required_skills)
             if required_misses and hit_ratio < role.required_skill_ratio:
                 gate_passed = False
-    if role.require_years and role.min_years is not None:
+    # min_years <= 0 means "no requirement" — the score component above already
+    # reads it that way ("職缺未設定最低年資限制"), so the gate must not treat the
+    # same value as a hard bar an unknown-tenure profile then fails.
+    if role.require_years and role.min_years is not None and role.min_years > 0:
         if candidate.total_years is None or candidate.total_years < role.min_years:
             gate_passed = False
 

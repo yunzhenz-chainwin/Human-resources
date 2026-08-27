@@ -29,7 +29,7 @@ from app.services.interview_scoring import (
     resolve_composite_weights,
 )
 from app.services.jd_compliance import JD_COMPLIANCE_RULES_VERSION, lint_job_text
-from app.services.security import write_audit
+from app.services.security import client_ip, write_audit
 
 router = APIRouter(prefix="/requisitions")
 
@@ -162,7 +162,7 @@ def create_requisition(
                     },
                     "on_create": True,
                 },
-                ip_address=request.client.host if request.client else None,
+                ip_address=client_ip(request),
                 user_agent=request.headers.get("user-agent"),
             )
         db.commit()
@@ -294,7 +294,7 @@ def update_requisition(
                     "to": requisition.blind_review_enabled,
                 },
             },
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
     if composite_weights_change:
@@ -328,7 +328,7 @@ def update_requisition(
                 },
                 "recomputed_applications": recomputed_applications,
             },
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
     db.commit()

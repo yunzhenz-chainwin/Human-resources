@@ -47,7 +47,7 @@ from app.schemas.hr import (
 )
 from app.services.applications import normalize_email, normalize_phone
 from app.services.resume_parser import PARSER_VERSION, parse_resume
-from app.services.security import write_audit
+from app.services.security import client_ip, write_audit
 from app.services.storage import (
     PreparedResumeUpload,
     get_storage_provider,
@@ -412,7 +412,7 @@ def download_resume_file(
             "candidate_id": resume.candidate_id,
             "target_requisition_id": resume.target_requisition_id,
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
@@ -459,7 +459,7 @@ def preview_resume_file(
             "target_requisition_id": resume.target_requisition_id,
             "format": "pdf",
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
