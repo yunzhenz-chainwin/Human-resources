@@ -16,15 +16,6 @@ services:
     mem_limit: 512m
     cpus: "1.0"
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    mem_limit: 256m
-    cpus: "0.5"
-
   backend:
     build: ../backend
     restart: unless-stopped
@@ -39,8 +30,6 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_started
     volumes:
       - resume_data:/app/storage/resumes
       # Keep profile photos outside the container writable layer.  This is a
@@ -84,6 +73,5 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
   resume_data:
   candidate_photo_data:
