@@ -218,12 +218,15 @@ def _question(
     follow_up: str,
     source: str,
 ) -> InterviewQuestionPlanItem:
+    # Rule sources embed titles, companies and skills that are each stored at up
+    # to 100 characters, so a combined provenance line can exceed the plan cap on
+    # its own -- bound every rules-built item here, not just the Gemini ones.
     return InterviewQuestionPlanItem(
         category=category,
         question=question,
         purpose=purpose,
         follow_up=follow_up,
-        source=source,
+        source=_bounded_source(source),
         compliance=_evaluate_compliance(question, follow_up),
     )
 

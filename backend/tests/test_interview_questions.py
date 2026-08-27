@@ -359,3 +359,44 @@ def test_gemini_malformed_top_level_json_uses_rules_fallback(monkeypatch) -> Non
     assert len(questions) == 5
     assert "GEMINI_INVALID_RESPONSE" in basis
     assert usage == service.GeminiTokenUsage()
+
+
+def test_rule_question_sources_stay_within_the_record_cap() -> None:
+    """Rule provenance joins fields that are each stored at up to 100 characters,
+    so the combined line can exceed the 200-character record cap on its own. Every
+    rules-built item must come out bounded, or plan generation 500s on long titles
+    before Gemini is even reachable."""
+
+    long_title = "跨境供應鏈數位轉型與流程治理平台資深架構師" * 5
+    long_role = "全球製造營運智慧化專案管理與導入顧問總監" * 5
+    long_company = "台灣先進智慧製造與永續能源科技股份有限公司" * 5
+    long_skill = "高併發分散式系統可靠性工程與觀測性建置" * 4
+    wanted_skill = "跨國多雲基礎設施成本治理與資安合規稽核" * 4
+    experiences = [
+        {"title": long_title, "company": long_company, "description": "負責平台治理"}
+    ]
+
+    questions, _ = service.personalized_manager_question_plan(
+        job_title=long_role,
+        current_title=long_title,
+        total_years=12,
+        candidate_skills=[long_skill],
+        required_skills=[wanted_skill],
+        experiences=experiences,
+    )
+    assert len(questions) == 5
+    for item in questions:
+        assert len(item.source) <= service.QUESTION_SOURCE_MAX_LENGTH
+
+    replacement = service._rule_question_replacement(
+        stage="manager",
+        category="經驗轉移",
+        existing_questions=questions,
+        job_title=long_role,
+        current_title=long_title,
+        total_years=12,
+        candidate_skills=[long_skill],
+        required_skills=[wanted_skill],
+        experiences=experiences,
+    )
+    assert len(replacement.source) <= service.QUESTION_SOURCE_MAX_LENGTH
