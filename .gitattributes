@@ -1,0 +1,15 @@
+# core.autocrlf=true on the Windows host stored the POSIX launchers with CRLF,
+# which makes their shebang fail on macOS with "bad interpreter: ...^M".
+# Pin the line endings per file type instead of trusting each clone's config.
+*.sh    text eol=lf
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+
+# Never let line-ending conversion near these.
+*.docx  binary
+*.xlsx  binary
+*.pdf   binary
+*.db    binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
