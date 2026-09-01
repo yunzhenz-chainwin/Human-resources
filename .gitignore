@@ -5,6 +5,7 @@ __pycache__/
 pytest-cache-files-*/
 .pytest-tmp-*/
 *.log
+.dev-logs/
 *.py[cod]
 backend/.coverage
 backend/*.db

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import tempfile
 import unicodedata
@@ -31,22 +32,38 @@ class CandidateProfileBackfillResult:
 
 
 def _pdf_font_path(*, bold: bool = False) -> Path:
+    # A host that keeps its CJK font somewhere else pins it here, the same way
+    # the OCR toolchain is pinned with TESSERACT_DIR.
+    override = os.environ.get("PDF_CJK_FONT_BOLD_PATH" if bold else "PDF_CJK_FONT_PATH")
     regular = [
         Path(r"C:\Windows\Fonts\msjh.ttc"),
+        # macOS: the Noto cask lands in one of the two Library trees; PingFang
+        # is the system fallback that is always present.
+        Path("/Library/Fonts/NotoSansCJK-Regular.ttc"),
+        Path.home() / "Library/Fonts/NotoSansCJK-Regular.ttc",
+        Path("/System/Library/Fonts/PingFang.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
     ]
     bold_candidates = [
         Path(r"C:\Windows\Fonts\msjhbd.ttc"),
+        Path("/Library/Fonts/NotoSansCJK-Bold.ttc"),
+        Path.home() / "Library/Fonts/NotoSansCJK-Bold.ttc",
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"),
     ]
-    candidates = [*(bold_candidates if bold else []), *regular]
+    # No bold face on this host is not fatal: falling through to the regular
+    # list registers it under the bold style rather than failing the render.
+    candidates = [
+        *([Path(override)] if override else []),
+        *(bold_candidates if bold else []),
+        *regular,
+    ]
     for path in candidates:
         if path.is_file():
             return path
     raise RuntimeError(
-        "找不到支援繁體中文的 PDF 字型（需要 Microsoft JhengHei 或 Noto Sans CJK）"
+        "找不到支援繁體中文的 PDF 字型（需要 Microsoft JhengHei、Noto Sans CJK 或 PingFang）"
     )
 
 

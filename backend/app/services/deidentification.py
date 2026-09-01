@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
+import os
 import re
 import tempfile
 import unicodedata
@@ -106,9 +107,18 @@ class SensitiveValue:
 
 
 def _font_path() -> Path:
+    # PDF_CJK_FONT_PATH pins the font on a host that keeps it elsewhere, the
+    # same way TESSERACT_DIR pins the OCR binary.
+    override = os.environ.get("PDF_CJK_FONT_PATH")
     candidates = (
+        *([Path(override)] if override else []),
         Path(r"C:\Windows\Fonts\msjh.ttc"),
         Path(r"C:\Windows\Fonts\mingliu.ttc"),
+        # macOS: the Noto cask lands in one of the two Library trees; PingFang
+        # is the system fallback that is always present.
+        Path("/Library/Fonts/NotoSansCJK-Regular.ttc"),
+        Path.home() / "Library/Fonts/NotoSansCJK-Regular.ttc",
+        Path("/System/Library/Fonts/PingFang.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
     )

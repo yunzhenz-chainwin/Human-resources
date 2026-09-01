@@ -98,6 +98,9 @@ TalentHub/
 
 ## 開發環境快速啟動
 
+> **macOS（MacBook）**：初始化與啟動已腳本化——`./setup-mac.sh` 一次裝好相依套件、產生 `backend/.env` 並跑完 migration，之後用 `./start-dev.sh` 啟動三個服務。完整步驟與本機資料搬移說明見 [docs/SETUP-macOS.md](docs/SETUP-macOS.md)。
+> 以下的 PowerShell 指令是 Windows 主機的做法。
+
 目前已建立 Phase 1 的前後端骨架。首次使用先複製環境設定：
 
 ```powershell

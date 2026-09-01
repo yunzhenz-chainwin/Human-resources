@@ -1,11 +1,19 @@
 # TalentHub 後端啟動器:確保 OCR 工具(Tesseract / Poppler)在 PATH 上,
 # 再啟動 uvicorn。掃描型 PDF 的 OCR 依賴這兩個外部執行檔。
 import os
+import sys
 
-_DEFAULT_OCR_DIRS = [
-    r"C:\Program Files\Tesseract-OCR",
-    r"C:\Users\Administrator\ocr-tools\poppler-26.02.0\Library\bin",
-]
+# Per-OS fallbacks for hosts that have not put the two binaries on PATH. The
+# Windows entries are where the LAN host installs them; on macOS and Linux both
+# tools come from Homebrew, whose prefix differs by architecture and is missing
+# from PATH whenever this launcher runs outside a login shell.
+if sys.platform == "win32":
+    _DEFAULT_OCR_DIRS = [
+        r"C:\Program Files\Tesseract-OCR",
+        r"C:\Users\Administrator\ocr-tools\poppler-26.02.0\Library\bin",
+    ]
+else:
+    _DEFAULT_OCR_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
 # Allow overriding the OCR tool directories per host via OCR_TOOL_DIRS
 # (os.pathsep-separated); fall back to the known local install paths.
 _configured = os.environ.get("OCR_TOOL_DIRS")
