@@ -484,14 +484,43 @@ class WebHandler(BaseHTTPRequestHandler):
     _results: dict[str, tuple[str, bytes]] = {}
     _ocr_sources: dict[str, tuple[str, bytes]] = {}
     _used_names: set[str] = set()
+    # The text each result PDF was rendered from. Extracting it back out of
+    # that PDF only works for TrueType-outline fonts: fpdf2 embeds a CFF font
+    # (Noto Sans CJK, and every OTF/OTC CJK face) as CIDFontType0 without the
+    # /Encoding /Identity-H that tells a reader the codes are two bytes wide,
+    # so pypdf returns every character preceded by a NUL. The text is already
+    # in hand when the PDF is built, so keep it instead of reading it back.
+    _result_text: dict[str, str] = {}
     _result_dir = Path(tempfile.gettempdir()) / "talenthub-resume-anonymizer"
 
     @classmethod
-    def _store_result(cls, token: str, filename: str, payload: bytes) -> None:
+    def _store_result(
+        cls, token: str, filename: str, payload: bytes, display_text: str | None = None
+    ) -> None:
         cls._results[token] = (filename, payload)
         cls._result_dir.mkdir(parents=True, exist_ok=True)
         (cls._result_dir / f"{token}.name").write_text(filename, encoding="utf-8")
         (cls._result_dir / f"{token}.bin").write_bytes(payload)
+        if display_text is not None:
+            cls._result_text[token] = display_text
+            (cls._result_dir / f"{token}.display.txt").write_text(
+                display_text, encoding="utf-8"
+            )
+
+    @classmethod
+    def _get_display_text(cls, token: str) -> str | None:
+        """The anonymized text a stored result was rendered from, if kept."""
+        text = cls._result_text.get(token)
+        if text is not None:
+            return text
+        if not re.fullmatch(r"[A-Za-z0-9_-]{12,80}", token):
+            return None
+        try:
+            text = (cls._result_dir / f"{token}.display.txt").read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError, UnicodeError):
+            return None
+        cls._result_text[token] = text
+        return text
 
     @classmethod
     def _get_result(cls, token: str) -> tuple[str, bytes] | None:
@@ -608,16 +637,19 @@ class WebHandler(BaseHTTPRequestHandler):
         item = self._get_result(token)
         if item:
             filename, payload = item
-            if filename.casefold().endswith(".docx"):
-                display_result = extract_docx(payload)
-            elif filename.casefold().endswith(".pdf"):
-                # This is a PDF generated from text already anonymized by this
-                # process. Do not reapply the original-resume 20-character guard:
-                # a valid short result (for example only a name field) must still
-                # render instead of terminating the HTTP response thread.
-                display_result = extract_pdf(payload, minimum_text_characters=0)
-            else:
-                display_result = payload.decode("utf-8")
+            display_result = self._get_display_text(token)
+            if display_result is None:
+                # Only results stored before this process kept the text reach here.
+                if filename.casefold().endswith(".docx"):
+                    display_result = extract_docx(payload)
+                elif filename.casefold().endswith(".pdf"):
+                    # A PDF this process generated from already-anonymized text.
+                    # Do not reapply the original-resume 20-character guard: a
+                    # valid short result (for example only a name field) must
+                    # still render instead of terminating the response thread.
+                    display_result = extract_pdf(payload, minimum_text_characters=0)
+                else:
+                    display_result = payload.decode("utf-8")
             ocr_info = ""
             if query.get("ocr", [""])[0] == "1":
                 pages = query.get("pages", ["?"])[0]
@@ -652,7 +684,7 @@ class WebHandler(BaseHTTPRequestHandler):
                         result, summary = anonymize(ocr_text)
                         token = secrets.token_urlsafe(18)
                         filename = self._filename(original_name, ".pdf")
-                        self._store_result(token, filename, render_pdf(result))
+                        self._store_result(token, filename, render_pdf(result), display_text=result)
                         self.send_response(303)
                         self.send_header("Location", f"/?token={token}&ocr=1&pages={page_count}&chars={len(ocr_text)}&quality={quality}")
                         self.end_headers()
@@ -687,7 +719,7 @@ class WebHandler(BaseHTTPRequestHandler):
             output_suffix = ".pdf"
             filename = self._filename(original_name, output_suffix)
             payload = render_pdf(result)
-            self._store_result(token, filename, payload)
+            self._store_result(token, filename, payload, display_text=result)
             self.send_response(303)
             self.send_header("Location", f"/?token={token}")
             self.end_headers()
