@@ -1,33 +1,60 @@
-# TalentHub 軟體系統規格書（SDD）
+TalentHub 系統規格書
+===
 
-| 項目 | 內容 |
-|---|---|
-| 專案名稱 | TalentHub — 企業人才庫與智慧媒合系統 |
-| 文件名稱 | 軟體系統規格書（Software Design Document, SDD） |
-| 文件版本 | v1.0（定稿） |
-| 文件日期 | 2026-09-01 |
-
-> 標記說明：⚪【現況註記】＝已查證的設計與實作落差，保留即可。
-
-[TOC]
+> 版本：v1.0（定稿）｜建立：2026-09-01｜最後更新：2026-09-01
+> 基準：`main` @ 600d6b9（功能分支 agent/role-scoped-interview-questions 已於 2026-09-01 合併）
+> 內容：系統概述 × 初步設計 × 細部設計 × 需求追溯 × 附錄
 
 ---
 
-## 1. 簡介
+# 目錄
 
-### 1.1 文件目的
+**1. 簡介**
+　　1.1 文件目的
+　　1.2 文件範圍
+　　1.3 現況註記標註
+**2. 系統概述**
+　　2.1 系統目標
+　　2.2 系統範圍
+　　2.3 系統架構
+　　2.4 軟體需求概述
+　　2.5 軟體環境需求
+　　2.6 設計限制
+**3. 系統初步設計**
+　　3.1 使用者介面結構層次圖
+　　3.2 模組功能架構圖
+　　3.3 類別初步描述
+**4. 系統細部設計**
+　　4.1 使用者介面流程
+　　4.2 模組功能
+　　4.3 類別細部描述
+　　4.4 資料結構
+　　4.5 成員函數（關鍵服務函式與公開介面）
+**5. 系統需求至系統設計之追溯**
+　　5.1 追溯工具（GitHub）
+　　5.2 需求 ↔ 設計 ↔ 驗證追溯表
+**6. 附錄**
+　　6.1 參考書目
+　　6.2 專有名詞解釋
+　　6.3 中英對照
+
+# 1. 簡介
+
+## 1.1 文件目的
 
 本文件為 TalentHub 系統之軟體系統規格書（SDD），涵蓋系統之初步設計與細部設計，使系統開發者、維護者與交接者得以確認系統的實際需求與設計決策，並作為後續開發與維運時遵循的準繩。本文件內容整理自《TalentHub 系統文件與交接手冊》（docs/TalentHub_系統文件與交接手冊.docx，2026-08-27 定版）並與 2026-09-01 之程式碼現況核對。
 
-### 1.2 文件範圍
+## 1.2 文件範圍
 
 本文件範圍包含：系統目標與範圍、系統架構、前後端模組設計、資料庫類別設計、核心流程（履歷解析、智慧配對、結構化面試評分）、需求至設計之追溯方式。**不含**：操作手冊等級的維運指令（見交接手冊第 10 章）、個資法遵細節（見交接手冊第 08 章）、逐端點 API 契約（以 FastAPI OpenAPI 為準）。
 
----
+## 1.3 現況註記標註
 
-## 2. 系統概述
+全文以「⚪【現況註記】」引言區塊標示**設計與目前實作的已查證落差**（例如規劃保留但尚未建置的能力）。內容均已對照程式碼查證屬實，交接後若實作補齊，更新對應註記即可。
 
-### 2.1 系統目標
+# 2. 系統概述
+
+## 2.1 系統目標
 
 TalentHub 是公司內網的人才庫與招募系統，把招募從收履歷到錄用討論做成一條線上作業：
 
@@ -49,7 +76,7 @@ TalentHub 是公司內網的人才庫與招募系統，把招募從收履歷到�
 
 KPI 現況欄為立項時的估計值；依交接手冊第 01 章之程序，正式驗收（UAT）時由 HR 抽 10 份履歷實測計時校正基準，再據以追蹤各指標達成率。
 
-### 2.2 系統範圍
+## 2.2 系統範圍
 
 **本期範圍（In Scope）**：人才資料庫（建檔、複合搜尋、標籤、狀態機、聯繫紀錄）；履歷匯入（104／1111／一般 PDF／DOCX，批次上傳）；解析校對介面與去重；職缺需求單＋簽核流；配對引擎（硬條件過濾＋加權計分）；RBAC 角色權限與欄位遮罩；稽核日誌；基礎報表（招募漏斗、time-to-fill、來源成效、人才庫組成）；公開職涯站本人投遞＋版本化告知同意；HR／主管兩階段結構化面試評分與盲評；保存期限到期清理。
 
@@ -57,33 +84,27 @@ KPI 現況欄為立項時的估計值；依交接手冊第 01 章之程序，正
 
 > ⚪【現況註記】原規劃列為範圍內但**尚未實作**：監控資料夾自動匯入（Watcher）、站內通知＋Email 通知（SMTP）。原列 Phase 2／範圍外但**已提前交付**：求職者自助入口（career-frontend）、面試官評語回填（結構化面試評分）。
 
-### 2.3 系統架構
+## 2.3 系統架構
 
-```mermaid
-flowchart TB
-    subgraph users ["使用者"]
-        JS["求職者（免登入）"]
-        STAFF["HR／主管／Admin／IT（登入）"]
-    end
-    subgraph fe ["前端層（Vue 3 + TypeScript + Vite）"]
-        CF["career-frontend<br/>公開職涯站"]
-        FE["frontend<br/>HR 管理後台 SPA"]
-    end
-    subgraph be ["應用層"]
-        API["Backend API<br/>Python 3.12 + FastAPI + SQLAlchemy 2"]
-    end
-    subgraph data ["資料層"]
-        PG[("PostgreSQL 16<br/>（開發／測試可用 SQLite）")]
-        FS[("履歷檔案儲存<br/>Local volume 或 S3／MinIO")]
-        AV["ClamAV clamd<br/>上傳掃毒（正式環境 fail-closed）"]
-    end
-    JS --> CF
-    STAFF --> FE
-    CF -- "/api/v1/public/*" --> API
-    FE -- "Bearer JWT /api/v1/*" --> API
-    API --> PG
-    API --> FS
-    API --> AV
+```
+┌──────────────────────── 使用者看到的畫面 ────────────────────────┐
+│  求職者 → 公開職涯站（career-frontend，免登入）                  │
+│  HR／主管／Admin／IT → HR 管理後台（frontend，登入）             │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │ /api/v1/public/*　·　Bearer JWT /api/v1/*
+                             ▼
+┌──────────────────────── 系統處理中心 ────────────────────────────┐
+│  Backend API（Python 3.12＋FastAPI＋SQLAlchemy 2）               │
+│  驗證身分與權限 → 檢查欄位 → 解析履歷／OCR → 去重／配對／報表    │
+└───────────────────────┬───────────────────┬──────────────────────┘
+                        │ 結構化資料        │ PDF／DOC／DOCX 原檔
+                        ▼                   ▼
+              ┌──────────────────┐  ┌──────────────────────────┐
+              │ PostgreSQL 16    │  │ Local volume／S3·MinIO   │
+              │ 人才、職缺、權限 │  │ 履歷原始檔＋大頭照       │
+              │ 配對、稽核紀錄   │  │ 隔離區＋ClamAV 掃毒      │
+              │（測試用 SQLite） │  │（正式環境 fail-closed）  │
+              └──────────────────┘  └──────────────────────────┘
 ```
 
 **元件一覽**：
@@ -116,11 +137,12 @@ Human-resources/
 ├── career-frontend/         # 公開職涯站（Vue 3 SPA，dev port 5174）
 ├── e2e/                     # Playwright 端對端測試
 ├── deploy/                  # docker-compose.yml、compose.storage.yml、windows-lan/
-├── docs/                    # 交接手冊 docx、SETUP-macOS.md、本文件
+├── docs/                    # 交接手冊 docx、SETUP-macOS.md、本文件（src/ 為 Markdown 原始檔）
+├── scripts/                 # convert-docs.mjs（docs/src → docs 的 Word 產生器）
 └── samples/                 # 虛構種子資料（db-seed/）
 ```
 
-### 2.4 軟體需求概述
+## 2.4 軟體需求概述
 
 | 模組 | 功能需求摘要 |
 |---|---|
@@ -144,7 +166,7 @@ Human-resources/
 | US-07 | Admin | 建帳號、指派角色，權限即刻生效並留稽核 |
 | US-08 | HR | 同一人二次投遞時自動比對並提示「更新既有檔案」 |
 
-### 2.5 軟體環境需求
+## 2.5 軟體環境需求
 
 **開發／執行環境**：
 
@@ -170,7 +192,7 @@ Node.js 版本現況：`frontend`、`career-frontend`、`e2e` 三個 package.jso
 
 **組態管理**：所有設定走 `.env` 環境變數（範本 `.env.example`）；機密（DB 密碼、`AUTH_SECRET_KEY`、`GEMINI_API_KEY`）不進版控。`APP_ENV` 非 development 時自動停用 `/docs`；production／staging 拒絕 demo seeding；掃毒政策依環境切換——正式環境一律 fail-closed，僅 development／test／local 且明確設定 `RESUME_SCAN_POLICY=allow_unavailable` 時放行未掃描檔。
 
-### 2.6 設計限制
+## 2.6 設計限制
 
 1. **法遵限制**：不自動登入 104／1111 爬取履歷（平台條款＋個資法風險）；履歷僅由候選人本人投遞或 HR 以企業會員身分合法下載後上傳。
 2. **個資保護**：版本化告知同意（撤回即停止正式媒合）、保存期限 1–20 年到期完整清除、主管僅見遮罩聯絡資訊與核准後的去識別化履歷、個資讀取全量稽核。
@@ -178,30 +200,28 @@ Node.js 版本現況：`frontend`、`career-frontend`、`e2e` 三個 package.jso
 4. **AI 使用限制**：Gemini 產題預設關閉；輸入僅採去識別的結構化工作證據白名單；每人每日產題配額；AI 僅輔助不做錄取決策。
 5. **非功能需求**：人才庫 10 萬筆規模複合查詢 < 2 秒；批次解析 ≥ 10 份/分鐘；上班時間可用性 99.5%（LAN 部署有 5 分鐘 watchdog 自動復活）；每日備份 RPO ≤ 24h、RTO ≤ 4h。
 
-> ⚪【現況註記】全站 TLS 為正式上線目標；LAN 試行階段仍為內網 HTTP。正式承載真實個資前須完成：PR／CI／合併主線、三角色 UAT、法務定稿告知文字與保存政策、HTTPS／正式 PostgreSQL／加密備份／集中監控。
+> ⚪【現況註記】全站 TLS 為正式上線目標；LAN 試行階段仍為內網 HTTP。正式承載真實個資前須完成：三角色 UAT、法務定稿告知文字與保存政策、HTTPS／正式 PostgreSQL／加密備份／集中監控（主線合併已於 2026-09-01 完成）。
 
----
+# 3. 系統初步設計
 
-## 3. 系統初步設計（UML）
+## 3.1 使用者介面結構層次圖
 
-### 3.1 使用者介面結構層次圖
-
-```mermaid
-flowchart LR
-    ROOT["TalentHub"] --> PUB["公開職涯站（免登入）"]
-    ROOT --> ADM["HR 管理後台（登入）"]
-    PUB --> P1["加入人才庫表單（預設唯一入口）"]
-    PUB --> P2["公開職缺列表／詳情<br/>（VITE_PUBLIC_ONLY_APPLY=false 時開放）"]
-    ADM --> A1["工作總覽（依角色顯示導覽）"]
-    ADM --> A2["部門後台（僅主管）"]
-    ADM --> A3["人才庫（Admin／HR）"]
-    ADM --> A4["新增人才：履歷匯入與校對"]
-    ADM --> A5["職缺管理"]
-    ADM --> A6["人才評估與面試"]
-    A6 --> A6a["人才評估（配對工作區）"]
-    A6 --> A6b["面試流程（結構化評分工作區）"]
-    ADM --> A7["招募分析（報表）"]
-    ADM --> A8["帳號與權限（系統後台）"]
+```
+TalentHub
+├─ 公開職涯站（免登入）
+│   ├─ 加入人才庫表單（預設唯一入口）
+│   └─ 公開職缺列表／詳情（VITE_PUBLIC_ONLY_APPLY=false 時開放）
+└─ HR 管理後台（登入）
+    ├─ 工作總覽（依角色顯示導覽）
+    ├─ 部門後台（僅主管）
+    ├─ 人才庫（Admin／HR）
+    ├─ 新增人才：履歷匯入與校對
+    ├─ 職缺管理
+    ├─ 人才評估與面試
+    │   ├─ 人才評估（配對工作區）
+    │   └─ 面試流程（結構化評分工作區）
+    ├─ 招募分析（報表）
+    └─ 帳號與權限（系統後台）
 ```
 
 角色 × 頁面權限矩陣（權限由後端強制，前端僅隱藏入口）：
@@ -221,7 +241,7 @@ flowchart LR
 
 校對介面（履歷匯入第三步，本系統關鍵畫面）——
 
-```text
+```
 ┌──────────────────────────────────────────────────────────────┐
 │ 3. 人工校對 ｜檔名.pdf ｜狀態:需人工確認 ｜ [重新解析]       │
 ├──────────────────────────────────────────────────────────────┤
@@ -239,7 +259,7 @@ flowchart LR
 
 人才評估（配對工作區）——
 
-```text
+```
 ┌─ 職缺選單：資深後端工程師 (R2026-0012)｜ [重新配對] ──────────┐
 │ 來源切換：實際應徵者｜人才庫推薦    進階設定（權重/必要條件） │
 ├──────────────────────────────────────────────────────────────┤
@@ -250,38 +270,40 @@ flowchart LR
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 模組功能架構圖
+## 3.2 模組功能架構圖
 
-```mermaid
-flowchart TB
-    subgraph api ["backend/app（FastAPI）"]
-        AUTH["auth<br/>登入·JWT·RBAC·鎖定"]
-        CAND["candidates<br/>人才 CRUD·搜尋·去重"]
-        RES["resumes<br/>上傳·掃毒·解析·校對"]
-        PARS["parsers<br/>p104／p1111／generic"]
-        REQ["requisitions<br/>需求單·簽核·狀態機"]
-        MATCH["matching<br/>Gate＋加權計分·基準評估"]
-        APPL["applications／interview_records<br/>應徵·兩階段面試·題組版本·綜合分"]
-        CONS["consent／public<br/>版本化同意·公開投遞"]
-        RET["talent_retention<br/>保存政策·到期清理 worker"]
-        REP["reports<br/>漏斗·time-to-fill·來源·組成"]
-        ADMN["admin<br/>帳號·部門·字典·設定·稽核"]
-        AUD["audit<br/>write_audit 稽核寫入"]
-    end
-    RES --> PARS
-    RES --> CAND
-    REQ --> MATCH
-    MATCH --> APPL
-    CONS --> CAND
-    RET --> CAND
-    CAND --> REP
-    AUTH -.RBAC.-> CAND & RES & REQ & MATCH & APPL & ADMN
-    CAND & RES & REQ & MATCH & APPL & ADMN -.個資事件.-> AUD
+後端模組（backend/app）與其呼叫關係：
+
 ```
+resumes ──► parsers（p104／p1111／generic 策略模式解析）
+resumes ──► candidates（校對確認後入庫）
+requisitions ──► matching（Gate＋加權計分、基準評估）
+matching ──► applications／interview_records（應徵、兩階段面試、題組版本、綜合分）
+consent／public ──► candidates（公開投遞＋版本化同意）
+talent_retention ──► candidates（保存政策、到期清理 worker）
+candidates ──► reports（漏斗、time-to-fill、來源、組成；DB 即時聚合）
+auth ──(RBAC 依賴鏈)──► 所有招募與管理模組
+各模組 ──(個資事件)──► audit（write_audit 稽核寫入）
+admin：帳號、部門、技能／標籤字典、系統設定、稽核查詢、系統問題追蹤
+```
+
+| 模組 | 職責摘要 |
+|---|---|
+| auth | 登入、JWT 發放／輪替、RBAC 檢核、連續失敗鎖定 |
+| candidates | 人才 CRUD、複合搜尋、狀態、聯繫紀錄、去重比對 |
+| resumes＋parsers | 上傳接收（掃毒＋檔頭驗證）、同步解析與 OCR、來源覆核、校對確認 |
+| requisitions | 需求單 CRUD、簽核狀態機、盲評與綜合評分權重設定 |
+| matching | 硬條件過濾＋加權計分、名單快照、主管回饋、成效評估與小樣本基準 |
+| applications／interview_records | 應徵流程、兩階段結構化面試、版本化題組、綜合評分 |
+| consent／public | 版本化告知同意、求職者公開投遞端點 |
+| talent_retention | 保存期限政策、dry-run、到期清理與檔案刪除 outbox |
+| reports | 招募漏斗、time-to-fill、來源成效、人才庫組成 |
+| admin | 使用者／部門／字典／參數、稽核查詢、系統問題追蹤 |
+| audit | 稽核日誌統一寫入（含原始履歷下載／預覽等個資讀取事件） |
 
 > ⚪【現況註記】背景工作（解析、保存期限 worker）於 API 程序內執行，無 Redis／Celery 佇列；通知模組未實作（見 §2.2 註記）。
 
-### 3.3 類別初步描述
+## 3.3 類別初步描述
 
 系統共 27 張應用資料表（SQLAlchemy models，另有 Alembic 自管的 `alembic_version`），依領域分四群：
 
@@ -294,77 +316,58 @@ flowchart TB
 
 > ⚪【現況註記】規劃保留、**尚未建表**：`candidate_languages`、`candidate_certifications`、`candidate_tags`、`requisition_skills`、`saved_searches`、`notifications`。技能字典 `skill_catalog` 與 `candidate_skills` 間目前無 FK。
 
----
+# 4. 系統細部設計
 
-## 4. 系統細部設計（UML）
+## 4.1 使用者介面流程
 
-### 4.1 使用者介面流程
+### 流程一：公開投遞 → 建檔（求職者）
 
-**流程一：公開投遞 → 建檔（求職者）**
-
-```mermaid
-flowchart LR
-    S1["瀏覽公開職涯站"] --> S2["閱讀現行版個資告知並勾選同意"]
-    S2 --> S3["填表：姓名＋至少一種聯絡方式<br/>履歷檔選填（PDF/DOC/DOCX ≤10MB）"]
-    S3 --> S4["Backend 驗證＋掃毒"]
-    S4 --> S5["送出即建檔（來源 career_site，綁定同意版本）"]
-    S5 --> S6["顯示參考編號；履歷進解析佇列供 HR 校對"]
+```
+瀏覽公開職涯站 → 閱讀現行版個資告知並勾選同意
+  → 填表：姓名＋至少一種聯絡方式；履歷檔選填（PDF/DOC/DOCX ≤10MB）
+  → Backend 驗證＋掃毒 → 送出即建檔（來源 career_site，綁定同意版本）
+  → 顯示參考編號；履歷進解析佇列供 HR 校對
 ```
 
-**流程二：HR 履歷匯入 → 校對 → 入庫**
+### 流程二：HR 履歷匯入 → 校對 → 入庫
 
-```mermaid
-flowchart LR
-    H1["批次上傳（拖放多檔）"] --> H2["掃毒＋檔頭驗證"]
-    H2 --> H3["同步解析：來源判別→文字抽取（OCR 後援）→欄位抽取→去重→信心計分"]
-    H3 --> H4{"信心足夠？"}
-    H4 -- "needs_review" --> H5["人工校對：欄位表單 vs 解析原文對照"]
-    H4 -- "parsed" --> H6
-    H5 --> H6["確認並寫入人才庫<br/>（email/電話命中既有人才→自動改為更新）"]
+```
+批次上傳（拖放多檔） → 掃毒＋檔頭驗證
+  → 同步解析：來源判別 → 文字抽取（OCR 後援） → 欄位抽取 → 去重 → 信心計分
+  ├─ 信心足夠（parsed）──────────────────────────┐
+  └─ 不足（needs_review）→ 人工校對（欄位表單    │
+     　　　　　　　　　　　vs 解析原文對照）─────┤
+                                                 ▼
+              確認並寫入人才庫（email/電話命中既有人才 → 自動改為更新）
 ```
 
 （管線各步驟的完整細節見 §4.2.1。）
 
-**流程三：開缺 → 配對 → 面試 → 綜合分（主管＋HR）**
+### 流程三：開缺 → 配對 → 面試 → 綜合分（主管＋HR）
 
-```mermaid
-flowchart LR
-    R1["主管填需求單（送出即 submitted）"] --> R2["HR 核准（approved；再轉 sourcing 開始媒合）"]
-    R2 --> R3["重新配對：Gate 過濾＋加權計分"]
-    R3 --> R4["推薦名單（分數＋breakdown＋near-miss）"]
-    R4 --> R5["安排面試（建立應徵紀錄）"]
-    R5 --> R6["HR 初談評分（盲評）"]
-    R5 --> R7["主管面談評分（盲評）"]
-    R6 & R7 --> R8["雙方皆正式提交→互相釋出＋計算綜合參考分"]
-    R8 --> R9["錄用討論（人做決定，系統不自動錄取）"]
+```
+主管填需求單（送出即 submitted） → HR 核准（approved；再轉 sourcing 開始媒合）
+  → 重新配對（Gate 過濾＋加權計分） → 推薦名單（分數＋breakdown＋near-miss）
+  → 安排面試（建立應徵紀錄）─┬─► HR 初談評分（盲評）──┐
+                             └─► 主管面談評分（盲評）─┴─► 雙方皆正式提交
+  → 互相釋出＋計算綜合參考分 → 錄用討論（人做決定，系統不自動錄取）
 ```
 
-**認證序列**：
+### 認證流程
 
-```mermaid
-sequenceDiagram
-    participant U as 使用者
-    participant F as HR 後台
-    participant B as Backend API
-    U->>F: 輸入帳密
-    F->>B: POST /api/v1/auth/login
-    B-->>F: access token（15 分）＋refresh token（7 天）
-    Note over F: token 存 session storage
-    F->>B: 帶 Bearer access 呼叫 API
-    B-->>F: 401（access 過期）
-    F->>B: POST /auth/refresh（refresh 輪替，舊 token 作廢）
-    B-->>F: 新 access＋新 refresh
-    U->>F: 登出
-    F->>B: POST /auth/logout（撤銷 refresh）
-```
+1. 使用者輸入帳密 → `POST /api/v1/auth/login`。
+2. 取得 access token（15 分鐘）＋refresh token（7 天）；token 存 browser session storage。
+3. 之後每個請求帶 `Authorization: Bearer <access>`。
+4. access 過期收到 401 → `POST /auth/refresh` 輪替（舊 refresh 作廢、換發新的一對）。
+5. 登出 → `POST /auth/logout` 撤銷所持 refresh token。
 
-### 4.2 模組功能
+## 4.2 模組功能
 
-**4.2.1 履歷解析管線（resumes＋parsers）**
+### 4.2.1 履歷解析管線（resumes＋parsers）
 
 四種入口——公開職涯站投遞（免登入）、HR／管理員批次上傳、部門主管送交（必選本部門職缺）、手動建檔（無檔案，不經解析管線）。前三種共用：掃毒與簽章驗證 → 同步解析（threadpool）→ ①來源/版型判別（文字特徵簽章計分 p104/p1111/generic，分數不足標 `source_review_required` 由 HR 人工指定）→ ②文字抽取（pypdf 文字層；空則 PyMuPDF 渲染＋本地 Tesseract OCR，45 秒／20 頁上限，不外送雲端；.docx 用 python-docx）→ ③欄位抽取（標籤錨點＋regex＋啟發式；現行 adapters-2.2 自動帶入：姓名、Email、電話、居住地、目前職稱、總年資、技能）→ ④去重（file_hash 相同＝重複檔案；email_norm／phone_norm 命中＝更新既有人才不覆蓋）→ ⑤信心計分（OCR 欄位一律 ×0.78 並強制人工校對）。HR 上傳一律人工確認才入庫；公開站例外（送出即建檔）。解析器版本化＋golden tests（backend/tests/test_parser_calibration.py）。
 
-**4.2.2 配對引擎（matching）**
+### 4.2.2 配對引擎（matching）
 
 兩階段計算：
 
@@ -382,102 +385,110 @@ sequenceDiagram
 
 每筆結果保留 `score_breakdown` JSON（逐面向證據＋near_miss＋資料完整度），前端可展開「為什麼是這個分數」。權重可逐需求單覆寫（`match_weights`），變更入稽核並自動重算；重算不覆蓋人工操作過的名單狀態。配對品質有兩套量測：**媒合評估報表**以 match_results 的人工標記回饋計算 Precision@K／Recall@K／Gate 誤殺率／分數校準／排名有效性（需累積約 30 筆標記結果）；另有 **50 案例合成盲評基準**——HR／主管先人工盲評再對照系統排序（Top-5 overlap／Top-5 false negative／Gate miss／角色一致率／資料完整度），屬小樣本流程基準、不是錄取預測模型。
 
-**4.2.3 結構化面試評分與綜合分（applications／interview_records＋interview_scoring）**
+### 4.2.3 結構化面試評分與綜合分（applications／interview_records＋interview_scoring）
 
 HR 初談與主管面談兩階段分權：每題 1–5 分或「未詢問＋原因」；正式提交必填 0–100 總分、錄用建議與非空總評；完成後鎖定（一般修改回 409），帶原因重開則遞增修訂編號。雙方盲評：兩邊最新紀錄都完成前互看不到評分結論，任一方重開即恢復遮罩；HR 私人備註永不釋出。題組版本化（Gemini 或規則式產生，逐題重產建新版本不覆蓋；每題出處上限 200 字元）。**綜合參考分**＝履歷媒合分＋HR 逐題平均＋HR 總分＋主管逐題平均＋主管總分五分量加權（預設 20/15/25/15/25，需求單層級 `composite_score_weights` 可由 HR 覆寫，讀取時正規化為總和 1）；兩階段皆提交才有值、缺項不以 0 分計；調權重或重新配對即同交易重算整張職缺。
 
-**4.2.4 同意與保存期限（consent／talent_retention）**
+### 4.2.4 同意與保存期限（consent／talent_retention）
 
 告知條款版本化（同一時間僅一版生效）；公開投遞必須綁定所見版本（版本過期回 409 要求重新同意）；撤回即停止正式媒合並使保存期限改為當日到期。保存期限預設 2 年（1–20 年可調、可逐人覆寫），到期由 worker（預設停用，PostgreSQL advisory lock 防重複）完整刪除人才、關聯資料與實體檔案（檔案刪除失敗進 `retention_storage_deletions` outbox 重試），只留不含個資的稽核；HR 後台可先 dry-run 覆核。
 
-**4.2.5 稽核與 RBAC（audit＋dependencies/auth）**
+### 4.2.5 稽核與 RBAC（audit＋dependencies/auth）
 
 四種角色：admin（相容管理員，跨部門）、it（僅系統維運與診斷，不觸招募個資）、hr（全公司招募）、manager（僅本部門實際應徵者，聯絡資訊遮罩、不可讀原始履歷）。權限由後端依賴鏈強制（`require_recruiting_user`、`enforce_candidate_scope` 等）。稽核 `write_audit` 記錄登入、管理異動與 PII 讀取（履歷下載／預覽、資料庫瀏覽揭示個資需填理由）；來源 IP 一律經 proxy-aware `client_ip()` 解析 X-Forwarded-For。
 
-### 4.3 類別細部描述
+## 4.3 類別細部描述
 
 以下為核心類別（資料表）的欄位級設計；完整 27 表以 `backend/app/models/` 與 Alembic migrations 為準。
 
-**candidates（人才主檔）**
+### candidates（人才主檔）
 
 | 欄位群 | 主要欄位 | 說明 |
 |---|---|---|
 | 識別 | `id`、`code` UNIQUE、`name` | 人才編號如 T2026-00001 |
 | 聯絡（去重鍵） | `email`／`email_norm`、`phone`／`phone_norm` | 正規化欄位供去重與索引 |
 | 條件 | `city`、`highest_education`、`total_years`、`current_title`、`expected_*`（職稱/類別 JSON/城市 JSON/薪資區間）、`availability`、`job_type` | 配對引擎輸入 |
-| 來源與狀態 | `source`（manual/hr_upload/manager_upload/career_site/demo）、`status`（狀態機見 4.4）、`owner_id`→users | |
+| 來源與狀態 | `source`（manual/hr_upload/manager_upload/career_site/demo）、`status`（狀態機見 §4.4）、`owner_id`→users | |
 | 個資治理 | `consent_status`、`consent_at`、`retention_until`、`retention_years_override`、`is_blacklisted`＋`blacklist_reason` | 撤回／黑名單連動 gate 排除 |
 | 生命週期 | `dedup_hash`、`created_at`／`updated_at`／`deleted_at` | `deleted_at`＝軟刪除 |
 
-**job_requisitions（職缺需求單）**：`req_no` UNIQUE、`title`、`department_id`、`requested_by`、`headcount`、工作地點／薪資區間、`min_years`、`education_req`、`jd`、`skills` JSON（技能快照）、`match_weights` JSONB（見 §4.4）、`composite_score_weights` JSONB（NULL＝用內建預設，見 §4.2.3；僅 HR 可改）、`blind_review_enabled`（任一面試正式提交後鎖定）、`status`＋簽核時間欄位。
+### job_requisitions（職缺需求單）
 
-**resume_files（履歷檔案）**：`candidate_id` NULL（校對前可空）、`target_requisition_id`、`storage_key`、`file_hash` sha256 UNIQUE（重複檔不建新列）、`source_platform`（direct/p104/p1111/generic）＋自動判定信心與人工覆核欄位、`parse_status`（pending/parsed/needs_review/confirmed/failed）、`parsed_payload`／`field_confidence` JSONB（見 §4.4）、`overall_confidence`、`parser_version`、`resume_text`（含 OCR 全文）。不存檔案 binary。
+`req_no` UNIQUE、`title`、`department_id`、`requested_by`、`headcount`、工作地點／薪資區間、`min_years`、`education_req`、`jd`、`skills` JSON（技能快照）、`match_weights` JSONB（見 §4.4）、`composite_score_weights` JSONB（NULL＝用內建預設，見 §4.2.3；僅 HR 可改）、`blind_review_enabled`（任一面試正式提交後鎖定）、`status`＋簽核時間欄位。
 
-**match_results（配對結果）**：(`requisition_id`,`candidate_id`) UNIQUE、`gate_passed`、`total_score`、`score_breakdown` JSONB、`rank`、`status`（人工階段不被重算覆蓋）、`manual_override_*`（gate 誤殺放行覆核）、`feedback_*`（主管不合適原因）、`computed_at`。
+### resume_files（履歷檔案）
 
-**job_applications（應徵）**：requisition＋candidate 必填且組合唯一、resume 可空、流程狀態、來源；綜合分快照 `composite_score` Numeric(5,2)＋`composite_score_breakdown` JSONB（見 §4.4）。
+`candidate_id` NULL（校對前可空）、`target_requisition_id`、`storage_key`、`file_hash` sha256 UNIQUE（重複檔不建新列）、`source_platform`（direct/p104/p1111/generic）＋自動判定信心與人工覆核欄位、`parse_status`（pending/parsed/needs_review/confirmed/failed）、`parsed_payload`／`field_confidence` JSONB（見 §4.4）、`overall_confidence`、`parser_version`、`resume_text`（含 OCR 全文）。不存檔案 binary。
 
-**interview_question_plans（面試題組）**：(`application_id`,`stage`,`version`) 唯一；`context_hash`（去識別產題輸入雜湊）；`questions`／`personalization_basis` JSON（每題 source ≤ 200 字元）；`generation_mode`／`provider`／token 用量稽核。重產一律建新版本。
+### match_results（配對結果）
 
-**interview_records（面試紀錄）**：application＋stage；綁定題組版本（不可換綁）；逐題 `rating`／`not_asked_reason`；`summary`／`recommendation`／`overall_rating`／`overall_score`；`private_notes`（HR 限定）；`submitted_at`／`submitted_by_*`／`revision_number`／`last_reopen_reason`。盲評遮罩由 API 層執行，資料庫保存完整內容（備份與 DB 權限須同等受控）。
+(`requisition_id`,`candidate_id`) UNIQUE、`gate_passed`、`total_score`、`score_breakdown` JSONB、`rank`、`status`（人工階段不被重算覆蓋）、`manual_override_*`（gate 誤殺放行覆核）、`feedback_*`（主管不合適原因）、`computed_at`。
 
-**users**：`username`／`email` UNIQUE、`password_hash`（scrypt）、`role`（admin/it/hr/manager 單一角色欄位）、`department_id`；帳號安全欄位 `tokens_valid_after`、`must_change_password`、`failed_login_count`、`locked_until`。
+### job_applications（應徵）
 
-**consent_notices／candidate_consents**：版本化告知內容與生效狀態；同意存證含管道、時間與撤回；同意當下版本由 `candidate_consents.notice_version` 冗餘保存以供追溯。
+requisition＋candidate 必填且組合唯一、resume 可空、流程狀態、來源；綜合分快照 `composite_score` Numeric(5,2)＋`composite_score_breakdown` JSONB（見 §4.4）。
 
-**deidentified_resume_documents**：去識別履歷衍生檔的版本、儲存、驗證與核准狀態；FK 僅 `source_resume_id`→resume_files 與建立／核准者——**刻意不存 candidate 參照**，僅能經 source resume 回溯。
+### interview_question_plans（面試題組）
 
-### 4.4 資料結構
+(`application_id`,`stage`,`version`) 唯一；`context_hash`（去識別產題輸入雜湊）；`questions`／`personalization_basis` JSON（每題 source ≤ 200 字元）；`generation_mode`／`provider`／token 用量稽核。重產一律建新版本。
 
-**核心 ER 關聯**：
+### interview_records（面試紀錄）
 
-```mermaid
-erDiagram
-    departments ||--o{ users : "隸屬"
-    users ||--o{ refresh_tokens : "登入工作階段"
-    candidates ||--o{ candidate_educations : ""
-    candidates ||--o{ candidate_experiences : ""
-    candidates ||--o{ candidate_skills : ""
-    candidates ||--o{ candidate_activities : ""
-    consent_notices ||--o{ candidate_consents : "版本"
-    candidates ||--o{ candidate_consents : ""
-    candidates ||--o{ resume_files : "校對後連結"
-    resume_files ||--o{ deidentified_resume_documents : "唯一回溯路徑"
-    departments ||--o{ job_requisitions : ""
-    job_requisitions ||--o{ job_applications : ""
-    candidates ||--o{ job_applications : ""
-    resume_files ||--o{ job_applications : "使用履歷"
-    job_requisitions ||--o{ match_results : ""
-    candidates ||--o{ match_results : ""
-    job_applications ||--o{ interview_question_plans : "版本化題組"
-    job_applications ||--o{ interview_records : "HR／主管兩階段"
-    interview_question_plans ||--o{ interview_records : "題目快照"
-    match_results ||--o{ semantic_shadow_evaluations : "CASCADE"
-    matching_benchmark_suites ||--o{ matching_benchmark_cases : ""
-    matching_benchmark_cases ||--o{ matching_benchmark_ratings : "人工盲評"
+application＋stage；綁定題組版本（不可換綁）；逐題 `rating`／`not_asked_reason`；`summary`／`recommendation`／`overall_rating`／`overall_score`；`private_notes`（HR 限定）；`submitted_at`／`submitted_by_*`／`revision_number`／`last_reopen_reason`。盲評遮罩由 API 層執行，資料庫保存完整內容（備份與 DB 權限須同等受控）。
+
+### users
+
+`username`／`email` UNIQUE、`password_hash`（scrypt）、`role`（admin/it/hr/manager 單一角色欄位）、`department_id`；帳號安全欄位 `tokens_valid_after`、`must_change_password`、`failed_login_count`、`locked_until`。
+
+### consent_notices／candidate_consents
+
+版本化告知內容與生效狀態；同意存證含管道、時間與撤回；同意當下版本由 `candidate_consents.notice_version` 冗餘保存以供追溯。
+
+### deidentified_resume_documents
+
+去識別履歷衍生檔的版本、儲存、驗證與核准狀態；FK 僅 `source_resume_id`→resume_files 與建立／核准者——**刻意不存 candidate 參照**，僅能經 source resume 回溯。
+
+## 4.4 資料結構
+
+### 核心 ER 關聯
+
+```
+departments ─┬──< users ──< refresh_tokens（登入工作階段）
+             └──< job_requisitions
+candidates ──< candidate_educations／candidate_experiences／
+               candidate_skills／candidate_activities
+candidates ──< candidate_consents >── consent_notices（版本）
+candidates ──< resume_files（校對後連結）
+resume_files ──< deidentified_resume_documents（唯一回溯路徑）
+resume_files ──< job_applications（使用履歷，可空）
+job_requisitions ──< job_applications >── candidates（組合唯一）
+job_requisitions ──< match_results >── candidates（組合唯一）
+job_applications ──< interview_question_plans（版本化題組）
+job_applications ──< interview_records（HR／主管兩階段）
+interview_question_plans ──< interview_records（題目快照）
+match_results ──< semantic_shadow_evaluations（刪除時 CASCADE）
+matching_benchmark_suites ──< matching_benchmark_cases ──< matching_benchmark_ratings
+
+（──< ＝一對多；>── ＝多對一）
 ```
 
-**人才狀態機**：
+### 人才狀態機
 
-```mermaid
-stateDiagram-v2
-    [*] --> new
-    new --> contacted
-    contacted --> interviewing
-    interviewing --> hired
-    new --> declined
-    contacted --> declined
-    interviewing --> declined
-    declined: declined／withdrawn／archived
-    note right of declined
-        黑名單非狀態：is_blacklisted 旗標
-        任一狀態可設，連動 gate 排除
-    end note
+```
+new → contacted → interviewing → hired
+         │             │
+         └──────┬──────┘
+                ▼
+   declined（婉拒）／withdrawn（撤回）／archived（歸檔）
 ```
 
-**需求單狀態機**：`draft → submitted → approved → sourcing ⇄ interviewing → filled → closed`；submitted 可退回 `returned`（修改後重送）；任一狀態可 `closed` 結案。合法轉換由後端 `ALLOWED_REQUISITION_TRANSITIONS` 統一檢核，不合法轉換回 409；轉入 filled／closed 時寫入 `filled_at`／`closed_at`（time-to-fill 報表基礎）。
+黑名單非狀態：以 `is_blacklisted` 旗標標記，任一狀態可設定並連動配對 gate 排除。
 
-**關鍵 JSON 結構**：
+### 需求單狀態機
+
+`draft → submitted → approved → sourcing ⇄ interviewing → filled → closed`；submitted 可退回 `returned`（修改後重送）；任一狀態可 `closed` 結案。合法轉換由後端 `ALLOWED_REQUISITION_TRANSITIONS` 統一檢核，不合法轉換回 409；轉入 filled／closed 時寫入 `filled_at`／`closed_at`（time-to-fill 報表基礎）。
+
+### 關鍵 JSON 結構
 
 | 結構 | 所在欄位 | 內容 |
 |---|---|---|
@@ -487,11 +498,15 @@ stateDiagram-v2
 | `field_confidence` | resume_files | `{"name":0.99,"email":0.62,…}` 逐欄位信心 |
 | `match_weights` | job_requisitions | required/preferred_skills、required_skill_ratio、require_* gate 開關 |
 
-**主要索引**（candidates）：`email_norm`、`phone_norm`、`status`、`city`、`retention_until`、`dedup_hash`。模糊搜尋以 ILIKE 複合查詢實作，量級成長後再評估 pg_trgm。
+### 主要索引
 
-### 4.5 成員函數（關鍵服務函式與公開介面）
+candidates：`email_norm`、`phone_norm`、`status`、`city`、`retention_until`、`dedup_hash`。模糊搜尋以 ILIKE 複合查詢實作，量級成長後再評估 pg_trgm。
 
-**API 公開介面（摘要）**——完整契約以開發環境 `/docs`（OpenAPI）為準，導覽見交接手冊第 05 章：
+## 4.5 成員函數（關鍵服務函式與公開介面）
+
+### API 公開介面（摘要）
+
+完整契約以開發環境 `/docs`（OpenAPI）為準，導覽見交接手冊第 05 章：
 
 | 路由群組 | 用途 | 權限 |
 |---|---|---|
@@ -506,9 +521,15 @@ stateDiagram-v2
 | `/talent-retention/*` | 保存政策、逐人覆寫、dry-run 與清理 | A H |
 | `/admin/*` | 使用者、部門、字典、設定、稽核、系統問題、DB 瀏覽 | IT A（部分開放 HR） |
 
-**逐模組服務函式一覽**（`backend/app/services/`；2026-09-01 自程式碼逐字抽取，僅列公開函式與核心機制、私有輔助函式略過，完整簽章以程式碼為準）：
+（權限代號：A=相容管理員、H=HR、M=主管、IT=資訊管理員。）
 
-**matching.py** — 履歷—職缺媒合計分引擎：技能／相關性／年資／薪資／學歷／地點六維加權評分、批次重算與成效評估。
+### 逐模組服務函式一覽
+
+以下自 `backend/app/services/` 程式碼逐字抽取（2026-09-01）；僅列公開函式與核心機制、私有輔助函式略過，完整簽章以程式碼為準。
+
+### matching.py — 履歷—職缺媒合計分引擎
+
+技能／相關性／年資／薪資／學歷／地點六維加權評分、批次重算與成效評估。
 
 | 函式 | 職責 |
 |---|---|
@@ -519,7 +540,9 @@ stateDiagram-v2
 | `assess_matching_readiness(results)` | 彙整目前結果是否具備「技能優先」試辦條件（前五名精確率、資料完整度、平均分等） |
 | `evaluate_matching(results)` | 以人工 `status` 標註為 ground truth 評估精確率／召回率／校準度；資料不足回 None 而非 0 |
 
-**resume_parser.py** — 履歷檔案文字擷取與結構化解析：PDF／DOCX 取文、OCR 雜訊正規化、平台版型辨識與信心度評級。
+### resume_parser.py — 履歷文字擷取與結構化解析
+
+PDF／DOCX 取文、OCR 雜訊正規化、平台版型辨識與信心度評級。
 
 | 函式 | 職責 |
 |---|---|
@@ -531,7 +554,9 @@ stateDiagram-v2
 | `_structured_pdf_payload(path)` | 偵測並解出 PDF 內嵌的 THR1 結構化 payload，回傳 `(payload, verified)` |
 | `_verify_structured_signature(...)` | HMAC 驗章；偽造的 THR1 前綴不得繞過複核，未驗過僅給 0.75 信心並強制人工審 |
 
-**interview_scoring.py** — 由履歷媒合分與兩階段面談的五項分數推導加權「綜合分數」並存回應徵；嚴禁碰觸 `JobApplication.status`。
+### interview_scoring.py — 綜合分數推導
+
+由履歷媒合分與兩階段面談的五項分數推導加權「綜合分數」並存回應徵；嚴禁碰觸 `JobApplication.status`。
 
 | 函式 | 職責 |
 |---|---|
@@ -545,7 +570,9 @@ stateDiagram-v2
 | `recompute_application_composite_score(db, application, requisition)` | 重算並寫回單筆應徵的綜合分與 breakdown，不動其他欄位 |
 | `recompute_requisition_composite_scores(db, requisition)` | 權重變更或重新媒合後以現行權重重推整張職缺，確保同一名單同尺規 |
 
-**storage.py（含 file_scanning.py）** — 履歷檔案儲存抽象層與上傳安全管線：路徑防穿越、檔案魔數驗證、掃毒政策與隔離區暫存；掃描實作在 file_scanning.py。
+### storage.py（含 file_scanning.py）— 儲存抽象層與上傳安全管線
+
+路徑防穿越、檔案魔數驗證、掃毒政策與隔離區暫存；掃描實作在 file_scanning.py。
 
 | 函式 | 職責 |
 |---|---|
@@ -560,7 +587,7 @@ stateDiagram-v2
 | `prepare_resume_upload(upload, ...)`（async） | 上傳主流程：白名單驗證、串流寫入隔離區限制大小、計 SHA-256、驗簽章與掃毒 |
 | （file_scanning.py）`ClamAVScanner.scan(path)` | clamd instream 掃描：OK→CLEAN、FOUND→INFECTED、連線錯誤→UNAVAILABLE；`UnavailableScanner` 為開發用空掃描器，另定義 `ScanStatus`／`ScanResult`／`FileScanner` 型別 |
 
-**talent_retention.py** — 保存年限政策、到期資料清除與檔案刪除 outbox。
+### talent_retention.py — 保存年限政策與到期清除
 
 | 函式 | 職責 |
 |---|---|
@@ -572,7 +599,9 @@ stateDiagram-v2
 | `process_pending_storage_deletions(db, ...)` | 批次消化 outbox 實際刪檔；失敗僅記例外類別名（不外洩 locator）並保留重試 |
 | `purge_expired_candidates(db, dry_run=True, ...)` | 不可逆清除到期人選，同一交易內建立檔案刪除任務；支援 dry-run 覆核 |
 
-**security.py** — 認證授權基礎設施：scrypt 密碼雜湊、HS256 JWT 簽發驗證、refresh token 輪替與稽核。
+### security.py — 認證授權基礎設施
+
+scrypt 密碼雜湊、HS256 JWT 簽發驗證、refresh token 輪替與稽核。
 
 | 函式 | 職責 |
 |---|---|
@@ -587,7 +616,9 @@ stateDiagram-v2
 | `write_audit(db, actor, action, resource_type, ...)` | 寫入 `AuditLog` 稽核列（僅 add，不 commit） |
 | `bootstrap_admin(db)` | 僅依環境設定冪等建立首位管理員；密碼少於 12 字元拋錯 |
 
-**consent.py** — 版本化告知同意的業務規則（個資法 §8／§9），維護「同時僅一份生效告知」不變量。
+### consent.py — 版本化告知同意
+
+個資法 §8／§9 的業務規則，維護「同時僅一份生效告知」不變量。
 
 | 函式 | 職責 |
 |---|---|
@@ -598,7 +629,9 @@ stateDiagram-v2
 | `withdraw_consent(db, consent, ...)` | 撤回所有未結案同意，並把 `retention_until` 設為當日以立即停止下游使用 |
 | `activate_notice(db, notice)` | 使指定告知成為唯一生效版本，其餘一律停用 |
 
-**deidentification.py** — 履歷去識別化：允許清單重組安全欄位、產出去識別 PDF、殘留個資掃描驗證與人工上傳／審核流程。
+### deidentification.py — 履歷去識別化
+
+允許清單重組安全欄位、產出去識別 PDF、殘留個資掃描驗證與人工上傳／審核流程。
 
 | 函式 | 職責 |
 |---|---|
@@ -612,7 +645,9 @@ stateDiagram-v2
 | `reject_deidentified_document(db, document, reviewer)` | 將 `review_required` 版本退回 `failed` 並記錄審核者 |
 | `read_verified_deidentified_file(document, storage)` | 僅在大小與 SHA-256 仍符合不可變 metadata 時讀出衍生檔，否則拋完整性錯誤 |
 
-**reports.py** — 招募營運報表查詢：漏斗、補實天數、來源成效與人才庫分布，一致排除示範資料。
+### reports.py — 招募營運報表查詢
+
+漏斗、補實天數、來源成效與人才庫分布，一致排除示範資料。
 
 | 函式 | 職責 |
 |---|---|
@@ -625,16 +660,14 @@ stateDiagram-v2
 
 另註：上表之外的兩個關鍵函式——`services/initial_data.py` 的 `seed_initial_data()`（production／staging 一律拒絕載入種子資料）、`backend/run_backend.py` 的 `reload_enabled()`（依 `BACKEND_RELOAD` 控制 uvicorn 自動重載，服務部署設 0）。
 
----
+# 5. 系統需求至系統設計之追溯
 
-## 5. 系統需求至系統設計之追溯
-
-### 5.1 追溯工具（GitHub）
+## 5.1 追溯工具（GitHub）
 
 | 項目 | 內容 |
 |---|---|
 | Repository | `github.com/yunzhenz-chainwin/Human-resources`（origin） |
-| 主線分支 | `main`；功能分支 `agent/<feature>`（現行：`agent/role-scoped-interview-questions`） |
+| 主線分支 | `main`；功能分支 `agent/<feature>`（本輪：`agent/role-scoped-interview-questions`） |
 | CI | GitHub Actions：`.github/workflows/backend-postgres.yml`（後端＋PostgreSQL）、`.github/workflows/e2e.yml`（Playwright） |
 | 自動驗證 | CI 內容：後端 pytest＋ruff（PostgreSQL）、雙前端 build、Playwright e2e；本機驗證另含雙前端 typecheck。2026-09-01 實測：後端 313 項、e2e 13 條、ruff、typecheck＋build 全數通過 |
 
@@ -660,7 +693,7 @@ ci: install the CJK font and OCR toolchain the backend tests need
 
 本輪成果已於 2026-09-01 以 fast-forward 直接併入 main（`8170f92..f5a7227`）。未走 PR：單人開發無第二審查者，由 repo 權責者決定直接合併；全量 CI 於 push to main 自動觸發（兩個 workflow 均設 `on: push: branches: [main]`），本機驗證（後端 313 項、e2e 13 條、ruff、雙前端 typecheck＋build）已先行全綠。
 
-### 5.2 需求 ↔ 設計 ↔ 驗證追溯表
+## 5.2 需求 ↔ 設計 ↔ 驗證追溯表
 
 | 需求（US／能力） | 設計落點（本文件） | 實作模組 | 驗證 |
 |---|---|---|---|
@@ -675,11 +708,9 @@ ci: install the CJK font and OCR toolchain the backend tests need
 | 公開投遞＋版本化同意 | §4.1 流程一、§4.2.4 | consent／public | e2e「免認證投遞」；後端 `test_public_api.py`（同意版本 409） |
 | 兩階段盲評＋綜合分 | §4.2.3 | interview_records＋interview_scoring | 評分算術單元測試；e2e `interview-scoring` 6 條 |
 
----
+# 6. 附錄
 
-## 6. 附錄
-
-### 6.1 參考書目
+## 6.1 參考書目
 
 1. 《TalentHub 系統文件與交接手冊》docs/TalentHub_系統文件與交接手冊.docx（2026-08-27，本文件主要來源；主管摘要＋導讀＋編號章 01–08、10–13（09 刻意從缺）＋附錄 A–D）
 2. 《在 macOS 上重建 TalentHub 開發環境》docs/SETUP-macOS.md（2026-09-01）
@@ -687,7 +718,7 @@ ci: install the CJK font and OCR toolchain the backend tests need
 4. FastAPI 官方文件（fastapi.tiangolo.com）、Vue 3 官方文件（vuejs.org）、SQLAlchemy 2 文件、PostgreSQL 16 文件、Playwright 文件
 5. 《個人資料保護法》及其施行細則（全國法規資料庫 law.moj.gov.tw）——個資蒐集、處理、利用、保存與當事人權利之法遵依據；系統對應設計見交接手冊第 08 章
 
-### 6.2 專有名詞解釋
+## 6.2 專有名詞解釋
 
 | 名詞 | 意思 |
 |---|---|
@@ -702,7 +733,7 @@ ci: install the CJK font and OCR toolchain the backend tests need
 | Watchdog | 每 5 分鐘檢查服務健康、離線即自動重啟的排程機制 |
 | Outbox | 刪除實體檔案失敗時的持久化重試佇列（retention_storage_deletions） |
 
-### 6.3 中英對照
+## 6.3 中英對照
 
 | 中文 | English |
 |---|---|
@@ -729,4 +760,4 @@ ci: install the CJK font and OCR toolchain the backend tests need
 
 ---
 
-*本文件由交接手冊內容重組而成；與程式碼或手冊不一致時，以程式碼與 OpenAPI 為準，並請回報修正本文件。*
+*本文件由交接手冊內容重組而成；與程式碼或手冊不一致時，以程式碼與 OpenAPI 為準，並請回報修正本文件。Word 版由 `node scripts/convert-docs.mjs` 自 `docs/src/` 產生。*

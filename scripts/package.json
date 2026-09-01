@@ -1,0 +1,10 @@
+{
+  "name": "talenthub-docs-tools",
+  "private": true,
+  "description": "Markdown → Word converter for the TalentHub doc set (docs/src → docs). Run: node scripts/convert-docs.mjs",
+  "type": "module",
+  "dependencies": {
+    "docx": "^8.5.0",
+    "marked": "^12.0.0"
+  }
+}

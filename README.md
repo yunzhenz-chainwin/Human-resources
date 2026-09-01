@@ -39,11 +39,12 @@ TalentHub 是公司內部的招募工作平台，不是取代 HR 的自動錄取
 
 ## 文件導覽
 
-全套系統文件與交接文件已合併為單一手冊（163 頁，含頁碼目錄）：
+全套系統文件與交接文件已合併為單一手冊（163 頁，含頁碼目錄）；另有依規格書（SDD）格式重排的系統規格書：
 
 | 文件 | 內容 |
 |---|---|
 | [docs/TalentHub_系統文件與交接手冊.docx](docs/TalentHub_系統文件與交接手冊.docx) | 開頭是「誰要找什麼看第幾章」導讀與含頁碼總目錄；第 01–13 章為核心文件（規劃、架構、資料庫、解析、API、前端、時程、資安、維運手冊、媒合、backlog、面試評分），附錄 A–C 為 Gemini 產題／保存期限 worker／媒合基準 Runbook，附錄 D 為文件沿革與主來源規則 |
+| [docs/TalentHub_系統規格書.docx](docs/TalentHub_系統規格書.docx) | 系統規格書（SDD）v1.0：系統概述、初步／細部設計、需求追溯與附錄。Markdown 原始檔在 `docs/src/`，修改後執行 `node scripts/convert-docs.mjs` 重新產生 Word |
 
 歷史的分冊 `.docx` 與更早的 Markdown 版本皆保留於 git 歷史。
 
