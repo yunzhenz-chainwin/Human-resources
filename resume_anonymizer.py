@@ -317,16 +317,23 @@ def render_docx(text: str) -> bytes:
 
 def _pdf_font_path() -> Path:
     """Return a locally available font with Traditional Chinese glyphs."""
+    # PDF_CJK_FONT_PATH pins the font on a host that keeps it elsewhere; the
+    # macOS entries mirror app/services/candidate_profile_pdf.py.
+    override = os.environ.get("PDF_CJK_FONT_PATH")
     candidates = [
+        *([Path(override)] if override else []),
         Path(r"C:\Windows\Fonts\msjh.ttc"),
         Path(r"C:\Windows\Fonts\mingliu.ttc"),
+        Path("/Library/Fonts/NotoSansCJK-Regular.ttc"),
+        Path.home() / "Library/Fonts/NotoSansCJK-Regular.ttc",
+        Path("/System/Library/Fonts/PingFang.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
     ]
     for path in candidates:
         if path.is_file():
             return path
-    raise RuntimeError("找不到支援繁體中文的 PDF 字型（需要 Microsoft JhengHei 或 Noto Sans CJK）")
+    raise RuntimeError("找不到支援繁體中文的 PDF 字型（需要 Microsoft JhengHei、Noto Sans CJK 或 PingFang）")
 
 
 def render_pdf(text: str) -> bytes:
