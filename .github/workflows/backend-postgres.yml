@@ -6,6 +6,8 @@ on:
       - "backend/**"
       - "deploy/**"
       - "*.ps1"
+      - "*.sh"
+      - "resume_anonymizer.py"
       - "*.bat"
       - ".github/workflows/backend-postgres.yml"
   push:
@@ -14,6 +16,8 @@ on:
       - "backend/**"
       - "deploy/**"
       - "*.ps1"
+      - "*.sh"
+      - "resume_anonymizer.py"
       - "*.bat"
       - ".github/workflows/backend-postgres.yml"
 
@@ -49,6 +53,23 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: backend/pyproject.toml
+      - name: Install the system packages the PDF and OCR tests need
+        # ubuntu-latest ships neither a CJK font nor an OCR toolchain, so the
+        # candidate-PDF renderer and the scanned-resume guard both fail on a bare
+        # runner. fonts-noto-cjk installs to the /usr/share/fonts path the three
+        # font lookups already search, and the OCR guard checks for chi_tra by
+        # name before it will run, so the language pack is not optional.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            fonts-noto-cjk tesseract-ocr tesseract-ocr-chi-tra poppler-utils
+      - name: Verify the OCR and font toolchain resolved
+        # Fail here with a readable message rather than inside a test assertion
+        # if a future runner image moves the font or drops a package.
+        run: |
+          test -f /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+          tesseract --list-langs | grep -qx chi_tra
+          command -v pdftoppm
       - name: Install backend
         run: python -m pip install -e ".[dev]"
       - name: Check single migration head

@@ -9,6 +9,8 @@ on:
       - "e2e/**"
       - "deploy/**"
       - "*.ps1"
+      - "*.sh"
+      - "resume_anonymizer.py"
       - "*.bat"
       - ".github/workflows/e2e.yml"
   push:
@@ -20,6 +22,8 @@ on:
       - "e2e/**"
       - "deploy/**"
       - "*.ps1"
+      - "*.sh"
+      - "resume_anonymizer.py"
       - "*.bat"
       - ".github/workflows/e2e.yml"
 
