@@ -4,10 +4,10 @@
 |---|---|
 | 專案名稱 | TalentHub — 企業人才庫與智慧媒合系統 |
 | 文件名稱 | 軟體系統規格書（Software Design Document, SDD） |
-| 文件版本 | v0.3 |
+| 文件版本 | v1.0（定稿） |
 | 文件日期 | 2026-09-01 |
 
-> 標記說明：🟡【待補充】＝待回填內容（現僅 §5.1 PR 資訊一處）；⚪【現況註記】＝已查證的設計與實作落差，保留即可。
+> 標記說明：⚪【現況註記】＝已查證的設計與實作落差，保留即可。
 
 [TOC]
 
@@ -658,7 +658,7 @@ test: cover the interview scoring arithmetic with unit tests
 ci: install the CJK font and OCR toolchain the backend tests need
 ```
 
-> 🟡【待補充】全文件唯一待補項：功能分支合併主線的 PR 尚未建立（README 里程碑表的 M5-A 發布閘門；手冊第 07 章 0-E 亦列為 🟡 未過），目前無編號可填；PR 建立並合併後，回填 PR 編號、審查者與合併日期即可定稿。
+本輪成果已於 2026-09-01 以 fast-forward 直接併入 main（`8170f92..f5a7227`）。未走 PR：單人開發無第二審查者，由 repo 權責者決定直接合併；全量 CI 於 push to main 自動觸發（兩個 workflow 均設 `on: push: branches: [main]`），本機驗證（後端 313 項、e2e 13 條、ruff、雙前端 typecheck＋build）已先行全綠。
 
 ### 5.2 需求 ↔ 設計 ↔ 驗證追溯表
 
