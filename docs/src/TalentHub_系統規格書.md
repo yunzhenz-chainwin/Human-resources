@@ -137,7 +137,7 @@ Human-resources/
 ├── career-frontend/         # 公開職涯站（Vue 3 SPA，dev port 5174）
 ├── e2e/                     # Playwright 端對端測試
 ├── deploy/                  # docker-compose.yml、compose.storage.yml、windows-lan/
-├── docs/                    # 交接手冊 docx、SETUP-macOS.md、本文件（src/ 為 Markdown 原始檔）
+├── docs/                    # 交接手冊 docx、本文件（src/ 為 Markdown 原始檔）
 ├── scripts/                 # convert-docs.mjs（docs/src → docs 的 Word 產生器）
 └── samples/                 # 虛構種子資料（db-seed/）
 ```
@@ -177,7 +177,7 @@ Human-resources/
 | 資料庫 | PostgreSQL 16（正式）；SQLite（單元測試與本機驗證） |
 | 掃毒 | ClamAV 1.5.x（clamd，loopback 3310） |
 | 容器化 | Docker Compose（deploy/docker-compose.yml；選配 compose.storage.yml 疊加 MinIO＋ClamAV） |
-| 作業系統 | Windows Server（現行內網 LAN 主機）／macOS（開發，見 docs/SETUP-macOS.md）／Linux（建議正式部署） |
+| 作業系統 | Windows Server（現行內網 LAN 主機）／Linux（建議正式部署） |
 | 瀏覽器支援 | Chrome／Edge 最新兩個版本 |
 
 Node.js 版本現況：`frontend`、`career-frontend`、`e2e` 三個 package.json 均未以 `engines` 鎖定；實測相容版本為 **Node 22**（CI 的 e2e workflow 指定 `node-version: "22"`）與 **Node 24**（內網 LAN 主機實測 v24.14.1、npm 11）。交接後建議以 Node 22 LTS 為開發基準。
@@ -713,10 +713,9 @@ ci: install the CJK font and OCR toolchain the backend tests need
 ## 6.1 參考書目
 
 1. 《TalentHub 系統文件與交接手冊》docs/TalentHub_交接手冊.docx（2026-08-27，本文件主要來源；主管摘要＋導讀＋編號章 01–08、10–13（09 刻意從缺）＋附錄 A–D）
-2. 《在 macOS 上重建 TalentHub 開發環境》docs/SETUP-macOS.md（2026-09-01）
-3. 《TalentHub Windows LAN deployment》deploy/windows-lan/README.md（2026-08-27，內網部署現況）
-4. FastAPI 官方文件（fastapi.tiangolo.com）、Vue 3 官方文件（vuejs.org）、SQLAlchemy 2 文件、PostgreSQL 16 文件、Playwright 文件
-5. 《個人資料保護法》及其施行細則（全國法規資料庫 law.moj.gov.tw）——個資蒐集、處理、利用、保存與當事人權利之法遵依據；系統對應設計見交接手冊第 08 章
+2. 《TalentHub Windows LAN deployment》deploy/windows-lan/README.md（2026-08-27，內網部署現況）
+3. FastAPI 官方文件（fastapi.tiangolo.com）、Vue 3 官方文件（vuejs.org）、SQLAlchemy 2 文件、PostgreSQL 16 文件、Playwright 文件
+4. 《個人資料保護法》及其施行細則（全國法規資料庫 law.moj.gov.tw）——個資蒐集、處理、利用、保存與當事人權利之法遵依據；系統對應設計見交接手冊第 08 章
 
 ## 6.2 專有名詞解釋
 
