@@ -1,7 +1,7 @@
 # 在 macOS 上重建 TalentHub 開發環境
 
 這份文件是把專案從 Windows 主機搬到 MacBook 之後的重建步驟。
-Windows 端的說明仍以 README 與 `docs/TalentHub_系統文件與交接手冊.docx` 為準。
+Windows 端的說明仍以 README 與 `docs/TalentHub_交接手冊.docx` 為準。
 
 ## 1. 安裝相依工具（只需一次）
 

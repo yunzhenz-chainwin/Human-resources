@@ -32,6 +32,6 @@ python seed_initial_data.py
 
 ## 參考與提醒
 
-- 資料庫設計說明見手冊第 03 章（[docs/TalentHub_系統文件與交接手冊.docx](../docs/TalentHub_系統文件與交接手冊.docx)）；實際結構以 `backend/app/models/` 與 `backend/alembic/versions/` 為準。
+- 資料庫設計說明見手冊第 03 章（[docs/TalentHub_交接手冊.docx](../docs/TalentHub_交接手冊.docx)）；實際結構以 `backend/app/models/` 與 `backend/alembic/versions/` 為準。
 - **全部資料為虛構**：姓名、聯絡方式、學經歷、公司與自傳皆為測試用途捏造，與真實個人無涉，不得用於任何正式用途。
 - 這批樣本為理想化的乾淨資料，僅適合功能連通性測試；正式上線的履歷解析器仍必須以合法取得、經授權且去識別的真實平台（104／1111 等）下載樣本校準版面與欄位擷取規則。

@@ -42,7 +42,7 @@ TalentHub 系統規格書
 
 ## 1.1 文件目的
 
-本文件為 TalentHub 系統之軟體系統規格書（SDD），涵蓋系統之初步設計與細部設計，使系統開發者、維護者與交接者得以確認系統的實際需求與設計決策，並作為後續開發與維運時遵循的準繩。本文件內容整理自《TalentHub 系統文件與交接手冊》（docs/TalentHub_系統文件與交接手冊.docx，2026-08-27 定版）並與 2026-09-01 之程式碼現況核對。
+本文件為 TalentHub 系統之軟體系統規格書（SDD），涵蓋系統之初步設計與細部設計，使系統開發者、維護者與交接者得以確認系統的實際需求與設計決策，並作為後續開發與維運時遵循的準繩。本文件內容整理自《TalentHub 系統文件與交接手冊》（docs/TalentHub_交接手冊.docx，2026-08-27 定版）並與 2026-09-01 之程式碼現況核對。
 
 ## 1.2 文件範圍
 
@@ -712,7 +712,7 @@ ci: install the CJK font and OCR toolchain the backend tests need
 
 ## 6.1 參考書目
 
-1. 《TalentHub 系統文件與交接手冊》docs/TalentHub_系統文件與交接手冊.docx（2026-08-27，本文件主要來源；主管摘要＋導讀＋編號章 01–08、10–13（09 刻意從缺）＋附錄 A–D）
+1. 《TalentHub 系統文件與交接手冊》docs/TalentHub_交接手冊.docx（2026-08-27，本文件主要來源；主管摘要＋導讀＋編號章 01–08、10–13（09 刻意從缺）＋附錄 A–D）
 2. 《在 macOS 上重建 TalentHub 開發環境》docs/SETUP-macOS.md（2026-09-01）
 3. 《TalentHub Windows LAN deployment》deploy/windows-lan/README.md（2026-08-27，內網部署現況）
 4. FastAPI 官方文件（fastapi.tiangolo.com）、Vue 3 官方文件（vuejs.org）、SQLAlchemy 2 文件、PostgreSQL 16 文件、Playwright 文件
